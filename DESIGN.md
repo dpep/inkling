@@ -457,8 +457,10 @@ canonical = "white_check_mark"
 aliases   = ["heavy_check_mark", "eyes", "approved", "lgtm"]
 
 [status.merged]
-canonical = "merged"
-aliases   = ["purple_heart", "shipit"]
+# Defaults are emoji every workspace has. `:merged:` and `:shipit:` are common
+# but not universal — adding one that doesn't exist fails with invalid_name.
+canonical = "purple_heart"
+aliases   = ["merged", "shipit"]
 
 # [status.closed]
 # enabled = false            # keep the mapping, stop drawing it

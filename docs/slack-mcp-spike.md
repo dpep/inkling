@@ -65,6 +65,32 @@ Better than expected: the adapter can match on stable Slack error codes rather t
 Not observed (can't be provoked on demand): rate limiting. The failure table's claim that limits
 arrive as model-mediated errors rather than HTTP headers still holds — there is no header to read.
 
+## Cost, measured
+
+Every `claude -p` invocation pays to load the system prompt plus every
+connected MCP server's tool definitions — roughly 95k cached-read tokens and
+28k cache-creation tokens, regardless of how small the actual task is.
+
+| Model | Cost per call | Wall time |
+| --- | --- | --- |
+| Opus (default) | ~$0.34 | ~9s |
+| Haiku | ~$0.015–0.09 | ~25s |
+
+Haiku is 4–20× cheaper and correct here, because the bridge executes a tool
+and reformats the result — there is no judgment to make. It is slower per
+call, which doesn't matter for a cron job.
+
+The Slack MCP is a claude.ai account connection rather than a local stdio
+server, so `--strict-mcp-config` can't trim the tool definitions down. That
+makes *number of invocations* the only real cost lever, which is why the
+adapter batches: one search per scope, one reactions read per channel (not per
+message), and adds only when reconciliation actually calls for one. With the
+age-based backoff, a steady-state run costs a couple of invocations.
+
+If this ever runs at a cadence where that adds up, the fix isn't a cheaper
+prompt — it's the Slack Web API adapter, which removes the model from the path
+entirely.
+
 ## Confirmed absences
 
 No remove-reaction tool exists. Retraction stays deferred, and the ledger stays the thing that
