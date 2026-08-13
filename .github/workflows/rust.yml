@@ -1,0 +1,35 @@
+name: Rust
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [ opened, edited, synchronize ]
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Tests first so a lint nit never hides a real failure; `if: always()`
+      # so one run reports every result instead of one at a time.
+      - name: test
+        run: cargo test
+        if: always()
+
+      - name: fmt
+        run: cargo fmt --check
+        if: always()
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+        if: always()

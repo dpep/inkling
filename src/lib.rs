@@ -1,0 +1,6 @@
+//! Inkling turns the current state of things referenced in Slack into small,
+//! persistent signals on the messages that referenced them.
+//!
+//! See `DESIGN.md` for the architecture and `PLAN.md` for what is built when.
+
+pub mod domain;

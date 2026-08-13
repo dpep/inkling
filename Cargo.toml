@@ -1,0 +1,13 @@
+[package]
+name = "inkling"
+version = "0.1.0"
+edition = "2024"
+description = "Annotates Slack messages with the current state of the things they link to."
+license = "MIT"
+repository = "https://github.com/dpep/inkling"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+iriq = { version = "0.34", default-features = false }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
