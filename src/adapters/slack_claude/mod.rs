@@ -27,6 +27,10 @@ const SEARCH_TOOL: &str = "mcp__claude_ai_Slack__slack_search_public_and_private
 const READ_TOOL: &str = "mcp__claude_ai_Slack__slack_read_channel";
 const REACT_TOOL: &str = "mcp__claude_ai_Slack__slack_add_reaction";
 const CHANNELS_TOOL: &str = "mcp__claude_ai_Slack__slack_search_channels";
+const THREAD_TOOL: &str = "mcp__claude_ai_Slack__slack_read_thread";
+/// Only ever reachable from `slackmcp post` — deliberately not from anything
+/// Inkling's run loop can call. Inkling annotates; it does not talk.
+const SEND_TOOL: &str = "mcp__claude_ai_Slack__slack_send_message";
 
 /// Slack channel IDs look like `C0BPR3AEAG3` — a `C`, `D`, or `G` followed by
 /// uppercase alphanumerics. Anything else is a human-typed handle.
@@ -263,6 +267,60 @@ impl<R: Runner> SlackClaude<R> {
             .into_iter()
             .map(|r| (MessageId::new(channel_id, &r.ts), r.names))
             .collect())
+    }
+
+    /// A thread's parent message and every reply, with reactions.
+    pub fn thread(&self, channel_id: &str, parent_ts: &str) -> Result<Vec<Message>, SourceError> {
+        let prompt = format!(
+            "Call {THREAD_TOOL} with these exact arguments:\n\
+             channel_id: {channel_id:?}\n\
+             message_ts: {parent_ts:?}\n\
+             limit: 100\n\
+             response_format: \"detailed\"\n\n\
+             Then output ONLY this JSON, no commentary and no code fence:\n\
+             {{\"messages\": [{{\"channel_id\": \"...\", \"ts\": \"...\", \
+             \"user_id\": \"...\", \"permalink\": \"\", \"text\": \"...\"}}]}}\n\n\
+             Include the parent message first, then every reply in order. \
+             Copy each field verbatim.",
+        );
+        let hits = self
+            .attempt(&prompt, &[THREAD_TOOL], |raw| {
+                parse_search(raw).map_err(Retry::Again)
+            })
+            .map_err(SourceError::Search)?;
+        Ok(hits.into_iter().map(SearchHit::into_message).collect())
+    }
+
+    /// Post a message, optionally as a thread reply.
+    ///
+    /// Separate from everything the run loop touches, and gated behind its own
+    /// tool allowlist — reaching this from a reconciliation path would take a
+    /// deliberate code change, not a clever Slack message.
+    pub fn post(
+        &self,
+        channel_id: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<(), SourceError> {
+        let threading = thread_ts.map_or_else(String::new, |ts| format!("thread_ts: {ts:?}\n"));
+        let prompt = format!(
+            "Call {SEND_TOOL} with these exact arguments:\n\
+             channel_id: {channel_id:?}\n\
+             {threading}\
+             message: {text:?}\n\n\
+             Then output ONLY the word OK, or the error code if it failed.",
+        );
+        self.attempt(&prompt, &[SEND_TOOL], |raw| {
+            let lower = raw.to_lowercase();
+            if lower.contains("ok") || lower.contains("success") {
+                Ok(())
+            } else if lower.contains("not_found") {
+                Err(Retry::Fatal(raw.trim().to_string()))
+            } else {
+                Err(Retry::Again(raw.trim().to_string()))
+            }
+        })
+        .map_err(SourceError::Transport)
     }
 
     /// Run a raw Slack search query, for callers that already speak the

@@ -93,14 +93,37 @@ enum Command {
         #[arg(long, default_value = "0")]
         since: String,
     },
-    /// Add a reaction to a message.
+    /// Add one or more reactions to a message.
     React {
         /// Channel ID or handle.
         channel: String,
         /// Slack message timestamp, e.g. 1786596050.245879
         ts: String,
-        /// Emoji name, with or without colons.
-        emoji: String,
+        /// Emoji names, with or without colons. An emoji the workspace
+        /// doesn't have fails with invalid_name; Slack exposes no way to
+        /// list the available ones.
+        #[arg(required = true)]
+        emoji: Vec<String>,
+    },
+    /// Read a thread: the parent message and every reply.
+    Thread {
+        /// Channel ID or handle.
+        channel: String,
+        /// Timestamp of the parent message.
+        ts: String,
+    },
+    /// Post a message, or reply in a thread.
+    ///
+    /// The only subcommand that writes anything beyond a reaction. Inkling's
+    /// own run loop never reaches this.
+    Post {
+        /// Channel ID or handle.
+        channel: String,
+        /// Message text.
+        text: String,
+        /// Reply to this thread rather than posting to the channel.
+        #[arg(long)]
+        thread: Option<String>,
     },
     /// Resolve a channel handle to its ID.
     Channel {
@@ -214,20 +237,56 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         Command::React { channel, ts, emoji } => {
             let id = slack.resolve_channel(channel).map_err(|e| e.to_string())?;
-            let emoji = ReactionName::new(emoji);
-            slack
-                .add(&MessageId::new(&id, ts), &emoji)
-                .map_err(|e| e.to_string())?;
+            let target = MessageId::new(&id, ts);
 
-            let rows = vec![ReactOut {
-                channel_id: id,
-                ts: ts.clone(),
-                emoji: emoji.to_string(),
-                added: true,
-            }];
+            // One bad emoji shouldn't discard the ones that worked, so each is
+            // reported on its own row.
+            let mut rows = Vec::new();
+            let mut failures = Vec::new();
+            for name in emoji {
+                let name = ReactionName::new(name);
+                match slack.add(&target, &name) {
+                    Ok(()) => rows.push(ReactOut {
+                        channel_id: id.clone(),
+                        ts: ts.clone(),
+                        emoji: name.to_string(),
+                        added: true,
+                    }),
+                    Err(error) => failures.push(format!(":{name}: {error}")),
+                }
+            }
             emit(format, &rows, |r| {
                 vec![format!("{}:{}", r.channel_id, r.ts), r.emoji.clone()]
+            })?;
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(failures.join("; "))
+            }
+        }
+        Command::Thread { channel, ts } => {
+            let id = slack.resolve_channel(channel).map_err(|e| e.to_string())?;
+            let messages = slack.thread(&id, ts).map_err(|e| e.to_string())?;
+            let rows: Vec<MessageOut> = messages.into_iter().map(Into::into).collect();
+            emit(format, &rows, |r| {
+                vec![
+                    format!("{}:{}", r.channel_id, r.ts),
+                    r.user_id.clone(),
+                    r.text.replace('\n', " "),
+                ]
             })
+        }
+        Command::Post {
+            channel,
+            text,
+            thread,
+        } => {
+            let id = slack.resolve_channel(channel).map_err(|e| e.to_string())?;
+            slack
+                .post(&id, text, thread.as_deref())
+                .map_err(|e| e.to_string())?;
+            println!("ok");
+            Ok(())
         }
         Command::Channel { name } => {
             let id = slack.resolve_channel(name).map_err(|e| e.to_string())?;

@@ -109,6 +109,12 @@ The ledger rule, which the MCP schema forces:
 Unprovable ownership is treated as not-owned, forever. The failure mode is a superseded emoji that
 never gets tidied, which is exactly the MVP's default behavior anyway.
 
+**This whole problem has an expiry date.** It exists because Inkling currently runs *as the user*,
+so nothing distinguishes its reactions from theirs. A Slack app runs as a bot with its own user ID,
+and `reactions.get` reports which users left each reaction — at which point ownership is directly
+observable and the ledger collapses into a cache. Worth knowing before investing further in it; see
+[docs/slack-app-roadmap.md](docs/slack-app-roadmap.md).
+
 This has a consequence worth stating plainly: reading existing reactions is not merely an
 optimization for staying quiet when a human already signaled. It is the only thing that can
 populate the ledger, and therefore the only thing that makes future retraction possible. That is
@@ -570,6 +576,11 @@ retraction plumbing gets designed then, against an adapter that can actually run
 Genuinely changes: the hosted version is push-driven. Slack Events deliver new messages instead of a
 search window; GitHub webhooks deliver state changes, inverting the lookup from "message →
 references" to "reference → messages." That needs an index keyed by reference.
+
+Research since confirmed this isn't merely preferable — it's forced. `search:read` is user-token
+only and on Slack's do-not-request list for Marketplace apps, so search-based discovery cannot
+survive the transition at all. Details, and the staged path there, in
+[docs/slack-app-roadmap.md](docs/slack-app-roadmap.md).
 
 The tracked-record store is the seed of exactly that index — it already holds
 `(message, references, last_state, applied)`. Building it now isn't just MVP bookkeeping; it's the
