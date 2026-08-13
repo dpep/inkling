@@ -3,4 +3,5 @@
 //!
 //! See `DESIGN.md` for the architecture and `PLAN.md` for what is built when.
 
+pub mod config;
 pub mod domain;
