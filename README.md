@@ -7,10 +7,66 @@ them — starting with GitHub pull requests and Slack reactions.
 Post a PR, and the message picks up an approval emoji when it's approved and a merge emoji when it
 lands. No bot replies, no channel noise; just the message you already wrote, annotated.
 
-Status: in development. Nothing runs end to end yet.
+Status: working end to end. Discovers messages, tracks the PRs they link to, and
+reacts as those PRs move.
 
 - [DESIGN.md](DESIGN.md) — the product concept, domain model, and architecture.
 - [PLAN.md](PLAN.md) — the milestones and what's built when.
+- [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md) — what the Slack MCP server
+  actually does, and what a bridge call costs.
+
+## Setup
+
+Write `~/.config/inkling/config.toml`:
+
+```toml
+[slack]
+personal = false                 # true to find your own posts anywhere
+user_id  = "U0E48AHQA"           # yours: slackmcp search 'from:@you' shows it
+channels = ["#eng-prs"]
+
+[filters]
+only_my_messages = true          # annotate only your posts — start here
+
+[github]
+token_command = "gh auth token"  # or token_env = "GITHUB_TOKEN"
+
+[status.approved]
+canonical = "white_check_mark"
+aliases   = ["done", "lgtm", "eyes"]
+
+[status.merged]
+canonical = "merged"
+aliases   = ["purple_heart", "shipit"]
+```
+
+Emoji vocabulary is entirely yours — `canonical` is what Inkling adds, `aliases`
+are what it accepts as someone having already said it. Only states listed here
+get a signal; `open`, `draft`, and `closed` stay silent unless you add them.
+
+```sh
+inkling check              # validate config, confirm credentials
+inkling run --dry-run      # see what it would do, change nothing
+inkling run                # do it
+inkling status             # window, tracked records
+```
+
+Start with `only_my_messages = true` and one channel. Every reaction it leaves is
+then on a post of yours, which is both a small blast radius and legible feedback.
+
+### From cron
+
+```cron
+*/20 * * * * /usr/local/bin/inkling run >> ~/.local/state/inkling/log 2>&1
+```
+
+Exit codes: `0` clean, `1` partial (some records failed and will retry), `2` the
+run failed. Cron mails you on nonzero.
+
+State lives at `~/.local/state/inkling/state.json` — readable, hand-editable, and
+safe to delete if you want Inkling to forget everything and rediscover. Deleting
+it also drops the record of which reactions were Inkling's own, so it will never
+retract those; it will simply stop claiming them.
 
 ## slackmcp
 
