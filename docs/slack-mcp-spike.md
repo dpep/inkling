@@ -74,7 +74,8 @@ that boot costs, measured on the same one-tool task:
 | --- | --- | --- | --- |
 | Default (opus, full prompt + tools) | $0.34 | 9s | 28k |
 | Haiku, default prompt + tools | $0.088 | 25s | 28k |
-| Haiku, `--tools ""`, minimal `--system-prompt` | **$0.059** | **4s** | 29k |
+| Haiku, `--tools ""`, minimal `--system-prompt`, cold cache | $0.059 | 4s | 29k |
+| …same, **warm cache** | **$0.018** | ~4s | 4k |
 | Haiku, plus `--strict-mcp-config` (no connectors) | $0.004 | 2s | 0 |
 
 So: **6× cheaper and 2× faster** than the default, from three flags —
@@ -87,7 +88,29 @@ The last row proves it: dropping the connectors takes the same call to $0.004.
 That cost is Slack's tools *plus* Gmail's, Google Calendar's, Drive's, and
 Remote's — Inkling uses three tools and pays for all of them.
 
-Two ways further down, neither taken yet:
+### The prompt cache carries across invocations — no daemon needed
+
+Measured: a second `claude -p` call, in a *separate process*, reads 76k tokens
+from cache and creates only 4k — $0.018 rather than $0.059. Changing
+`--allowedTools` between calls does not break it, so search, read, and react
+all share one cached prefix.
+
+This is worth knowing because it answers the obvious optimization: keeping a
+long-lived agent alive to amortize startup. **The prompt cache already does
+that**, without a daemon, a socket, a lifecycle, or crash recovery. Anthropic's
+cache TTL is an hour, comfortably longer than a 20-minute cron interval, so a
+steady-state run finds the prefix warm.
+
+What this does mean is that the *constant* system prompt is now load-bearing
+for cost, not just tidiness. Interpolating anything per-call into it — a
+channel name, a timestamp — would break the cache prefix and quadruple the
+price. The per-call variation belongs in the user message, where it already is.
+
+A daemon would only start to pay off if the cache TTL were shorter than the run
+interval, or if calls became frequent enough that latency dominated. Neither is
+true, and both would be better fixed by removing the model from the path.
+
+### Two ways further down, neither taken yet
 
 1. **Register Slack as a standalone remote MCP server.** The connectors live at
    `<service>.mcp.claude.com`, and Claude Code's local-OAuth blocklist covers

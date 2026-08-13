@@ -34,6 +34,11 @@ pub trait Runner {
 
 /// Replaces Claude Code's default system prompt, which is written for
 /// interactive coding and is pure overhead here.
+///
+/// Must stay constant across calls. The prompt cache is keyed on this prefix,
+/// and a warm cache is the difference between $0.018 and $0.059 per call —
+/// interpolating anything per-call into it (a channel, a timestamp) would
+/// break every cache hit. Per-call variation goes in the user message.
 const SYSTEM_PROMPT: &str = "You execute exactly one MCP tool call and return \
      its result in the requested format. No commentary, no follow-up actions.";
 
