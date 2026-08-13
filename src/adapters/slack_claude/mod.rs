@@ -80,7 +80,7 @@ impl<R: Runner> SlackClaude<R> {
                 Err(error) => last = error.to_string(),
             }
             if attempt + 1 < ATTEMPTS {
-                eprintln!("inkling: bridge attempt {} failed: {last}", attempt + 1);
+                tracing::warn!(attempt = attempt + 1, error = %last, "bridge call failed, retrying");
             }
         }
         Err(format!("after {ATTEMPTS} attempts: {last}"))

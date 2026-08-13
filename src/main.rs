@@ -7,6 +7,7 @@ use inkling::adapters::slack_claude::{ClaudeRunner, SlackClaude};
 use inkling::adapters::store_json::{JsonStore, Store};
 use inkling::app::{Report, Run};
 use inkling::config::Config;
+use inkling::obs;
 use inkling::ports::SystemClock;
 use inkling::secret::Secret;
 use std::path::PathBuf;
@@ -36,6 +37,19 @@ struct Common {
     /// State file. Defaults to $XDG_STATE_HOME/inkling/state.json
     #[arg(long, global = true)]
     state: Option<PathBuf>,
+    /// More detail. -v adds per-message decisions, -vv adds message text.
+    #[arg(long, short, global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Structured logs, for a collector rather than a person.
+    #[arg(long, global = true)]
+    log_json: bool,
+    /// Where daily log files go. Defaults beside the state file; "off"
+    /// disables file logging.
+    #[arg(long, global = true)]
+    log_dir: Option<String>,
+    /// Delete log files older than this many days.
+    #[arg(long, global = true, default_value_t = 14)]
+    log_keep_days: usize,
 }
 
 #[derive(Subcommand)]
@@ -61,6 +75,31 @@ enum Command {
 
 fn main() {
     let cli = Cli::parse();
+
+    let directory = match cli.common.log_dir.as_deref() {
+        Some("off") => None,
+        Some(path) => Some(PathBuf::from(path)),
+        None => Some(obs::default_log_directory()),
+    };
+    // Sweep first: max_log_files only prunes on rotation, so a job that
+    // stopped running would otherwise keep its files forever.
+    if let Some(dir) = &directory {
+        let _ = obs::prune(dir, cli.common.log_keep_days);
+    }
+    let _logging = obs::init(&obs::Options {
+        format: if cli.common.log_json {
+            obs::Format::Json
+        } else {
+            obs::Format::Text
+        },
+        directory,
+        keep_days: cli.common.log_keep_days,
+        verbosity: cli.common.verbose,
+        // The run summary is printed on stdout; the terminal layer would
+        // otherwise say everything twice.
+        quiet: cli.common.verbose == 0,
+    });
+
     match run(&cli) {
         Ok(code) => std::process::exit(code),
         Err(error) => {

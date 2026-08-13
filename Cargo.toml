@@ -20,6 +20,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "0.9"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 ureq = { version = "3", features = ["json"] }
 
 # Self-reference so `cargo test` turns the fakes on without anyone having to

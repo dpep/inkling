@@ -141,9 +141,10 @@ impl Store for JsonStore {
             Ok(snapshot) => Ok(snapshot),
             Err(_) => {
                 let moved = self.quarantine();
-                eprintln!(
-                    "inkling: state file was unreadable{}; starting fresh",
-                    moved.map_or(String::new(), |p| format!(", moved to {}", p.display()))
+                tracing::error!(
+                    backup = ?moved,
+                    "state file was unreadable; starting fresh (ownership ledger lost, \
+                     so nothing already applied will be claimed)"
                 );
                 Ok(Snapshot {
                     version: VERSION,

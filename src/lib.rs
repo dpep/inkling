@@ -7,6 +7,7 @@ pub mod adapters;
 pub mod app;
 pub mod config;
 pub mod domain;
+pub mod obs;
 pub mod ports;
 pub mod secret;
 #[cfg(any(test, feature = "test-support"))]

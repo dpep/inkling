@@ -13,6 +13,7 @@ use crate::domain::schedule;
 use crate::domain::window::{SearchWindow, next_window};
 use crate::ports::*;
 use chrono::{DateTime, Utc};
+use tracing::{debug, error, info, info_span, trace, warn};
 
 pub struct Run<'a> {
     pub config: &'a Config,
@@ -70,7 +71,12 @@ impl Report {
 
 impl Run<'_> {
     pub fn execute(&self) -> Result<Report, StoreError> {
+        let started = std::time::Instant::now();
         let now = self.clock.now();
+        // Field-free on purpose: span fields are formatted once, by whichever
+        // layer initializes first, so a colored terminal layer would bake ANSI
+        // escapes into the log file. Per-run detail goes on the events below.
+        let _span = info_span!("run").entered();
         let mut snapshot = self.store.load()?;
         snapshot.version = VERSION;
         snapshot.run.last_run_started_at = Some(now);
@@ -85,6 +91,15 @@ impl Run<'_> {
             start: self.since.unwrap_or(computed.start),
             ..computed
         };
+        info!(
+            dry_run = self.dry_run,
+            window.start = %window.start,
+            window.end = %window.end,
+            window.hours = (window.end - window.start).num_minutes() as f64 / 60.0,
+            tracked.before = snapshot.tracked.len(),
+            last_outcome = ?snapshot.run.last_run_outcome,
+            "run starting"
+        );
 
         // Discovery. A failure here must not advance the watermark: a gap in
         // discovery is the one thing no later run recovers from.
@@ -100,6 +115,8 @@ impl Run<'_> {
             // hand-run after a long sleep would silently skip the gap.
             if window.start <= computed.start {
                 snapshot.run.last_successful_discovery_at = Some(window.end);
+            } else {
+                info!("watermark held: --since narrowed the window, so the gap stays searchable");
             }
         } else {
             report.outcome = Some(Outcome::Failure);
@@ -112,6 +129,19 @@ impl Run<'_> {
         if !self.dry_run {
             self.store.save(&snapshot)?;
         }
+
+        info!(
+            discovered = report.discovered,
+            checked = report.checked,
+            added = report.added.len(),
+            skipped = report.skipped,
+            failed = report.failed,
+            tracked = report.tracked,
+            terminal = report.terminal,
+            outcome = ?report.outcome(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "run finished"
+        );
         Ok(report)
     }
 
@@ -142,6 +172,7 @@ impl Run<'_> {
         for scope in &scopes {
             match self.source.discover(scope, window) {
                 Ok(messages) => {
+                    debug!(scope = ?scope, returned = messages.len(), "searched");
                     for message in messages {
                         if self.track(snapshot, message, now, report) {
                             report.discovered += 1;
@@ -149,7 +180,9 @@ impl Run<'_> {
                     }
                 }
                 Err(error) => {
-                    eprintln!("inkling: discovery failed for {scope:?}: {error}");
+                    // Never fatal to the run — reconciliation of already
+                    // tracked records is independent of discovery.
+                    error!(scope = ?scope, %error, "discovery failed");
                     ok = false;
                 }
             }
@@ -170,8 +203,16 @@ impl Run<'_> {
         if snapshot.tracked.contains_key(&key) {
             return false;
         }
+        // Message text is the private part; it only appears at trace.
+        trace!(message = %message.id, text = %message.text, "considering");
         match admit(&message, self.config) {
             Ok(references) => {
+                debug!(
+                    message = %message.id,
+                    refs = references.len(),
+                    posted_at = %message.posted_at,
+                    "now tracking"
+                );
                 snapshot.tracked.insert(
                     key,
                     TrackedMessage {
@@ -188,8 +229,10 @@ impl Run<'_> {
                 );
                 true
             }
+            // Most messages have no PR link; that's not worth a log line.
             Err(SkipReason::NoReference) => false,
-            Err(_) => {
+            Err(reason) => {
+                debug!(message = %message.id, ?reason, "skipped");
                 report.skipped += 1;
                 false
             }
@@ -213,7 +256,16 @@ impl Run<'_> {
             .iter()
             .filter_map(|key| snapshot.tracked.get(key).map(|t| t.id.clone()))
             .collect();
-        let known = self.source.reactions(&ids).ok();
+        debug!(due = ids.len(), "reconciling");
+        let known = match self.source.reactions(&ids) {
+            Ok(found) => Some(found),
+            Err(error) => {
+                // Not fatal: adds are idempotent. But without evidence we
+                // can't claim ownership of what we add.
+                warn!(%error, "could not read reactions; adds this run stay unclaimed");
+                None
+            }
+        };
 
         for key in due {
             let Some(record) = snapshot.tracked.get(&key).cloned() else {
@@ -224,14 +276,20 @@ impl Run<'_> {
             let states = match self.provider.lookup(&record.references) {
                 Ok(results) => results,
                 Err(error) => {
-                    eprintln!("inkling: lookup failed for {}: {error}", record.id);
+                    error!(message = %record.id, %error, "status lookup failed");
                     report.failed += 1;
                     continue;
                 }
             };
             // A reference nobody can read leaves the message alone rather
             // than letting its siblings speak for it.
-            if states.iter().any(|(_, s)| s.is_err()) {
+            if let Some((reference, Err(why))) = states.iter().find(|(_, s)| s.is_err()) {
+                warn!(
+                    message = %record.id,
+                    reference = %reference,
+                    error = %why,
+                    "reference unreadable; leaving the message alone"
+                );
                 report.failed += 1;
                 continue;
             }
@@ -239,6 +297,19 @@ impl Run<'_> {
 
             let existing = known.as_ref().and_then(|m| m.get(&record.id).cloned());
             let plan = reconcile(&states, existing.as_deref(), self.config);
+
+            // The line that answers "why didn't it react to my message?".
+            debug!(
+                message = %record.id,
+                refs = %record.references.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+                states = ?states,
+                aggregate = ?plan.aggregate,
+                existing = ?existing.as_ref().map(|r| r.iter().map(ToString::to_string).collect::<Vec<_>>()),
+                desired = ?plan.desired.as_ref().map(ToString::to_string),
+                action = ?plan.add.as_ref().map(ToString::to_string),
+                terminal = plan.terminal,
+                "reconciled"
+            );
 
             report.details.push(Detail {
                 id: record.id.clone(),
@@ -272,6 +343,13 @@ impl Run<'_> {
             } else {
                 match self.sink.add(&id, emoji) {
                     Ok(()) => {
+                        info!(
+                            message = %id,
+                            emoji = %emoji,
+                            state = ?plan.aggregate,
+                            claimed = plan.ledger,
+                            "reacted"
+                        );
                         report.added.push((id.clone(), emoji.clone()));
                         // Ledger only what we can prove we added — evidence
                         // showed it absent beforehand. Slack reports the same
@@ -283,11 +361,17 @@ impl Run<'_> {
                         }
                     }
                     Err(SinkError::MessageNotFound) => {
+                        info!(message = %id, "message is gone; stopping tracking it");
                         snapshot.tracked.remove(key);
                         return;
                     }
+                    Err(error @ SinkError::InvalidEmoji(_)) => {
+                        // Retrying won't help — the workspace needs the emoji.
+                        error!(message = %id, %error, "check the emoji names in your config");
+                        report.failed += 1;
+                    }
                     Err(error) => {
-                        eprintln!("inkling: could not react to {id}: {error}");
+                        error!(message = %id, %error, "could not react");
                         report.failed += 1;
                     }
                 }
