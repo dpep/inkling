@@ -4,6 +4,7 @@
 //! See `DESIGN.md` for the architecture and `PLAN.md` for what is built when.
 
 pub mod adapters;
+pub mod app;
 pub mod config;
 pub mod domain;
 pub mod ports;

@@ -45,6 +45,12 @@ pub struct SlackClaude<R: Runner> {
     channel_ids: RefCell<HashMap<String, String>>,
 }
 
+/// A model occasionally answers with prose instead of doing the job — most
+/// memorably, claiming it has no Slack tools when it plainly does. Observed
+/// in practice, and a fresh call usually succeeds, so every operation gets a
+/// bounded retry. Without this, a healthy run reports a spurious failure.
+const ATTEMPTS: usize = 3;
+
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
         Self {
@@ -52,6 +58,39 @@ impl<R: Runner> SlackClaude<R> {
             channel_ids: RefCell::new(HashMap::new()),
         }
     }
+
+    /// Run a prompt and interpret the reply, retrying when the reply doesn't
+    /// make sense. Transport errors are retried too; a typed refusal from
+    /// Slack — a missing emoji, a deleted message — is not, since repeating
+    /// it would just cost time.
+    fn attempt<T>(
+        &self,
+        prompt: &str,
+        tools: &[&str],
+        interpret: impl Fn(&str) -> Result<T, Retry>,
+    ) -> Result<T, String> {
+        let mut last = String::from("no attempt made");
+        for attempt in 0..ATTEMPTS {
+            match self.runner.run(prompt, tools) {
+                Ok(raw) => match interpret(&raw) {
+                    Ok(value) => return Ok(value),
+                    Err(Retry::Fatal(error)) => return Err(error),
+                    Err(Retry::Again(error)) => last = error,
+                },
+                Err(error) => last = error.to_string(),
+            }
+            if attempt + 1 < ATTEMPTS {
+                eprintln!("inkling: bridge attempt {} failed: {last}", attempt + 1);
+            }
+        }
+        Err(format!("after {ATTEMPTS} attempts: {last}"))
+    }
+}
+
+/// Whether a bad reply is worth another try.
+enum Retry {
+    Again(String),
+    Fatal(String),
 }
 
 /// Build the search query for a scope. Scope modifiers only — no keyword.
@@ -176,14 +215,16 @@ impl<R: Runner> SlackClaude<R> {
              Use the id of the channel named exactly {name:?}. If there is no \
              exact match, output {{\"id\": null}}.",
         );
-        let raw = self
-            .runner
-            .run(&prompt, &[CHANNELS_TOOL])
-            .map_err(|e| SourceError::Transport(e.to_string()))?;
-
-        let id = parse_channel_id(&raw)
-            .map_err(SourceError::Search)?
-            .ok_or_else(|| SourceError::Search(format!("no channel named #{name}")))?;
+        let id = self
+            .attempt(&prompt, &[CHANNELS_TOOL], |raw| {
+                match parse_channel_id(raw) {
+                    // A clean "no such channel" is an answer, not a hiccup.
+                    Ok(None) => Err(Retry::Fatal(format!("no channel named #{name}"))),
+                    Ok(Some(id)) => Ok(id),
+                    Err(error) => Err(Retry::Again(error)),
+                }
+            })
+            .map_err(SourceError::Search)?;
         self.channel_ids
             .borrow_mut()
             .insert(name.to_string(), id.clone());
@@ -210,13 +251,15 @@ impl<R: Runner> SlackClaude<R> {
         since: &str,
     ) -> Result<Vec<(MessageId, Vec<ReactionName>)>, SourceError> {
         let oldest = exclusive_bound(since);
-        let raw = self
-            .runner
-            .run(&reactions_prompt(channel_id, &oldest), &[READ_TOOL])
-            .map_err(|e| SourceError::Transport(e.to_string()))?;
+        let parsed = self
+            .attempt(
+                &reactions_prompt(channel_id, &oldest),
+                &[READ_TOOL],
+                |raw| parse_reactions(raw).map_err(Retry::Again),
+            )
+            .map_err(SourceError::Search)?;
 
-        Ok(parse_reactions(&raw)
-            .map_err(SourceError::Search)?
+        Ok(parsed
             .into_iter()
             .map(|r| (MessageId::new(channel_id, &r.ts), r.names))
             .collect())
@@ -237,11 +280,11 @@ impl<R: Runner> SlackClaude<R> {
         query: &str,
         window: &SearchWindow,
     ) -> Result<Vec<Message>, SourceError> {
-        let raw = self
-            .runner
-            .run(&search_prompt(query, window), &[SEARCH_TOOL])
-            .map_err(|e| SourceError::Transport(e.to_string()))?;
-        let hits = parse_search(&raw).map_err(SourceError::Search)?;
+        let hits = self
+            .attempt(&search_prompt(query, window), &[SEARCH_TOOL], |raw| {
+                parse_search(raw).map_err(Retry::Again)
+            })
+            .map_err(SourceError::Search)?;
         Ok(hits.into_iter().map(SearchHit::into_message).collect())
     }
 }
@@ -258,11 +301,29 @@ impl<R: Runner> ReactionSink for SlackClaude<R> {
             target.ts,
             emoji.as_str(),
         );
-        let raw = self
-            .runner
-            .run(&prompt, &[REACT_TOOL])
-            .map_err(|e| SinkError::Transport(e.to_string()))?;
-        interpret_add(&raw, emoji)
+        self.attempt(&prompt, &[REACT_TOOL], |raw| {
+            match interpret_add(raw, emoji) {
+                Ok(()) => Ok(()),
+                // Slack said no for a reason that won't change on a retry.
+                Err(e @ (SinkError::InvalidEmoji(_) | SinkError::MessageNotFound)) => {
+                    Err(Retry::Fatal(e.to_string()))
+                }
+                Err(e) => Err(Retry::Again(e.to_string())),
+            }
+        })
+        .map_err(|error| classify_sink_error(&error, emoji))
+    }
+}
+
+/// Rebuild a typed error after the retry loop has flattened it to a string,
+/// so callers can still tell a missing emoji from a transport problem.
+fn classify_sink_error(error: &str, emoji: &ReactionName) -> SinkError {
+    if error.contains("no such emoji") {
+        SinkError::InvalidEmoji(emoji.clone())
+    } else if error.contains("message not found") {
+        SinkError::MessageNotFound
+    } else {
+        SinkError::Transport(error.to_string())
     }
 }
 
@@ -299,6 +360,59 @@ fn interpret_add(raw: &str, emoji: &ReactionName) -> Result<(), SinkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replays canned replies in order, so a flaky bridge is reproducible.
+    struct ScriptedRunner {
+        replies: RefCell<Vec<String>>,
+        calls: RefCell<usize>,
+    }
+
+    impl ScriptedRunner {
+        fn new(replies: &[&str]) -> Self {
+            Self {
+                replies: RefCell::new(replies.iter().rev().map(|s| (*s).to_string()).collect()),
+                calls: RefCell::new(0),
+            }
+        }
+    }
+
+    impl Runner for ScriptedRunner {
+        fn run(&self, _prompt: &str, _tools: &[&str]) -> Result<String, RunnerError> {
+            *self.calls.borrow_mut() += 1;
+            Ok(self.replies.borrow_mut().pop().unwrap_or_default())
+        }
+    }
+
+    #[test]
+    fn a_bridge_hiccup_is_retried() {
+        // Observed in a live run: the model claimed it had no Slack tools,
+        // then worked fine on the next call.
+        let runner = ScriptedRunner::new(&["I don't have access to any Slack MCP tools.", "OK"]);
+        let slack = SlackClaude::new(runner);
+        let result = slack.add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn a_refusal_slack_actually_made_is_not_retried() {
+        // Retrying a missing emoji just burns time and money.
+        let runner = ScriptedRunner::new(&["execution_failed: invalid_name", "OK"]);
+        let slack = SlackClaude::new(runner);
+        let error = slack
+            .add(&MessageId::new("C1", "1.0"), &ReactionName::new("nope"))
+            .unwrap_err();
+        assert!(matches!(error, SinkError::InvalidEmoji(_)), "{error:?}");
+    }
+
+    #[test]
+    fn giving_up_reports_the_last_failure() {
+        let runner = ScriptedRunner::new(&["nonsense", "more nonsense", "still nonsense"]);
+        let slack = SlackClaude::new(runner);
+        let error = slack
+            .add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"))
+            .unwrap_err();
+        assert!(error.to_string().contains("3 attempts"), "{error}");
+    }
 
     #[test]
     fn queries_use_scope_modifiers_only() {

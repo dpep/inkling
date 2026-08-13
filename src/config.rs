@@ -118,6 +118,8 @@ pub struct Slack {
 pub struct GitHub {
     #[serde(default = "d_hosts")]
     pub hosts: Vec<String>,
+    #[serde(default = "d_api_url")]
+    pub api_url: String,
     /// Where the token comes from. Never the token itself — this file is
     /// meant to be committable.
     #[serde(default)]
@@ -273,6 +275,9 @@ fn d_max_references() -> usize {
 fn d_hosts() -> Vec<String> {
     vec!["github.com".to_string()]
 }
+fn d_api_url() -> String {
+    "https://api.github.com/graphql".to_string()
+}
 
 impl Default for Window {
     fn default() -> Self {
@@ -309,6 +314,7 @@ impl Default for GitHub {
     fn default() -> Self {
         Self {
             hosts: d_hosts(),
+            api_url: d_api_url(),
             token_env: None,
             token_command: None,
         }
