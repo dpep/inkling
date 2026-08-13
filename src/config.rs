@@ -72,7 +72,9 @@ pub struct Tracking {
     /// scrolls back to a week-old post to see whether the PR landed.
     #[serde(with = "humantime_serde", default = "d_max_tracking_age")]
     pub max_tracking_age: Duration,
-    /// Interval between checks while the message is fresh. Zero = every run.
+    /// Interval between checks while the message is fresh. Defaults to the
+    /// expected cron cadence, so a fresh message is effectively checked every
+    /// run. Zero disables backoff entirely.
     #[serde(with = "humantime_serde", default = "d_base_check_interval")]
     pub base_check_interval: Duration,
     /// The check interval doubles once per this much message age.
@@ -254,7 +256,7 @@ fn d_max_tracking_age() -> Duration {
     Duration::from_secs(7 * 24 * 60 * 60)
 }
 fn d_base_check_interval() -> Duration {
-    Duration::ZERO
+    Duration::from_secs(20 * 60)
 }
 fn d_doubling_period() -> Duration {
     Duration::from_secs(24 * 60 * 60)

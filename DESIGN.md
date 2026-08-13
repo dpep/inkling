@@ -225,9 +225,11 @@ interval = min(max_check_interval, base_check_interval * 2^floor(age / doubling_
 next_check_at = last_checked + interval
 ```
 
-Every term is configurable. With the defaults below — base "every run", doubling daily, capped at
-24h, horizon 7 days — a PR posted today is checked every run, a two-day-old one every ~80 minutes,
-and a five-day-old one about twice a day. A record is dropped entirely at `max_tracking_age`.
+Every term is configurable. With the defaults below — base 20m, doubling daily, capped at 24h,
+horizon 7 days — a fresh message is checked every run, a two-day-old one every 80 minutes, and a
+six-day-old one about once a day. A record is dropped entirely at `max_tracking_age`. Over the
+7-day horizon the cap is never actually reached: the doubling does the work, and the cap is a
+backstop for a longer horizon. A zero base disables backoff entirely.
 
 That horizon is the main knob to reach for. Seven days is a guess at where a Slack message stops
 being worth updating, and it's deliberately short: over a week, backoff turns ~500 GitHub lookups
@@ -423,7 +425,7 @@ initial_lookback = "2h"
 
 [tracking]
 max_tracking_age     = "7d"    # how long a message stays worth updating
-base_check_interval  = "0s"    # 0 = every run, while the message is fresh
+base_check_interval  = "20m"   # matches the cron cadence; 0 disables backoff
 doubling_period      = "1d"    # interval doubles per day of message age
 max_check_interval   = "24h"
 
