@@ -6,6 +6,11 @@ description = "Annotates Slack messages with the current state of the things the
 license = "MIT"
 repository = "https://github.com/dpep/inkling"
 
+[features]
+# Exposes the fakes in `testing` so integration tests can drive the pipeline
+# without a network.
+test-support = []
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 humantime-serde = "1"
@@ -13,3 +18,8 @@ iriq = { version = "0.34", default-features = false }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.9"
+
+# Self-reference so `cargo test` turns the fakes on without anyone having to
+# remember a feature flag.
+[dev-dependencies]
+inkling = { path = ".", features = ["test-support"] }

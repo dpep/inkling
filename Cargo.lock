@@ -166,6 +166,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "humantime-serde",
+ "inkling",
  "iriq",
  "serde",
  "thiserror 2.0.20",
