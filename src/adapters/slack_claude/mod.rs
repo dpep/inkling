@@ -11,12 +11,13 @@
 mod parse;
 mod runner;
 
-pub use parse::{Reaction, SearchHit, parse_reactions, parse_search};
+pub use parse::{Reaction, SearchHit, parse_channel_id, parse_reactions, parse_search};
 pub use runner::{ClaudeRunner, Runner, RunnerError, extract_result};
 
 use crate::domain::model::{Message, MessageId, ReactionName};
 use crate::domain::window::SearchWindow;
 use crate::ports::{MessageSource, ReactionSink, Scope, SinkError, SourceError};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// Tool names are allowlisted per call, so a prompt-injection attempt in a
@@ -25,14 +26,31 @@ use std::collections::HashMap;
 const SEARCH_TOOL: &str = "mcp__claude_ai_Slack__slack_search_public_and_private";
 const READ_TOOL: &str = "mcp__claude_ai_Slack__slack_read_channel";
 const REACT_TOOL: &str = "mcp__claude_ai_Slack__slack_add_reaction";
+const CHANNELS_TOOL: &str = "mcp__claude_ai_Slack__slack_search_channels";
+
+/// Slack channel IDs look like `C0BPR3AEAG3` — a `C`, `D`, or `G` followed by
+/// uppercase alphanumerics. Anything else is a human-typed handle.
+///
+/// Distinguishing them locally matters: resolving a handle costs a bridge
+/// invocation, and an ID that got resolved anyway would pay for nothing.
+pub fn looks_like_channel_id(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('C' | 'D' | 'G'))
+        && s.len() >= 9
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
 
 pub struct SlackClaude<R: Runner> {
     runner: R,
+    channel_ids: RefCell<HashMap<String, String>>,
 }
 
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            channel_ids: RefCell::new(HashMap::new()),
+        }
     }
 }
 
@@ -44,7 +62,14 @@ pub fn search_query(scope: &Scope, user_id: &str) -> String {
         Scope::Personal => format!("from:<@{user_id}>"),
         Scope::Channel(channel) => {
             let name = channel.trim_start_matches('#');
-            format!("in:#{name}")
+            // Slack spells the two forms differently: `in:#name` for a handle,
+            // `in:<#C123>` for an ID. Using the wrong one silently returns
+            // nothing rather than erroring.
+            if looks_like_channel_id(name) {
+                format!("in:<#{name}>")
+            } else {
+                format!("in:#{name}")
+            }
         }
     }
 }
@@ -120,17 +145,9 @@ impl<R: Runner> MessageSource for SlackClaude<R> {
 
         for (channel, wanted) in by_channel {
             let earliest = wanted.iter().map(|id| id.ts.as_str()).min().unwrap_or("0");
-            let oldest = exclusive_bound(earliest);
-            let raw = self
-                .runner
-                .run(&reactions_prompt(channel, &oldest), &[READ_TOOL])
-                .map_err(|e| SourceError::Transport(e.to_string()))?;
-            let parsed = parse_reactions(&raw).map_err(SourceError::Search)?;
-
-            for reaction in parsed {
-                let id = MessageId::new(channel, &reaction.ts);
+            for (id, names) in self.channel_reactions(channel, earliest)? {
                 if wanted.contains(&&id) {
-                    found.insert(id, reaction.names);
+                    found.insert(id, names);
                 }
             }
         }
@@ -139,6 +156,40 @@ impl<R: Runner> MessageSource for SlackClaude<R> {
 }
 
 impl<R: Runner> SlackClaude<R> {
+    /// Turn a channel handle into an ID, passing IDs straight through.
+    ///
+    /// Resolutions are memoized for the process: a run touching the same
+    /// channel repeatedly shouldn't pay for the lookup more than once.
+    pub fn resolve_channel(&self, channel: &str) -> Result<String, SourceError> {
+        let name = channel.trim_start_matches('#');
+        if looks_like_channel_id(name) {
+            return Ok(name.to_string());
+        }
+        if let Some(known) = self.channel_ids.borrow().get(name) {
+            return Ok(known.clone());
+        }
+
+        let prompt = format!(
+            "Call {CHANNELS_TOOL} with query {name:?}.\n\n\
+             Then output ONLY this JSON, no commentary and no code fence:\n\
+             {{\"id\": \"...\"}}\n\n\
+             Use the id of the channel named exactly {name:?}. If there is no \
+             exact match, output {{\"id\": null}}.",
+        );
+        let raw = self
+            .runner
+            .run(&prompt, &[CHANNELS_TOOL])
+            .map_err(|e| SourceError::Transport(e.to_string()))?;
+
+        let id = parse_channel_id(&raw)
+            .map_err(SourceError::Search)?
+            .ok_or_else(|| SourceError::Search(format!("no channel named #{name}")))?;
+        self.channel_ids
+            .borrow_mut()
+            .insert(name.to_string(), id.clone());
+        Ok(id)
+    }
+
     /// Personal scope needs the configured user id, which the port's
     /// signature doesn't carry.
     pub fn discover_personal(
@@ -147,6 +198,38 @@ impl<R: Runner> SlackClaude<R> {
         window: &SearchWindow,
     ) -> Result<Vec<Message>, SourceError> {
         self.discover_with_query(&search_query(&Scope::Personal, user_id), window)
+    }
+
+    /// Every message in a channel since `since`, with its reactions.
+    ///
+    /// The port's `reactions` narrows this to messages it already tracks;
+    /// callers who want the whole channel — `slackmcp reactions` — use this.
+    pub fn channel_reactions(
+        &self,
+        channel_id: &str,
+        since: &str,
+    ) -> Result<Vec<(MessageId, Vec<ReactionName>)>, SourceError> {
+        let oldest = exclusive_bound(since);
+        let raw = self
+            .runner
+            .run(&reactions_prompt(channel_id, &oldest), &[READ_TOOL])
+            .map_err(|e| SourceError::Transport(e.to_string()))?;
+
+        Ok(parse_reactions(&raw)
+            .map_err(SourceError::Search)?
+            .into_iter()
+            .map(|r| (MessageId::new(channel_id, &r.ts), r.names))
+            .collect())
+    }
+
+    /// Run a raw Slack search query, for callers that already speak the
+    /// modifier syntax.
+    pub fn discover_raw(
+        &self,
+        query: &str,
+        window: &SearchWindow,
+    ) -> Result<Vec<Message>, SourceError> {
+        self.discover_with_query(query, window)
     }
 
     fn discover_with_query(
@@ -235,6 +318,16 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_id_uses_slacks_other_spelling() {
+        // `in:#C0BPR3AEAG3` is accepted and matches nothing, so getting this
+        // wrong looks like an empty channel rather than an error.
+        assert_eq!(
+            search_query(&Scope::Channel("C0BPR3AEAG3".into()), ""),
+            "in:<#C0BPR3AEAG3>"
+        );
+    }
+
+    #[test]
     fn the_search_prompt_carries_unix_timestamps() {
         let window = SearchWindow {
             start: "2026-08-12T21:00:00Z".parse().unwrap(),
@@ -243,6 +336,18 @@ mod tests {
         let prompt = search_prompt("in:#inkling", &window);
         assert!(prompt.contains("1786568400"), "{prompt}");
         assert!(prompt.contains("1786570200"), "{prompt}");
+    }
+
+    #[test]
+    fn channel_ids_are_told_apart_from_handles_without_a_lookup() {
+        // Resolving a handle costs a bridge call, so an ID must never take
+        // that path.
+        assert!(looks_like_channel_id("C0BPR3AEAG3"));
+        assert!(looks_like_channel_id("D0AS6PZ20AF"));
+        assert!(!looks_like_channel_id("inkling"));
+        assert!(!looks_like_channel_id("eng-prs"));
+        assert!(!looks_like_channel_id("Coding"), "mixed case is a handle");
+        assert!(!looks_like_channel_id("C123"), "too short to be an id");
     }
 
     #[test]

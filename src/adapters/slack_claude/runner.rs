@@ -32,6 +32,11 @@ pub trait Runner {
     fn run(&self, prompt: &str, allowed_tools: &[&str]) -> Result<String, RunnerError>;
 }
 
+/// Replaces Claude Code's default system prompt, which is written for
+/// interactive coding and is pure overhead here.
+const SYSTEM_PROMPT: &str = "You execute exactly one MCP tool call and return \
+     its result in the requested format. No commentary, no follow-up actions.";
+
 pub struct ClaudeRunner {
     pub command: String,
     pub model: Option<String>,
@@ -42,36 +47,52 @@ impl Default for ClaudeRunner {
     fn default() -> Self {
         Self {
             command: "claude".into(),
-            // The bridge executes tools; it does not decide anything. A small
-            // model is both correct and several times cheaper.
+            // The bridge executes tools; it decides nothing. A small model is
+            // both correct and several times cheaper.
             model: Some("haiku".into()),
             timeout: Duration::from_secs(180),
         }
     }
 }
 
+impl ClaudeRunner {
+    /// Flags that keep the boot cost down. Measured against the default
+    /// invocation: 6x cheaper and 2x faster (see docs/slack-mcp-spike.md).
+    ///
+    /// `--tools ""` drops every built-in tool definition — the bridge needs
+    /// none of them, and their descriptions are large. Not `--bare`, which
+    /// looks apt but breaks Anthropic auth.
+    fn args(&self, prompt: &str, allowed_tools: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "json".into(),
+            "--tools".into(),
+            String::new(),
+            "--system-prompt".into(),
+            SYSTEM_PROMPT.into(),
+            "--allowedTools".into(),
+        ];
+        args.extend(allowed_tools.iter().map(|t| (*t).to_string()));
+        if let Some(model) = &self.model {
+            args.push("--model".into());
+            args.push(model.clone());
+        }
+        args
+    }
+}
+
 impl Runner for ClaudeRunner {
     fn run(&self, prompt: &str, allowed_tools: &[&str]) -> Result<String, RunnerError> {
-        let mut command = Command::new(&self.command);
-        command
-            .arg("-p")
-            .arg(prompt)
-            .arg("--output-format")
-            .arg("json")
-            .arg("--allowedTools")
-            .args(allowed_tools);
-        if let Some(model) = &self.model {
-            command.arg("--model").arg(model);
-        }
-
-        let output =
-            command
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|source| RunnerError::Spawn {
-                    command: self.command.clone(),
-                    source,
-                })?;
+        let output = Command::new(&self.command)
+            .args(self.args(prompt, allowed_tools))
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|source| RunnerError::Spawn {
+                command: self.command.clone(),
+                source,
+            })?;
 
         if !output.status.success() {
             return Err(RunnerError::Failed {
@@ -111,6 +132,26 @@ pub fn extract_result(stdout: &str) -> Result<String, RunnerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_invocation_drops_the_default_prompt_and_tools() {
+        // These three flags are the whole cost optimization; a regression here
+        // is a 6x price increase that nothing else would catch.
+        let args = ClaudeRunner::default().args("do the thing", &["some_tool"]);
+        let pairs: Vec<_> = args.windows(2).map(|w| (&w[0], &w[1])).collect();
+
+        assert!(pairs.contains(&(&"--tools".to_string(), &String::new())));
+        assert!(pairs.contains(&(&"--model".to_string(), &"haiku".to_string())));
+        assert!(args.iter().any(|a| a == SYSTEM_PROMPT));
+        assert!(pairs.contains(&(&"--allowedTools".to_string(), &"some_tool".to_string())));
+    }
+
+    #[test]
+    fn only_the_named_tools_are_allowed() {
+        let args = ClaudeRunner::default().args("x", &["a", "b"]);
+        let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(&args[allowed + 1..allowed + 3], ["a", "b"]);
+    }
 
     #[test]
     fn the_result_is_lifted_out_of_the_envelope() {

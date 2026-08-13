@@ -65,31 +65,45 @@ Better than expected: the adapter can match on stable Slack error codes rather t
 Not observed (can't be provoked on demand): rate limiting. The failure table's claim that limits
 arrive as model-mediated errors rather than HTTP headers still holds — there is no header to read.
 
-## Cost, measured
+## Cost, and what actually reduces it
 
-Every `claude -p` invocation pays to load the system prompt plus every
-connected MCP server's tool definitions — roughly 95k cached-read tokens and
-28k cache-creation tokens, regardless of how small the actual task is.
+Every `claude -p` invocation pays to boot a model before doing any work. What
+that boot costs, measured on the same one-tool task:
 
-| Model | Cost per call | Wall time |
-| --- | --- | --- |
-| Opus (default) | ~$0.34 | ~9s |
-| Haiku | ~$0.015–0.09 | ~25s |
+| Configuration | Cost | Wall time | Cache creation |
+| --- | --- | --- | --- |
+| Default (opus, full prompt + tools) | $0.34 | 9s | 28k |
+| Haiku, default prompt + tools | $0.088 | 25s | 28k |
+| Haiku, `--tools ""`, minimal `--system-prompt` | **$0.059** | **4s** | 29k |
+| Haiku, plus `--strict-mcp-config` (no connectors) | $0.004 | 2s | 0 |
 
-Haiku is 4–20× cheaper and correct here, because the bridge executes a tool
-and reformats the result — there is no judgment to make. It is slower per
-call, which doesn't matter for a cron job.
+So: **6× cheaper and 2× faster** than the default, from three flags —
+`--model haiku`, `--tools ""` (drop every built-in tool definition; the bridge
+needs none of them), and a one-line `--system-prompt` replacing Claude Code's
+default. `--bare` looks relevant but breaks Anthropic auth; don't use it.
 
-The Slack MCP is a claude.ai account connection rather than a local stdio
-server, so `--strict-mcp-config` can't trim the tool definitions down. That
-makes *number of invocations* the only real cost lever, which is why the
-adapter batches: one search per scope, one reactions read per channel (not per
-message), and adds only when reconciliation actually calls for one. With the
-age-based backoff, a steady-state run costs a couple of invocations.
+The remaining ~29k tokens are entirely the claude.ai connector definitions.
+The last row proves it: dropping the connectors takes the same call to $0.004.
+That cost is Slack's tools *plus* Gmail's, Google Calendar's, Drive's, and
+Remote's — Inkling uses three tools and pays for all of them.
 
-If this ever runs at a cadence where that adds up, the fix isn't a cheaper
-prompt — it's the Slack Web API adapter, which removes the model from the path
-entirely.
+Two ways further down, neither taken yet:
+
+1. **Register Slack as a standalone remote MCP server.** The connectors live at
+   `<service>.mcp.claude.com`, and Claude Code's local-OAuth blocklist covers
+   microsoft365, gmail, and gcal — but not slack. If Slack can be added with
+   `claude mcp add --transport http`, then `--strict-mcp-config` keeps Slack
+   and drops the other four connectors' definitions. Needs an interactive OAuth
+   consent, so it's the user's call.
+2. **Speak MCP directly from Rust.** No model in the path at all — no per-call
+   cost, no multi-second latency, no JSON-in-prose to parse. This is the real
+   answer, and the `slackmcp` bridge is deliberately shaped so it can be
+   swapped underneath without the adapter noticing.
+
+Until then, invocation count is the lever the adapter controls: one search per
+scope, one reactions read per channel rather than per message, and adds only
+when reconciliation calls for one. With the age-based backoff, a quiet run
+costs one or two invocations.
 
 ## Confirmed absences
 

@@ -80,6 +80,20 @@ pub fn parse_reactions(raw: &str) -> Result<Vec<Reaction>, String> {
         .collect())
 }
 
+#[derive(Debug, Deserialize)]
+struct ChannelResponse {
+    id: Option<String>,
+}
+
+/// `None` means the bridge answered cleanly that no such channel exists,
+/// which is different from the call having failed.
+pub fn parse_channel_id(raw: &str) -> Result<Option<String>, String> {
+    let json = extract_json(raw)?;
+    let response: ChannelResponse =
+        serde_json::from_str(&json).map_err(|e| format!("channel response: {e}"))?;
+    Ok(response.id.filter(|id| !id.is_empty()))
+}
+
 /// Pull the JSON object out of whatever the model actually said. Handles a
 /// bare object, a ```json fence, and a leading sentence; brace-matching
 /// rather than a regex so nested objects survive.
@@ -227,6 +241,17 @@ mod tests {
             ]
         );
         assert!(parsed[1].names.is_empty());
+    }
+
+    #[test]
+    fn a_channel_id_parses_and_a_miss_is_not_an_error() {
+        assert_eq!(
+            parse_channel_id(r#"{"id": "C0BPR3AEAG3"}"#).unwrap(),
+            Some("C0BPR3AEAG3".to_string())
+        );
+        // No such channel is an answer, not a failure.
+        assert_eq!(parse_channel_id(r#"{"id": null}"#).unwrap(), None);
+        assert_eq!(parse_channel_id(r#"{"id": ""}"#).unwrap(), None);
     }
 
     #[test]

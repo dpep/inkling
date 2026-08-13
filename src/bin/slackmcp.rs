@@ -2,89 +2,283 @@
 //! subprocess.
 //!
 //! Inkling uses this bridge as a library; this binary is the same code with a
-//! command line on it, so the transport can be exercised by hand while
-//! debugging and stays useful on its own. It prints JSON, so it composes with
-//! `jq` and with anything else that wants Slack data without Slack
-//! credentials.
+//! command line on it, so the transport is debuggable by hand and useful on
+//! its own — Slack data without Slack credentials.
 //!
-//! Usage:
-//!   slackmcp search <query> [--after <unix>] [--before <unix>]
-//!   slackmcp reactions <channel_id> [--oldest <ts>]
-//!   slackmcp react <channel_id> <ts> <emoji>
+//! Output defaults to tab-separated for humans and pipes; `--json` and
+//! `--ndjson` make it machine- and agent-friendly.
 
 use chrono::{DateTime, TimeDelta, Utc};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use inkling::adapters::slack_claude::{ClaudeRunner, SlackClaude};
-use inkling::domain::model::{MessageId, ReactionName};
+use inkling::domain::model::{Message, MessageId, ReactionName};
 use inkling::domain::window::SearchWindow;
 use inkling::ports::{MessageSource, ReactionSink, Scope};
+use serde::Serialize;
+
+#[derive(Parser)]
+#[command(
+    name = "slackmcp",
+    version,
+    about = "Read and annotate Slack through the Slack MCP server.",
+    long_about = "Drives the Slack MCP server through a `claude` subprocess, so \
+Slack is reachable without Slack CLI credentials.\n\n\
+Every call allowlists only the one MCP tool it needs, so this cannot post \
+messages regardless of what any Slack content asks for.\n\n\
+Channels may be given as an ID (C0BPR3AEAG3) or a handle (#eng, eng); handles \
+cost one extra lookup to resolve."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+
+    #[command(flatten)]
+    format: FormatArgs,
+
+    /// Model to drive the bridge with. Small is correct here — it executes a
+    /// tool, it doesn't decide anything.
+    #[arg(long, default_value = "haiku", global = true)]
+    model: String,
+}
+
+#[derive(Args)]
+struct FormatArgs {
+    /// Emit a JSON array.
+    #[arg(long, global = true, conflicts_with = "ndjson")]
+    json: bool,
+    /// Emit one JSON object per line.
+    #[arg(long, global = true)]
+    ndjson: bool,
+}
+
+impl FormatArgs {
+    fn resolve(&self) -> Format {
+        match (self.json, self.ndjson) {
+            (true, _) => Format::Json,
+            (_, true) => Format::Ndjson,
+            _ => Format::Text,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Format {
+    Text,
+    Json,
+    Ndjson,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Find messages. QUERY takes Slack search syntax, or a bare channel
+    /// handle/ID as a shorthand for `in:#channel`.
+    Search {
+        /// e.g. "#eng", "C0BPR3AEAG3", "from:<@U123>", "in:#eng has:link"
+        query: String,
+        /// Only messages at or after this Unix timestamp.
+        #[arg(long)]
+        after: Option<i64>,
+        /// Only messages at or before this Unix timestamp.
+        #[arg(long)]
+        before: Option<i64>,
+        /// Look back this many hours when --after is omitted.
+        #[arg(long, default_value_t = 24)]
+        hours: i64,
+    },
+    /// Show reactions on a channel's recent messages.
+    Reactions {
+        /// Channel ID or handle.
+        channel: String,
+        /// Only messages at or after this Slack timestamp.
+        #[arg(long, default_value = "0")]
+        since: String,
+    },
+    /// Add a reaction to a message.
+    React {
+        /// Channel ID or handle.
+        channel: String,
+        /// Slack message timestamp, e.g. 1786596050.245879
+        ts: String,
+        /// Emoji name, with or without colons.
+        emoji: String,
+    },
+    /// Resolve a channel handle to its ID.
+    Channel {
+        /// Channel handle, e.g. "#eng" or "eng".
+        name: String,
+    },
+}
+
+#[derive(Serialize)]
+struct MessageOut {
+    channel_id: String,
+    ts: String,
+    user_id: String,
+    permalink: String,
+    text: String,
+}
+
+impl From<Message> for MessageOut {
+    fn from(m: Message) -> Self {
+        Self {
+            channel_id: m.id.channel,
+            ts: m.id.ts,
+            user_id: m.author,
+            permalink: m.permalink,
+            text: m.text,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReactionsOut {
+    channel_id: String,
+    ts: String,
+    reactions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ChannelOut {
+    name: String,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct ReactOut {
+    channel_id: String,
+    ts: String,
+    emoji: String,
+    added: bool,
+}
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(error) = run(&args) {
+    let cli = Cli::parse();
+    if let Err(error) = run(&cli) {
         eprintln!("slackmcp: {error}");
         std::process::exit(1);
     }
 }
 
-fn run(args: &[String]) -> Result<(), String> {
-    let slack = SlackClaude::new(ClaudeRunner::default());
-    match args.first().map(String::as_str) {
-        Some("search") => {
-            let query = args.get(1).ok_or("search needs a query")?;
-            let window = SearchWindow {
-                start: flag_time(args, "--after")
-                    .unwrap_or_else(|| Utc::now() - TimeDelta::days(1)),
-                end: flag_time(args, "--before").unwrap_or_else(Utc::now),
-            };
-            // A raw query passes straight through, so every Slack search
-            // modifier works without this CLI needing to know about them.
-            let messages = slack
-                .discover(&Scope::Channel(query.clone()), &window)
-                .or_else(|_| slack.discover_personal(query, &window))
+fn run(cli: &Cli) -> Result<(), String> {
+    let runner = ClaudeRunner {
+        model: Some(cli.model.clone()),
+        ..ClaudeRunner::default()
+    };
+    let slack = SlackClaude::new(runner);
+    let format = cli.format.resolve();
+
+    match &cli.command {
+        Command::Search {
+            query,
+            after,
+            before,
+            hours,
+        } => {
+            let end = before
+                .and_then(|t| DateTime::from_timestamp(t, 0))
+                .unwrap_or_else(Utc::now);
+            let start = after
+                .and_then(|t| DateTime::from_timestamp(t, 0))
+                .unwrap_or_else(|| end - TimeDelta::hours(*hours));
+
+            let window = SearchWindow { start, end };
+            let messages = search(&slack, query, &window)?;
+            let rows: Vec<MessageOut> = messages.into_iter().map(Into::into).collect();
+            emit(format, &rows, |r| {
+                vec![
+                    format!("{}:{}", r.channel_id, r.ts),
+                    r.user_id.clone(),
+                    r.text.replace('\n', " "),
+                ]
+            })
+        }
+        Command::Reactions { channel, since } => {
+            let id = slack.resolve_channel(channel).map_err(|e| e.to_string())?;
+            let found = slack
+                .channel_reactions(&id, since)
                 .map_err(|e| e.to_string())?;
-            for message in messages {
-                println!(
-                    "{}\t{}\t{}",
-                    message.id,
-                    message.author,
-                    message.text.replace('\n', " ")
-                );
-            }
+
+            let mut rows: Vec<ReactionsOut> = found
+                .into_iter()
+                .map(|(id, names)| ReactionsOut {
+                    channel_id: id.channel,
+                    ts: id.ts,
+                    reactions: names.iter().map(ToString::to_string).collect(),
+                })
+                .collect();
+            rows.sort_by(|a, b| a.ts.cmp(&b.ts));
+
+            emit(format, &rows, |r| {
+                vec![format!("{}:{}", r.channel_id, r.ts), r.reactions.join(",")]
+            })
         }
-        Some("reactions") => {
-            let channel = args.get(1).ok_or("reactions needs a channel id")?;
-            let oldest = args.get(2).cloned().unwrap_or_else(|| "0".to_string());
-            let id = MessageId::new(channel, oldest);
-            let found = slack.reactions(&[id]).map_err(|e| e.to_string())?;
-            for (id, names) in found {
-                let names: Vec<_> = names.iter().map(|r| r.to_string()).collect();
-                println!("{id}\t{}", names.join(","));
-            }
-        }
-        Some("react") => {
-            let channel = args.get(1).ok_or("react needs a channel id")?;
-            let ts = args.get(2).ok_or("react needs a message ts")?;
-            let emoji = args.get(3).ok_or("react needs an emoji")?;
+        Command::React { channel, ts, emoji } => {
+            let id = slack.resolve_channel(channel).map_err(|e| e.to_string())?;
+            let emoji = ReactionName::new(emoji);
             slack
-                .add(&MessageId::new(channel, ts), &ReactionName::new(emoji))
+                .add(&MessageId::new(&id, ts), &emoji)
                 .map_err(|e| e.to_string())?;
-            println!("ok");
+
+            let rows = vec![ReactOut {
+                channel_id: id,
+                ts: ts.clone(),
+                emoji: emoji.to_string(),
+                added: true,
+            }];
+            emit(format, &rows, |r| {
+                vec![format!("{}:{}", r.channel_id, r.ts), r.emoji.clone()]
+            })
         }
-        _ => {
-            eprintln!(
-                "usage:\n  \
-                 slackmcp search <query> [--after <unix>] [--before <unix>]\n  \
-                 slackmcp reactions <channel_id> [oldest_ts]\n  \
-                 slackmcp react <channel_id> <ts> <emoji>"
-            );
-            return Err("unknown command".into());
+        Command::Channel { name } => {
+            let id = slack.resolve_channel(name).map_err(|e| e.to_string())?;
+            let rows = vec![ChannelOut {
+                name: name.trim_start_matches('#').to_string(),
+                id,
+            }];
+            emit(format, &rows, |r| vec![r.id.clone(), r.name.clone()])
+        }
+    }
+}
+
+/// Search takes a handle directly — no resolution needed, which also saves a
+/// bridge call. Only reactions and react need a real channel ID.
+///
+/// A bare handle or ID is the common case, so it's the shorthand; anything
+/// containing a Slack search modifier passes through untouched.
+fn search<R: inkling::adapters::slack_claude::Runner>(
+    slack: &SlackClaude<R>,
+    query: &str,
+    window: &SearchWindow,
+) -> Result<Vec<Message>, String> {
+    if query.contains(':') {
+        return slack.discover_raw(query, window).map_err(|e| e.to_string());
+    }
+    slack
+        .discover(&Scope::Channel(query.to_string()), window)
+        .map_err(|e| e.to_string())
+}
+
+fn emit<T: Serialize>(
+    format: Format,
+    rows: &[T],
+    columns: impl Fn(&T) -> Vec<String>,
+) -> Result<(), String> {
+    match format {
+        Format::Json => {
+            let json = serde_json::to_string_pretty(rows).map_err(|e| e.to_string())?;
+            println!("{json}");
+        }
+        Format::Ndjson => {
+            for row in rows {
+                let json = serde_json::to_string(row).map_err(|e| e.to_string())?;
+                println!("{json}");
+            }
+        }
+        Format::Text => {
+            for row in rows {
+                println!("{}", columns(row).join("\t"));
+            }
         }
     }
     Ok(())
-}
-
-fn flag_time(args: &[String], flag: &str) -> Option<DateTime<Utc>> {
-    let position = args.iter().position(|a| a == flag)?;
-    let raw = args.get(position + 1)?;
-    DateTime::from_timestamp(raw.parse().ok()?, 0)
 }

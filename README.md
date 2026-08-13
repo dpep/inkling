@@ -19,13 +19,21 @@ subprocess, because the Slack CLI isn't usable in this environment. That bridge
 is also a standalone binary, so it's useful by hand and easy to debug:
 
 ```sh
-slackmcp search '#inkling' --after 1786595000   # channel or from:<@Uxxxx>
-slackmcp reactions C0BPR3AEAG3 1786596050.245879
-slackmcp react C0BPR3AEAG3 1786596050.245879 purple_heart
+slackmcp search '#eng' --hours 6              # or an ID, or 'from:<@U123> has:link'
+slackmcp reactions '#eng' --since 1786596000
+slackmcp react '#eng' 1786596050.245879 merged
+slackmcp channel '#eng'                       # handle -> ID
 ```
+
+Channels take an ID or a handle anywhere. `--json` and `--ndjson` make the
+output machine-readable; plain output is tab-separated for pipes. `--help`
+covers the rest.
 
 Each call allowlists only the one MCP tool it needs, so the bridge cannot post
 messages even if something in a Slack message tries to talk it into doing so.
+It runs on a small model with Claude Code's default prompt and built-in tools
+stripped out, which makes it ~6x cheaper and ~2x faster than a default
+invocation — see [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md).
 
 ## Development
 
