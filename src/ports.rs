@@ -21,6 +21,19 @@ pub enum Scope {
     Channel(String),
 }
 
+impl Scope {
+    /// Stable key for remembering how far this scope has been searched.
+    ///
+    /// Channels normalize, so `#eng` and `eng` are one scope rather than two
+    /// that each re-scan the other's history.
+    pub fn key(&self) -> String {
+        match self {
+            Scope::Personal(_) => "personal".to_string(),
+            Scope::Channel(c) => format!("channel:{}", c.trim_start_matches('#').to_lowercase()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("slack search failed: {0}")]

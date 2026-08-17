@@ -173,6 +173,79 @@ fn author_names_are_resolved_and_remembered() {
 }
 
 #[test]
+fn a_newly_added_channel_gets_a_first_run_window() {
+    // The gotcha this exists to prevent: with one shared watermark, adding a
+    // channel to a setup that's been running for weeks tells it the recent
+    // past is already covered, so it finds nothing until someone posts again.
+    let config = config();
+    let source = FakeMessageSource::with(vec![merged_message()]);
+    let provider = ScriptedStatusProvider::new();
+    provider.set(&pr("gqls", 1), State::Merged);
+    let sink = RecordingSink::new();
+    let store = MemoryStore::default();
+
+    // A long-running install: personal has been searched up to a minute ago.
+    let mut snapshot = Snapshot::default();
+    let recent = "2026-08-12T21:29:00Z".parse().unwrap();
+    snapshot.run.scopes.insert("personal".into(), recent);
+    snapshot.run.last_successful_discovery_at = Some(recent);
+    store.save(&snapshot).unwrap();
+
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+    let report = Run {
+        config: &config,
+        source: &source,
+        provider: &provider,
+        sink: &sink,
+        store: &store,
+        clock: &clock,
+        dry_run: false,
+        since: None,
+    }
+    .execute()
+    .unwrap();
+
+    // The message is ~10 minutes old — inside the channel's first-run window,
+    // outside the minute personal had left to cover.
+    assert_eq!(report.discovered, 1);
+    assert_eq!(sink.emoji_names(), vec!["merged"]);
+
+    let saved = store.load().unwrap();
+    assert!(saved.run.scopes.contains_key("channel:inkling"));
+    assert_eq!(
+        saved.run.scopes["personal"], recent,
+        "an untouched scope keeps its own mark"
+    );
+}
+
+#[test]
+fn a_failed_scope_does_not_hold_back_the_others() {
+    // Watermarks are per scope, so one broken channel shouldn't make every
+    // other channel re-scan the same window forever.
+    let config = config();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    Run {
+        config: &config,
+        source: &BrokenSource,
+        provider: &ScriptedStatusProvider::new(),
+        sink: &RecordingSink::new(),
+        store: &store,
+        clock: &clock,
+        dry_run: false,
+        since: None,
+    }
+    .execute()
+    .unwrap();
+
+    assert!(
+        store.load().unwrap().run.scopes.is_empty(),
+        "a scope that failed records no progress"
+    );
+}
+
+#[test]
 fn personal_mode_actually_searches() {
     // Regression: the scope carried no user id, so the adapter refused it and
     // every personal-mode run reported a discovery failure. It stayed hidden
@@ -403,6 +476,10 @@ fn a_narrowing_since_does_not_advance_the_watermark() {
 
     let mut snapshot = Snapshot::default();
     let long_ago = "2026-08-10T00:00:00Z".parse().unwrap();
+    snapshot
+        .run
+        .scopes
+        .insert("channel:inkling".into(), long_ago);
     snapshot.run.last_successful_discovery_at = Some(long_ago);
     store.save(&snapshot).unwrap();
 
@@ -421,8 +498,8 @@ fn a_narrowing_since_does_not_advance_the_watermark() {
     .unwrap();
 
     assert_eq!(
-        store.load().unwrap().run.last_successful_discovery_at,
-        Some(long_ago),
+        store.load().unwrap().run.scopes["channel:inkling"],
+        long_ago,
         "the un-searched gap must stay in the next window"
     );
 }

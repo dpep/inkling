@@ -94,44 +94,22 @@ impl Run<'_> {
         snapshot.run.last_run_started_at = Some(now);
 
         let mut report = Report::default();
-        let computed = next_window(
-            &self.config.window,
-            snapshot.run.last_successful_discovery_at,
-            now,
-        );
-        let window = SearchWindow {
-            start: self.since.unwrap_or(computed.start),
-            ..computed
-        };
         info!(
             dry_run = self.dry_run,
-            window.start = %window.start,
-            window.end = %window.end,
-            window.hours = (window.end - window.start).num_minutes() as f64 / 60.0,
             tracked.before = snapshot.tracked.len(),
             last_outcome = ?snapshot.run.last_run_outcome,
             "run starting"
         );
 
-        // Discovery. A failure here must not advance the watermark: a gap in
+        // Discovery. A failed scope must not advance its watermark: a gap in
         // discovery is the one thing no later run recovers from.
-        let discovery_ok = self.discover(&mut snapshot, &window, now, &mut report);
+        let discovery_ok = self.discover(&mut snapshot, now, &mut report);
 
         self.name_authors(&mut snapshot);
         self.reconcile_due(&mut snapshot, now, &mut report);
         self.prune(&mut snapshot, now);
 
-        if discovery_ok {
-            // Safe even on a partial run: per-record failures live in the
-            // records, which get retried regardless of the window. But a
-            // --since that *narrowed* the window must not advance it, or a
-            // hand-run after a long sleep would silently skip the gap.
-            if window.start <= computed.start {
-                snapshot.run.last_successful_discovery_at = Some(window.end);
-            } else {
-                info!("watermark held: --since narrowed the window, so the gap stays searchable");
-            }
-        } else {
+        if !discovery_ok {
             report.outcome = Some(Outcome::Failure);
         }
 
@@ -159,16 +137,7 @@ impl Run<'_> {
     }
 
     /// Returns whether discovery itself succeeded.
-    fn discover(
-        &self,
-        snapshot: &mut Snapshot,
-        window: &SearchWindow,
-        now: DateTime<Utc>,
-        report: &mut Report,
-    ) -> bool {
-        if window.is_empty() {
-            return true;
-        }
+    fn discover(&self, snapshot: &mut Snapshot, now: DateTime<Utc>, report: &mut Report) -> bool {
         let mut scopes = Vec::new();
         if self.config.slack.personal {
             match &self.config.slack.user_id {
@@ -191,19 +160,53 @@ impl Run<'_> {
 
         let mut ok = true;
         for scope in &scopes {
-            match self.source.discover(scope, window) {
+            let key = scope.key();
+            // Each scope remembers its own progress, so adding a channel gives
+            // it a first-run window rather than inheriting "already covered"
+            // from scopes that have been running for weeks.
+            let computed = next_window(
+                &self.config.window,
+                snapshot.run.scopes.get(&key).copied(),
+                now,
+            );
+            let window = SearchWindow {
+                start: self.since.unwrap_or(computed.start),
+                ..computed
+            };
+            if window.is_empty() {
+                continue;
+            }
+            debug!(
+                scope = %key,
+                start = %window.start,
+                hours = (window.end - window.start).num_minutes() as f64 / 60.0,
+                first_run = !snapshot.run.scopes.contains_key(&key),
+                "searching"
+            );
+
+            match self.source.discover(scope, &window) {
                 Ok(messages) => {
-                    debug!(scope = ?scope, returned = messages.len(), "searched");
+                    debug!(scope = %key, returned = messages.len(), "searched");
                     for message in messages {
                         if self.track(snapshot, message, now, report) {
                             report.discovered += 1;
                         }
                     }
+                    // A --since that *narrowed* the window must not advance
+                    // the mark, or a hand-run after a long sleep would
+                    // silently skip the gap it didn't cover.
+                    if window.start <= computed.start {
+                        snapshot.run.scopes.insert(key, window.end);
+                        snapshot.run.last_successful_discovery_at = Some(window.end);
+                    } else {
+                        info!(scope = %key, "watermark held: --since narrowed the window");
+                    }
                 }
                 Err(error) => {
                     // Never fatal to the run — reconciliation of already
-                    // tracked records is independent of discovery.
-                    error!(scope = ?scope, %error, "discovery failed");
+                    // tracked records is independent of discovery, and the
+                    // other scopes are independent of this one.
+                    error!(scope = %key, %error, "discovery failed");
                     ok = false;
                 }
             }

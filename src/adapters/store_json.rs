@@ -39,6 +39,15 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunState {
+    /// How far each scope has been searched, keyed by `Scope::key`.
+    ///
+    /// Per scope rather than one watermark, because they aren't
+    /// interchangeable: a channel added today has never been searched, and a
+    /// shared watermark would tell it the last few minutes were already
+    /// covered — so it would find nothing until someone posted again.
+    #[serde(default)]
+    pub scopes: BTreeMap<String, DateTime<Utc>>,
+    /// Most recent successful discovery in any scope. Display only.
     #[serde(default)]
     pub last_successful_discovery_at: Option<DateTime<Utc>>,
     #[serde(default)]

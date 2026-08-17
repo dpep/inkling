@@ -24,3 +24,8 @@
   bounded retries. Also shipped as the standalone `slackmcp` CLI.
 - JSON state store, carrying the tracked records, the ownership ledger, and a channel-ID cache.
 - `inkling run` / `status` / `check`, with `--dry-run` and `--json`.
+- **Discovery progress is now tracked per scope.** Previously one watermark covered every scope, so
+  adding a channel to a running setup told it the recent past was already searched — it would find
+  nothing until someone posted again. Each scope now gets its own mark, and a new one gets a
+  first-run window. Existing state upgrades silently; the first run after upgrading re-scans
+  `window.initial_lookback` per scope, which is harmless because tracking is idempotent.
