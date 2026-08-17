@@ -44,8 +44,8 @@ struct Common {
     /// Structured logs, for a collector rather than a person.
     #[arg(long, global = true)]
     log_json: bool,
-    /// Where daily log files go. Defaults beside the state file; "off"
-    /// disables file logging.
+    /// Where daily log files go. Defaults to $XDG_STATE_HOME/inkling/logs;
+    /// "off" disables file logging.
     #[arg(long, global = true)]
     log_dir: Option<String>,
     /// Delete log files older than this many days.
@@ -78,6 +78,21 @@ enum Command {
     Config {
         #[command(subcommand)]
         action: Option<ConfigAction>,
+    },
+    /// Read the log files.
+    Logs {
+        /// How many lines to show.
+        #[arg(long, short = 'n', default_value_t = 40)]
+        lines: usize,
+        /// Only lines containing this, case-insensitively.
+        #[arg(long, short = 'g')]
+        grep: Option<String>,
+        /// Keep printing as new lines arrive.
+        #[arg(long, short)]
+        follow: bool,
+        /// Print the log directory and exit.
+        #[arg(long)]
+        path: bool,
     },
 }
 
@@ -209,6 +224,24 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("{}", path.display());
             return Ok(0);
         }
+        // Reading logs shouldn't depend on the config being loadable — a
+        // broken config is exactly when you want to read them.
+        Command::Logs {
+            lines,
+            grep,
+            follow,
+            path: show_path,
+        } => {
+            let directory = match cli.common.log_dir.as_deref() {
+                Some("off") | None => obs::default_log_directory(),
+                Some(dir) => PathBuf::from(dir),
+            };
+            if *show_path {
+                println!("{}", directory.display());
+                return Ok(0);
+            }
+            return logs(&directory, *lines, grep.as_deref(), *follow);
+        }
         Command::Config {
             action: Some(ConfigAction::Get { key }),
         } => {
@@ -252,6 +285,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
     );
 
     match &cli.command {
+        // Handled above, before the config load they don't need.
+        Command::Logs { .. } => unreachable!(),
         // Show is the default; Init and Path returned above.
         Command::Config { .. } => {
             let source = if path.exists() {
@@ -355,6 +390,65 @@ fn run(cli: &Cli) -> Result<i32, String> {
             report_out(&report, dry_run, *json)?;
             Ok(report.exit_code())
         }
+    }
+}
+
+fn logs(
+    directory: &std::path::Path,
+    lines: usize,
+    grep: Option<&str>,
+    follow: bool,
+) -> Result<i32, String> {
+    let recent = obs::tail(directory, lines, grep);
+    if recent.is_empty() && !follow {
+        // An empty directory and a filter that matched nothing look the same
+        // in the output, so say which one happened.
+        let hint = match grep {
+            Some(needle) => format!("no log lines matching {needle:?}"),
+            None => format!("no logs yet in {}", directory.display()),
+        };
+        println!("{hint}");
+        return Ok(0);
+    }
+    for line in recent {
+        println!("{line}");
+    }
+    if !follow {
+        return Ok(0);
+    }
+
+    // Poll rather than watch: a log that appends a few lines per run doesn't
+    // justify a filesystem-notification dependency. Tracking a byte offset in
+    // the newest file keeps this to "read what arrived since last time".
+    let mut current = obs::log_files(directory).pop();
+    let mut offset = current
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map_or(0, |m| m.len() as usize);
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let newest = obs::log_files(directory).pop();
+        if newest != current {
+            // Rotated at midnight, or the first file appeared.
+            current = newest;
+            offset = 0;
+        }
+        let Some(path) = &current else { continue };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        // Truncated out from under us; start over rather than slice past the end.
+        if text.len() < offset {
+            offset = 0;
+        }
+        for line in text[offset..].lines() {
+            if grep.is_none_or(|n| line.to_lowercase().contains(&n.to_lowercase())) {
+                println!("{line}");
+            }
+        }
+        offset = text.len();
     }
 }
 

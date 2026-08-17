@@ -150,6 +150,52 @@ pub fn prune(directory: &Path, keep_days: usize) -> std::io::Result<usize> {
     Ok(removed)
 }
 
+/// Daily log files, oldest first. The rotation suffix is a date, so name
+/// order is chronological order.
+pub fn log_files(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("inkling") && n.contains("log"))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The last `lines` log lines, optionally only those containing `needle`.
+///
+/// Reads newest file backwards until it has enough, so a long history costs
+/// no more than a short one.
+pub fn tail(directory: &Path, lines: usize, needle: Option<&str>) -> Vec<String> {
+    let needle = needle.map(str::to_lowercase);
+    let matches = |line: &String| match &needle {
+        Some(n) => line.to_lowercase().contains(n),
+        None => true,
+    };
+
+    let mut collected: Vec<String> = Vec::new();
+    for file in log_files(directory).into_iter().rev() {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let mut found: Vec<String> = text.lines().map(str::to_string).filter(matches).collect();
+        found.append(&mut collected);
+        collected = found;
+        if collected.len() >= lines {
+            break;
+        }
+    }
+    let start = collected.len().saturating_sub(lines);
+    collected.split_off(start)
+}
+
 pub fn default_log_directory() -> PathBuf {
     crate::adapters::store_json::JsonStore::default_path()
         .parent()
@@ -217,6 +263,44 @@ mod tests {
             prune(Path::new("/nonexistent/inkling/logs"), 14).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn tailing_returns_the_most_recent_lines_across_files() {
+        let dir = TempDir::new("tail");
+        std::fs::write(dir.0.join("inkling.2026-08-15.log"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.0.join("inkling.2026-08-16.log"), "three\nfour\n").unwrap();
+
+        assert_eq!(tail(&dir.0, 3, None), ["two", "three", "four"]);
+        // Fewer lines than asked for is not an error.
+        assert_eq!(tail(&dir.0, 99, None).len(), 4);
+    }
+
+    #[test]
+    fn tailing_can_filter_and_ignores_case() {
+        let dir = TempDir::new("grep");
+        std::fs::write(
+            dir.0.join("inkling.2026-08-16.log"),
+            "run starting\nERROR could not react\nrun finished\n",
+        )
+        .unwrap();
+
+        assert_eq!(tail(&dir.0, 10, Some("error")), ["ERROR could not react"]);
+        assert!(tail(&dir.0, 10, Some("nothing here")).is_empty());
+    }
+
+    #[test]
+    fn tailing_a_missing_directory_is_empty_rather_than_an_error() {
+        assert!(tail(Path::new("/nonexistent/inkling/logs"), 10, None).is_empty());
+    }
+
+    #[test]
+    fn only_our_own_log_files_are_read() {
+        let dir = TempDir::new("foreign-tail");
+        std::fs::write(dir.0.join("inkling.2026-08-16.log"), "ours\n").unwrap();
+        std::fs::write(dir.0.join("someone-else.log"), "theirs\n").unwrap();
+
+        assert_eq!(tail(&dir.0, 10, None), ["ours"]);
     }
 
     #[test]
