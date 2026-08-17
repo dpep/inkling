@@ -47,6 +47,9 @@ impl SearchHit {
 
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
+    /// How many results the tool said it had. Absent in older replies.
+    #[serde(default)]
+    total: Option<usize>,
     messages: Vec<SearchHit>,
 }
 
@@ -72,6 +75,19 @@ pub fn parse_search(raw: &str) -> Result<Vec<SearchHit>, String> {
     let json = extract_json(raw)?;
     let response: SearchResponse =
         serde_json::from_str(&json).map_err(|e| format!("search response: {e}"))?;
+
+    // Observed: the same search returned 3 messages four times and 1 the
+    // fifth. A short list is indistinguishable from a quiet window, and the
+    // watermark would advance straight past whatever got dropped — so a count
+    // that doesn't match its own list is treated as a failed call.
+    if let Some(total) = response.total
+        && total != response.messages.len()
+    {
+        return Err(format!(
+            "bridge reported {total} results but listed {}",
+            response.messages.len()
+        ));
+    }
     Ok(response.messages)
 }
 
@@ -214,6 +230,30 @@ mod tests {
     #[test]
     fn an_empty_result_set_is_not_an_error() {
         assert!(parse_search(r#"{"messages": []}"#).unwrap().is_empty());
+        assert!(
+            parse_search(r#"{"total": 0, "messages": []}"#)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_truncated_list_is_rejected_rather_than_silently_short() {
+        // The dangerous one: fewer messages than the tool found reads exactly
+        // like a quiet window, and the watermark moves past the difference.
+        let raw = r#"{"total": 3, "messages": [
+            {"channel_id":"C1","ts":"1.0","user_id":"U1","permalink":"p","text":"t"}
+        ]}"#;
+        let error = parse_search(raw).unwrap_err();
+        assert!(error.contains("3 results but listed 1"), "{error}");
+    }
+
+    #[test]
+    fn a_matching_count_passes() {
+        let raw = r#"{"total": 1, "messages": [
+            {"channel_id":"C1","ts":"1.0","user_id":"U1","permalink":"p","text":"t"}
+        ]}"#;
+        assert_eq!(parse_search(raw).unwrap().len(), 1);
     }
 
     #[test]

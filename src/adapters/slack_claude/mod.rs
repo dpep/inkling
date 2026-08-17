@@ -137,10 +137,13 @@ fn search_prompt(query: &str, window: &SearchWindow) -> String {
          sort: \"timestamp\"\n\n\
          Then convert every result into this JSON, and output ONLY the JSON \
          with no commentary and no code fence:\n\
-         {{\"messages\": [{{\"channel_id\": \"...\", \"channel_name\": \"...\", \
-         \"ts\": \"...\", \"user_id\": \"...\", \"user_name\": \"...\", \
-         \"permalink\": \"...\", \
+         {{\"total\": 0, \"messages\": [{{\"channel_id\": \"...\", \
+         \"channel_name\": \"...\", \"ts\": \"...\", \"user_id\": \"...\", \
+         \"user_name\": \"...\", \"permalink\": \"...\", \
          \"text\": \"...\"}}]}}\n\n\
+         `total` is the result count the tool reported (it prints e.g. \
+         \"## Messages (3 results)\"), and `messages` must contain every one \
+         of them.\n\
          `channel_name` is the channel's name without the leading #, and \\
          `user_name` is the author's display name.\n\
          Copy each field verbatim from the tool output. Do not summarize, \
