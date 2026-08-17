@@ -13,9 +13,14 @@ use iriq::Extractor;
 pub enum Target {
     /// A fully-qualified pull request.
     Reference(Reference),
-    /// A bare number. Ambiguous until matched against tracked records —
-    /// guessing a repository would react to the wrong pull request.
-    Number(u64),
+    /// A reference missing some of its parts — `inkling#2`, `dpep/inkling#2`,
+    /// or a bare `2`. Ambiguous until matched against tracked records;
+    /// guessing the rest would react to the wrong pull request.
+    Partial {
+        owner: Option<String>,
+        repo: Option<String>,
+        number: u64,
+    },
     Channel(String),
 }
 
@@ -38,12 +43,8 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
         return Ok(Target::Reference(reference));
     }
 
-    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-        return match digits.parse() {
-            Ok(number) => Ok(Target::Number(number)),
-            Err(_) => Err(format!("{trimmed}: pull request number is out of range")),
-        };
+    if let Some(partial) = parse_partial(trimmed) {
+        return Ok(partial);
     }
 
     if looks_like_a_pull_request(trimmed) {
@@ -73,6 +74,33 @@ fn parse_short_ref(arg: &str, hosts: &[String]) -> Option<Reference> {
             repo: (*repo).to_string(),
             number,
         })
+}
+
+/// `2`, `#2`, `inkling#2`, or `dpep/inkling#2` — everything short of a host.
+fn parse_partial(arg: &str) -> Option<Target> {
+    let (prefix, digits) = match arg.rsplit_once('#') {
+        Some((prefix, digits)) => (prefix, digits),
+        // A bare number, with no `#` to split on.
+        None => ("", arg),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = digits.parse().ok()?;
+
+    let (owner, repo) = match prefix.split('/').collect::<Vec<_>>().as_slice() {
+        [""] => (None, None),
+        [repo] => (None, Some((*repo).to_string())),
+        [owner, repo] => (Some((*owner).to_string()), Some((*repo).to_string())),
+        // Three parts means a host, which `parse_short_ref` already handled;
+        // reaching here means its host wasn't configured.
+        _ => return None,
+    };
+    Some(Target::Partial {
+        owner,
+        repo,
+        number,
+    })
 }
 
 /// Enough of a pull-request shape that treating it as a channel would hide a
@@ -302,10 +330,26 @@ mod tests {
         );
     }
 
+    fn partial(owner: Option<&str>, repo: Option<&str>, number: u64) -> Target {
+        Target::Partial {
+            owner: owner.map(String::from),
+            repo: repo.map(String::from),
+            number,
+        }
+    }
+
     #[test]
-    fn a_bare_number_stays_ambiguous_for_the_caller_to_resolve() {
-        assert_eq!(target("365304").unwrap(), Target::Number(365304));
-        assert_eq!(target("#2").unwrap(), Target::Number(2));
+    fn shorter_forms_stay_ambiguous_for_the_caller_to_resolve() {
+        assert_eq!(target("365304").unwrap(), partial(None, None, 365304));
+        assert_eq!(target("#2").unwrap(), partial(None, None, 2));
+        assert_eq!(
+            target("inkling#2").unwrap(),
+            partial(None, Some("inkling"), 2)
+        );
+        assert_eq!(
+            target("dpep/inkling#2").unwrap(),
+            partial(Some("dpep"), Some("inkling"), 2)
+        );
     }
 
     #[test]

@@ -16,18 +16,19 @@ Every field has a working default, so no config is needed to start:
 inkling run --dry-run       # report only, changes nothing
 inkling run                 # do it
 inkling run '#eng' '#design'  # only these channels, ignoring configured scope
-inkling run github.com/dpep/inkling#2   # check this PR now, ignoring backoff
+inkling run inkling#2       # check this PR now, ignoring backoff
 inkling status              # window, tracked records
 inkling logs -f             # -n, -g, --path
 ```
 
 `-v` lists the tracked records and why each decision was made.
 
-`run` arguments are either channels or pull requests, told apart by shape: a
-URL, `github.com/owner/repo#12`, or a bare number matching exactly one
-tracked record. A named pull request is checked immediately rather than
-waiting for its next scheduled check. An ambiguous bare number is an error
-rather than a guess.
+`run` arguments are either channels or pull requests, told apart by shape — a
+URL, `github.com/owner/repo#12`, `owner/repo#12`, `repo#12`, or a bare `12`.
+The shorter forms are filled in from what's already tracked, and must match
+exactly one record; ambiguity is an error rather than a guess. A named pull
+request is checked immediately instead of waiting for its next scheduled
+check.
 
 ## Config
 

@@ -608,6 +608,59 @@ fn tracking(records: &[inkling::app::Tracked]) {
     println!();
 }
 
+/// Fill in the parts of a reference the caller left out, from what's already
+/// tracked. Exactly one match or nothing: reacting to the wrong pull request
+/// is worse than being asked for a fuller reference.
+fn resolve(
+    owner: &Option<String>,
+    repo: &Option<String>,
+    number: u64,
+    snapshot: &inkling::adapters::store_json::Snapshot,
+) -> Result<inkling::domain::model::Reference, String> {
+    use inkling::domain::model::Reference::GitHubPullRequest;
+
+    let mut matches: Vec<_> = snapshot
+        .tracked
+        .values()
+        .flat_map(|t| t.references.iter())
+        .filter(|reference| {
+            let GitHubPullRequest {
+                owner: o,
+                repo: r,
+                number: n,
+                ..
+            } = reference;
+            *n == number
+                && repo
+                    .as_ref()
+                    .is_none_or(|want| want.eq_ignore_ascii_case(r))
+                && owner
+                    .as_ref()
+                    .is_none_or(|want| want.eq_ignore_ascii_case(o))
+        })
+        .cloned()
+        .collect();
+    matches.sort();
+    matches.dedup();
+
+    let given = match (owner, repo) {
+        (Some(o), Some(r)) => format!("{o}/{r}#{number}"),
+        (_, Some(r)) => format!("{r}#{number}"),
+        _ => format!("#{number}"),
+    };
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!(
+            "{given}: nothing tracked references it — give the full reference, \
+             e.g. github.com/owner/repo#{number}"
+        )),
+        _ => {
+            let names: Vec<String> = matches.iter().map(ToString::to_string).collect();
+            Err(format!("{given} is ambiguous: {}", names.join(", ")))
+        }
+    }
+}
+
 /// Split `run`'s arguments into channels to search and pull requests to
 /// check now.
 ///
@@ -628,32 +681,11 @@ fn classify(
         match parse_target(target, hosts)? {
             Target::Channel(channel) => channels.push(channel),
             Target::Reference(reference) => force.push(reference),
-            Target::Number(number) => {
-                let suffix = format!("#{number}");
-                let mut matches: Vec<_> = snapshot
-                    .tracked
-                    .values()
-                    .flat_map(|t| t.references.iter())
-                    .filter(|r| r.to_string().ends_with(&suffix))
-                    .cloned()
-                    .collect();
-                matches.sort();
-                matches.dedup();
-
-                match matches.len() {
-                    1 => force.push(matches.remove(0)),
-                    0 => {
-                        return Err(format!(
-                            "#{number}: nothing tracked references it — give the full \
-                             reference, e.g. github.com/owner/repo#{number}"
-                        ));
-                    }
-                    _ => {
-                        let names: Vec<String> = matches.iter().map(ToString::to_string).collect();
-                        return Err(format!("#{number} is ambiguous: {}", names.join(", ")));
-                    }
-                }
-            }
+            Target::Partial {
+                owner,
+                repo,
+                number,
+            } => force.push(resolve(&owner, &repo, number, snapshot)?),
         }
     }
     Ok((channels, force))
