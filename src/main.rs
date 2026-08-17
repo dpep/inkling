@@ -428,7 +428,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 since: since_hours.map(|h| Utc::now() - TimeDelta::hours(h)),
             };
             let report = run.execute().map_err(|e| e.to_string())?;
-            report_out(&report, dry_run, *json)?;
+            report_out(&report, dry_run, *json, cli.common.verbose)?;
             Ok(report.exit_code())
         }
     }
@@ -541,6 +541,50 @@ fn resolve_identity<R: slack_claude::Runner>(
     Ok(me.id)
 }
 
+/// How many tracked records to list before summarizing the rest. Enough to
+/// see everything on a normal week, short enough not to bury the summary.
+const WATCH_LIMIT: usize = 15;
+
+/// List what's being watched, so "tracking 7" says which seven.
+///
+/// One line per reference: state, what's on it, the ref, and its title —
+/// `dpep/gqls#1` alone doesn't tell you what it is. Live records come first,
+/// since finished ones are only waiting to age out.
+fn watching(records: &[inkling::app::Watched]) {
+    if records.is_empty() {
+        return;
+    }
+    let (live, done): (Vec<_>, Vec<_>) = records.iter().partition(|r| !r.terminal);
+    let ordered: Vec<_> = live.into_iter().chain(done).collect();
+
+    let width = ordered
+        .iter()
+        .flat_map(|r| r.refs.iter().map(|(name, _)| name.len()))
+        .max()
+        .unwrap_or(0);
+
+    println!("watching {}", ordered.len());
+    for record in ordered.iter().take(WATCH_LIMIT) {
+        let state = record.state.map_or("?", |s| s.as_str());
+        let marks = match record.applied.is_empty() {
+            true => "—".to_string(),
+            false => record
+                .applied
+                .iter()
+                .map(|e| format!(":{e}:"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        };
+        for (name, title) in &record.refs {
+            println!("  {state:<8}  {marks:<14}  {name:<width$}  {title}");
+        }
+    }
+    if ordered.len() > WATCH_LIMIT {
+        println!("  … and {} more", ordered.len() - WATCH_LIMIT);
+    }
+    println!();
+}
+
 /// Shorten a path under $HOME to `~/…`. These are printed to be read, and a
 /// full home path is mostly a prefix you already know.
 fn tildify(path: &std::path::Path) -> String {
@@ -568,7 +612,7 @@ fn credentials(config: &Config) -> String {
     }
 }
 
-fn report_out(report: &Report, dry_run: bool, json: bool) -> Result<(), String> {
+fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result<(), String> {
     if json {
         // The detail rows carry everything; a summary object keeps the common
         // case readable.
@@ -653,6 +697,10 @@ fn report_out(report: &Report, dry_run: bool, json: bool) -> Result<(), String> 
     // all read zero while the run exits nonzero. Say it outright.
     if report.discovery_failed() {
         println!("discovery FAILED — the search window was not covered; see the log");
+    }
+
+    if verbose > 0 {
+        watching(&report.watching);
     }
 
     let verb = if dry_run { "would add" } else { "added" };

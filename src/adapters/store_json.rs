@@ -83,6 +83,11 @@ pub struct TrackedMessage {
     pub references: Vec<Reference>,
     #[serde(default)]
     pub last_state: Option<State>,
+    /// Reference display string to pull-request title, refreshed on each
+    /// check. Kept so a record can be listed without looking it up again —
+    /// most tracked records aren't due on any given run.
+    #[serde(default)]
+    pub titles: BTreeMap<String, String>,
     /// What Inkling itself added — never what a human did. Only written when
     /// evidence showed the emoji absent beforehand.
     #[serde(default)]
@@ -232,6 +237,7 @@ mod tests {
                 number: 1,
             }],
             last_state: Some(State::Approved),
+            titles: BTreeMap::new(),
             applied: vec![ReactionName::new("white_check_mark")],
             posted_at: "2026-08-12T21:21:16Z".parse().unwrap(),
             first_seen: "2026-08-12T21:30:00Z".parse().unwrap(),

@@ -39,6 +39,22 @@ pub struct Report {
     pub outcome: Option<Outcome>,
     /// Per-record detail, for dry-run output.
     pub details: Vec<Detail>,
+    /// Everything being watched, newest message first. For verbose output.
+    pub watching: Vec<Watched>,
+}
+
+/// One tracked message, flattened for display.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Watched {
+    pub channel: String,
+    pub posted_at: DateTime<Utc>,
+    pub state: Option<State>,
+    /// What Inkling has put on it, if anything.
+    pub applied: Vec<ReactionName>,
+    /// Each reference and its title, when known.
+    pub refs: Vec<(String, String)>,
+    pub terminal: bool,
+    pub permalink: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -79,6 +95,37 @@ impl Report {
             Outcome::Failure => 2,
         }
     }
+}
+
+/// Flatten the tracked set for display, newest message first — what someone
+/// is asking about is usually what just happened.
+fn summarize(snapshot: &Snapshot) -> Vec<Watched> {
+    let mut watching: Vec<Watched> = snapshot
+        .tracked
+        .values()
+        .map(|record| Watched {
+            channel: match record.channel_name.is_empty() {
+                true => record.id.channel.clone(),
+                false => format!("#{}", record.channel_name),
+            },
+            posted_at: record.posted_at,
+            state: record.last_state,
+            applied: record.applied.clone(),
+            refs: record
+                .references
+                .iter()
+                .map(|r| {
+                    let name = r.to_string();
+                    let title = record.titles.get(&name).cloned().unwrap_or_default();
+                    (name, title)
+                })
+                .collect(),
+            terminal: record.terminal,
+            permalink: record.permalink.clone(),
+        })
+        .collect();
+    watching.sort_by_key(|w| std::cmp::Reverse(w.posted_at));
+    watching
 }
 
 /// Two decimals, which is all a minute-derived duration actually carries.
@@ -126,6 +173,7 @@ impl Run<'_> {
 
         report.tracked = snapshot.tracked.len();
         report.terminal = snapshot.tracked.values().filter(|t| t.terminal).count();
+        report.watching = summarize(&snapshot);
         snapshot.run.last_run_outcome = Some(report.outcome());
 
         if !self.dry_run {
@@ -285,6 +333,7 @@ impl Run<'_> {
                         permalink: message.permalink,
                         references,
                         last_state: None,
+                        titles: std::collections::BTreeMap::new(),
                         applied: Vec::new(),
                         posted_at: message.posted_at,
                         first_seen: now,
@@ -393,6 +442,15 @@ impl Run<'_> {
                 .filter_map(|(r, s)| s.ok().map(|status| (r, status)))
                 .collect();
             let states: Vec<State> = resolved.iter().map(|(_, s)| s.state).collect();
+            if let Some(record) = snapshot.tracked.get_mut(&key) {
+                for (reference, status) in &resolved {
+                    if !status.title.is_empty() {
+                        record
+                            .titles
+                            .insert(reference.to_string(), status.title.clone());
+                    }
+                }
+            }
 
             let existing = known.as_ref().and_then(|m| m.get(&record.id).cloned());
             let plan = reconcile(&states, existing.as_deref(), self.config);

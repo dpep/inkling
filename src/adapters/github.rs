@@ -74,7 +74,7 @@ fn build_query(references: &[Reference]) -> String {
             ..
         } = reference;
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision author {{ login ... on User {{ name }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -110,6 +110,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                     Some(pr) => Ok(RefStatus {
                         state: pr.state(),
                         author: pr.author.as_ref().map(Author::display).unwrap_or_default(),
+                        title: pr.title.clone(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -148,6 +149,8 @@ struct PullRequest {
     review_decision: Option<String>,
     #[serde(default)]
     author: Option<Author>,
+    #[serde(default)]
+    title: String,
 }
 
 #[derive(Debug, Deserialize)]
