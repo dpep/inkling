@@ -159,6 +159,7 @@ fn author_names_are_resolved_and_remembered() {
             clock: &clock,
             dry_run: false,
             since: None,
+            force: Vec::new(),
         }
         .execute()
         .unwrap()
@@ -201,6 +202,7 @@ fn a_newly_added_channel_gets_a_first_run_window() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -242,6 +244,7 @@ fn the_report_names_what_it_is_tracking() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -259,6 +262,73 @@ fn the_report_names_what_it_is_tracking() {
             "white_check_mark"
         )]
     );
+}
+
+#[test]
+fn naming_a_pull_request_checks_it_despite_the_backoff() {
+    // The whole point: a PR that merged seconds after its last check
+    // shouldn't wait out the schedule when you already know it merged.
+    let config = config();
+    let source = FakeMessageSource::with(vec![merged_message()]);
+    let provider = ScriptedStatusProvider::new();
+    provider.set(&pr("gqls", 1), State::Open);
+    let sink = RecordingSink::new();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    let run = |force: Vec<Reference>| {
+        Run {
+            config: &config,
+            source: &source,
+            provider: &provider,
+            sink: &sink,
+            store: &store,
+            clock: &clock,
+            dry_run: false,
+            since: None,
+            force,
+        }
+        .execute()
+        .unwrap()
+    };
+
+    run(vec![]);
+    assert_eq!(sink.emoji_names().len(), 0, "open draws nothing");
+
+    // It merges, and the clock has not moved — normally far too soon.
+    provider.set(&pr("gqls", 1), State::Merged);
+    let deferred = run(vec![]);
+    assert_eq!(deferred.checked, 0, "not due yet");
+    assert!(deferred.next_check.is_some(), "and it says when it will be");
+
+    let forced = run(vec![pr("gqls", 1)]);
+    assert_eq!(forced.checked, 1);
+    assert_eq!(sink.emoji_names(), vec!["merged"]);
+}
+
+#[test]
+fn forcing_something_untracked_says_so() {
+    let config = config();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    let report = Run {
+        config: &config,
+        source: &FakeMessageSource::with(vec![]),
+        provider: &ScriptedStatusProvider::new(),
+        sink: &RecordingSink::new(),
+        store: &store,
+        clock: &clock,
+        dry_run: false,
+        since: None,
+        force: vec![pr("gqls", 99)],
+    }
+    .execute()
+    .unwrap();
+
+    // Inkling annotates Slack messages, so a PR nobody posted has nothing
+    // to act on — worth saying rather than reporting a silent zero.
+    assert_eq!(report.unmatched, vec!["github.com/dpep/gqls#99"]);
 }
 
 #[test]
@@ -308,6 +378,7 @@ fn a_capped_search_advances_only_as_far_as_it_read() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -334,6 +405,7 @@ fn a_failed_scope_does_not_hold_back_the_others() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -370,6 +442,7 @@ fn personal_mode_actually_searches() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -398,6 +471,7 @@ fn a_clean_run_signals_and_advances_the_watermark() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -439,6 +513,7 @@ fn a_dry_run_changes_nothing() {
         clock: &clock,
         dry_run: true,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -470,6 +545,7 @@ fn a_failed_discovery_holds_the_watermark_back() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -511,6 +587,7 @@ fn one_unreadable_reference_does_not_stop_the_others() {
         clock: &clock,
         dry_run: false,
         since: None,
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -546,6 +623,7 @@ fn a_second_run_over_unchanged_state_does_nothing() {
             clock,
             dry_run: false,
             since: None,
+            force: Vec::new(),
         }
         .execute()
         .unwrap()
@@ -592,6 +670,7 @@ fn a_narrowing_since_does_not_advance_the_watermark() {
         clock: &clock,
         dry_run: false,
         since: Some(Utc::now().max(clock.now()) - TimeDelta::hours(1)),
+        force: Vec::new(),
     }
     .execute()
     .unwrap();
@@ -623,6 +702,7 @@ fn an_expired_message_stops_being_tracked() {
             clock,
             dry_run: false,
             since: None,
+            force: Vec::new(),
         }
         .execute()
         .unwrap()

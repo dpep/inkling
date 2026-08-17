@@ -57,10 +57,13 @@ struct Common {
 enum Command {
     /// Discover new messages and bring tracked ones up to date.
     Run {
-        /// Only search these channels, ignoring the configured scope. Handles
-        /// or IDs. Given any, personal mode is off for this run — asking for
-        /// a channel and getting your DMs too would be surprising.
-        channels: Vec<String>,
+        /// Channels to search, or pull requests to check now.
+        ///
+        /// A channel handle or ID narrows the run to it, turning off personal
+        /// mode. A pull request — full URL, `github.com/owner/repo#12`, or a
+        /// bare number matching something tracked — is checked immediately,
+        /// ignoring the backoff schedule.
+        targets: Vec<String>,
         /// Report what would happen, changing nothing in Slack or on disk.
         #[arg(long, short = 'n')]
         dry_run: bool,
@@ -396,7 +399,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             Ok(0)
         }
         Command::Run {
-            channels,
+            targets,
             dry_run,
             since_hours,
             json,
@@ -413,8 +416,15 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let clock = SystemClock;
 
             let mut config = config;
+            let snapshot = store.load().map_err(|e| e.to_string())?;
+            let (channels, force) = classify(targets, &config.github.hosts, &snapshot)?;
             if !channels.is_empty() {
-                config.slack.channels = channels.clone();
+                config.slack.channels = channels;
+                config.slack.personal = false;
+            } else if !force.is_empty() {
+                // Only pull requests named: "check this one now" needs no
+                // search, since the message is already tracked.
+                config.slack.channels.clear();
                 config.slack.personal = false;
             }
             // Still needed with an explicit channel: only_my_messages filters
@@ -432,6 +442,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 clock: &clock,
                 dry_run,
                 since: since_hours.map(|h| Utc::now() - TimeDelta::hours(h)),
+                force,
             };
             let report = run.execute().map_err(|e| e.to_string())?;
             report_out(&report, dry_run, *json, cli.common.verbose)?;
@@ -597,6 +608,68 @@ fn tracking(records: &[inkling::app::Tracked]) {
     println!();
 }
 
+/// Split `run`'s arguments into channels to search and pull requests to
+/// check now.
+///
+/// A bare number is resolved against what's already tracked, and only when
+/// exactly one record matches. Guessing a repository would react to the
+/// wrong pull request, which is worse than asking for a fuller reference.
+fn classify(
+    targets: &[String],
+    hosts: &[String],
+    snapshot: &inkling::adapters::store_json::Snapshot,
+) -> Result<(Vec<String>, Vec<inkling::domain::model::Reference>), String> {
+    use inkling::domain::detect::{Target, parse_target};
+
+    let mut channels = Vec::new();
+    let mut force = Vec::new();
+
+    for target in targets {
+        match parse_target(target, hosts)? {
+            Target::Channel(channel) => channels.push(channel),
+            Target::Reference(reference) => force.push(reference),
+            Target::Number(number) => {
+                let suffix = format!("#{number}");
+                let mut matches: Vec<_> = snapshot
+                    .tracked
+                    .values()
+                    .flat_map(|t| t.references.iter())
+                    .filter(|r| r.to_string().ends_with(&suffix))
+                    .cloned()
+                    .collect();
+                matches.sort();
+                matches.dedup();
+
+                match matches.len() {
+                    1 => force.push(matches.remove(0)),
+                    0 => {
+                        return Err(format!(
+                            "#{number}: nothing tracked references it — give the full \
+                             reference, e.g. github.com/owner/repo#{number}"
+                        ));
+                    }
+                    _ => {
+                        let names: Vec<String> = matches.iter().map(ToString::to_string).collect();
+                        return Err(format!("#{number} is ambiguous: {}", names.join(", ")));
+                    }
+                }
+            }
+        }
+    }
+    Ok((channels, force))
+}
+
+/// A duration at the resolution someone waiting actually cares about.
+fn humanize(wait: TimeDelta) -> String {
+    let minutes = wait.num_minutes();
+    match minutes {
+        0 => "under a minute".to_string(),
+        m if m < 60 => format!("{m}m"),
+        m if m < 60 * 24 => format!("{}h{:02}m", m / 60, m % 60),
+        m => format!("{}d", m / (60 * 24)),
+    }
+}
+
 /// Columns of the terminal, or a reasonable width when output isn't a tty.
 fn terminal_width() -> usize {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
@@ -737,11 +810,31 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
         tracking(&report.tracking);
     }
 
+    for reference in &report.unmatched {
+        println!("{reference}: nothing tracked references it");
+    }
+
+    // "checked 0" alone reads the same whether nothing was due or nothing was
+    // found, so say how many were eligible and when the next one comes up.
+    let checked = match report.next_check {
+        Some(next) => {
+            let wait = next
+                .signed_duration_since(Utc::now())
+                .max(TimeDelta::zero());
+            format!(
+                "checked {}/{} (next in {})",
+                report.checked,
+                report.live,
+                humanize(wait)
+            )
+        }
+        None => format!("checked {}/{}", report.checked, report.live),
+    };
+
     let verb = if dry_run { "would add" } else { "added" };
     println!(
-        "discovered {} · checked {} · {verb} {} · skipped {} · failed {} · tracking {} ({} done)",
+        "discovered {} · {checked} · {verb} {} · skipped {} · failed {} · tracking {} ({} done)",
         report.discovered,
-        report.checked,
         report.added.len(),
         report.skipped,
         report.failed,

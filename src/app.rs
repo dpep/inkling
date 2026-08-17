@@ -25,6 +25,10 @@ pub struct Run<'a> {
     pub dry_run: bool,
     /// Overrides the computed window start, for `--since`.
     pub since: Option<DateTime<Utc>>,
+    /// Check these regardless of when they were last looked at. Named
+    /// explicitly, so the backoff that exists to save calls is deliberately
+    /// set aside rather than worked around.
+    pub force: Vec<Reference>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -36,6 +40,12 @@ pub struct Report {
     pub skipped: usize,
     pub failed: usize,
     pub terminal: usize,
+    /// Records eligible for a check — everything not yet finished.
+    pub live: usize,
+    /// Soonest a deferred record comes due, when any were deferred.
+    pub next_check: Option<DateTime<Utc>>,
+    /// Forced references that match nothing tracked.
+    pub unmatched: Vec<String>,
     pub outcome: Option<Outcome>,
     /// Per-record detail, for dry-run output.
     pub details: Vec<Detail>,
@@ -388,6 +398,49 @@ impl Run<'_> {
             .filter(|(_, t)| self.is_due(t, now))
             .map(|(key, _)| key.clone())
             .collect();
+
+        // "checked 0" alone can't distinguish "nothing was due" from
+        // "nothing was found", so record what was eligible and when the
+        // nearest deferred record comes up.
+        // Eligible this run: unfinished, plus anything explicitly named.
+        report.live = snapshot
+            .tracked
+            .values()
+            .filter(|t| !t.terminal || self.forced(t))
+            .count();
+        report.next_check = snapshot
+            .tracked
+            .values()
+            .filter(|t| !t.terminal && !due.contains(&t.key()))
+            .filter_map(|t| {
+                t.last_checked
+                    .map(|last| schedule::next_check_at(&self.config.tracking, t.posted_at, last))
+            })
+            .min();
+        for record in snapshot.tracked.values() {
+            if !record.terminal
+                && !due.contains(&record.key())
+                && let Some(last) = record.last_checked
+            {
+                debug!(
+                    message = %record.id,
+                    next_check_at = ts(schedule::next_check_at(&self.config.tracking, record.posted_at, last)),
+                    "deferred"
+                );
+            }
+        }
+
+        // A forced reference nobody posted has nothing to act on — Inkling
+        // annotates Slack messages, not pull requests in the abstract.
+        for reference in &self.force {
+            let known = snapshot
+                .tracked
+                .values()
+                .any(|t| t.references.contains(reference));
+            if !known {
+                report.unmatched.push(reference.to_string());
+            }
+        }
         if due.is_empty() {
             return;
         }
@@ -549,6 +602,12 @@ impl Run<'_> {
     }
 
     fn is_due(&self, record: &TrackedMessage, now: DateTime<Utc>) -> bool {
+        // Naming a pull request bypasses everything, terminality included: a
+        // closed one can be reopened, and that is exactly the case where
+        // asking for a re-check is worth the call.
+        if self.forced(record) {
+            return true;
+        }
         if record.terminal {
             return false;
         }
@@ -558,6 +617,10 @@ impl Run<'_> {
                 now >= schedule::next_check_at(&self.config.tracking, record.posted_at, last)
             }
         }
+    }
+
+    fn forced(&self, record: &TrackedMessage) -> bool {
+        self.force.iter().any(|r| record.references.contains(r))
     }
 
     /// Terminal records are kept and skipped until they fall out of the

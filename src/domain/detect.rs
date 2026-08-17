@@ -8,6 +8,80 @@
 use crate::domain::model::Reference;
 use iriq::Extractor;
 
+/// What a positional argument to `run` turned out to mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A fully-qualified pull request.
+    Reference(Reference),
+    /// A bare number. Ambiguous until matched against tracked records —
+    /// guessing a repository would react to the wrong pull request.
+    Number(u64),
+    Channel(String),
+}
+
+/// Classify one `run` argument.
+///
+/// Order matters: a URL is unambiguous and wins, then the short form Inkling
+/// prints in its own output, then a bare number, then anything else is a
+/// channel.
+///
+/// An argument that plainly means a pull request but doesn't parse is an
+/// error rather than a channel — `github.com/dpep/inklng#2` is a typo, not a
+/// channel somebody named that.
+pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
+    let trimmed = arg.trim();
+
+    if let Some(reference) = detect(trimmed, hosts).into_iter().next() {
+        return Ok(Target::Reference(reference));
+    }
+    if let Some(reference) = parse_short_ref(trimmed, hosts) {
+        return Ok(Target::Reference(reference));
+    }
+
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+        return match digits.parse() {
+            Ok(number) => Ok(Target::Number(number)),
+            Err(_) => Err(format!("{trimmed}: pull request number is out of range")),
+        };
+    }
+
+    if looks_like_a_pull_request(trimmed) {
+        return Err(format!(
+            "{trimmed}: looks like a pull request but isn't one — expected \
+             https://<host>/<owner>/<repo>/pull/<number>"
+        ));
+    }
+    Ok(Target::Channel(trimmed.to_string()))
+}
+
+/// `github.com/owner/repo#12` — the form Inkling prints, accepted back.
+fn parse_short_ref(arg: &str, hosts: &[String]) -> Option<Reference> {
+    let (path, number) = arg.rsplit_once('#')?;
+    let number: u64 = number.parse().ok()?;
+    let parts: Vec<&str> = path.split('/').collect();
+    let [host, owner, repo] = parts.as_slice() else {
+        return None;
+    };
+    let host = host.to_lowercase();
+    hosts
+        .iter()
+        .any(|h| h.to_lowercase() == host)
+        .then(|| Reference::GitHubPullRequest {
+            host,
+            owner: (*owner).to_string(),
+            repo: (*repo).to_string(),
+            number,
+        })
+}
+
+/// Enough of a pull-request shape that treating it as a channel would hide a
+/// typo rather than do what was asked.
+fn looks_like_a_pull_request(arg: &str) -> bool {
+    let lower = arg.to_lowercase();
+    lower.contains("/pull/") || lower.contains("github.")
+}
+
 /// Extract every distinct reference in `text`, in the order they appear.
 ///
 /// `hosts` is the set of GitHub hosts to honor, so an enterprise install can
@@ -200,6 +274,65 @@ mod tests {
         let text = "https://github.com/dpep/inkling/pull/3 and again \
                     https://github.com/dpep/inkling/pull/3/files";
         assert_eq!(detected(text), vec![pr("dpep", "inkling", 3)]);
+    }
+
+    fn target(arg: &str) -> Result<Target, String> {
+        parse_target(arg, &hosts())
+    }
+
+    #[test]
+    fn a_url_argument_is_a_pull_request() {
+        assert_eq!(
+            target("https://github.com/dpep/inkling/pull/2").unwrap(),
+            Target::Reference(pr("dpep", "inkling", 2))
+        );
+        // Scheme optional, trailing path ignored.
+        assert_eq!(
+            target("github.com/dpep/inkling/pull/2/files").unwrap(),
+            Target::Reference(pr("dpep", "inkling", 2))
+        );
+    }
+
+    #[test]
+    fn the_short_form_inkling_prints_is_accepted_back() {
+        // Whatever `refs=` shows in the output should work as input.
+        assert_eq!(
+            target("github.com/dpep/inkling#2").unwrap(),
+            Target::Reference(pr("dpep", "inkling", 2))
+        );
+    }
+
+    #[test]
+    fn a_bare_number_stays_ambiguous_for_the_caller_to_resolve() {
+        assert_eq!(target("365304").unwrap(), Target::Number(365304));
+        assert_eq!(target("#2").unwrap(), Target::Number(2));
+    }
+
+    #[test]
+    fn channel_handles_still_parse_as_channels() {
+        assert_eq!(target("#eng").unwrap(), Target::Channel("#eng".into()));
+        assert_eq!(
+            target("eng-prs").unwrap(),
+            Target::Channel("eng-prs".into())
+        );
+        assert_eq!(
+            target("C012XYZ6789").unwrap(),
+            Target::Channel("C012XYZ6789".into())
+        );
+    }
+
+    #[test]
+    fn a_malformed_pull_request_errors_rather_than_becoming_a_channel() {
+        // Far more likely a typo than a channel actually named this, and
+        // treating it as one would silently search for nothing.
+        assert!(target("github.com/dpep/inkling#").is_err());
+        assert!(target("https://github.com/dpep/pull/2").is_err());
+        assert!(target("github.com/dpep/inkling/pull/abc").is_err());
+    }
+
+    #[test]
+    fn an_unconfigured_host_is_not_silently_a_channel() {
+        assert!(parse_target("github.enterprise.io/a/b#1", &hosts()).is_err());
     }
 
     #[test]
