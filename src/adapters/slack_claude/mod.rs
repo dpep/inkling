@@ -22,6 +22,7 @@ use crate::domain::window::SearchWindow;
 use crate::ports::{Discovered, MessageSource, ReactionSink, Scope, SinkError, SourceError};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// The account-linked connector this has always used. Still the default, so
 /// an absent `[slack.mcp]` changes nothing.
@@ -96,6 +97,8 @@ pub fn looks_like_channel_id(s: &str) -> bool {
 pub struct SlackClaude<R: Runner> {
     runner: R,
     tools: ToolNames,
+    /// Injectable so tests exercising the retry path don't sleep through it.
+    retry_delay: Duration,
     channel_ids: RefCell<HashMap<String, String>>,
     user_names: RefCell<HashMap<String, String>>,
 }
@@ -105,6 +108,11 @@ pub struct SlackClaude<R: Runner> {
 /// in practice, and a fresh call usually succeeds, so every operation gets a
 /// bounded retry. Without this, a healthy run reports a spurious failure.
 const ATTEMPTS: usize = 3;
+
+/// Wait before retrying. Not exponential — this is three tries against a
+/// transient hiccup, not a rate limit — but back-to-back retries give an
+/// upstream blip no time at all to clear.
+const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
 /// The tool's own maximum. A full page means there is more behind it.
 pub const PAGE_LIMIT: usize = 20;
@@ -118,9 +126,16 @@ impl<R: Runner> SlackClaude<R> {
         Self {
             runner,
             tools,
+            retry_delay: RETRY_DELAY,
             channel_ids: RefCell::new(HashMap::new()),
             user_names: RefCell::new(HashMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    fn without_delay(mut self) -> Self {
+        self.retry_delay = Duration::ZERO;
+        self
     }
 
     /// Run a prompt and interpret the reply, retrying when the reply doesn't
@@ -135,7 +150,10 @@ impl<R: Runner> SlackClaude<R> {
     ) -> Result<T, String> {
         let mut last = String::from("no attempt made");
         for attempt in 0..ATTEMPTS {
-            match self.runner.run(prompt, tools) {
+            if attempt > 0 && !self.retry_delay.is_zero() {
+                std::thread::sleep(self.retry_delay);
+            }
+            match self.runner.run(prompt, tools, attempt) {
                 Ok(raw) => match interpret(&raw) {
                     Ok(value) => return Ok(value),
                     Err(Retry::Fatal(error)) => return Err(error),
@@ -591,7 +609,12 @@ mod tests {
     }
 
     impl Runner for ScriptedRunner {
-        fn run(&self, _prompt: &str, _tools: &[&str]) -> Result<String, RunnerError> {
+        fn run(
+            &self,
+            _prompt: &str,
+            _tools: &[&str],
+            _attempt: usize,
+        ) -> Result<String, RunnerError> {
             *self.calls.borrow_mut() += 1;
             Ok(self.replies.borrow_mut().pop().unwrap_or_default())
         }
@@ -602,7 +625,7 @@ mod tests {
         // Observed in a live run: the model claimed it had no Slack tools,
         // then worked fine on the next call.
         let runner = ScriptedRunner::new(&["I don't have access to any Slack MCP tools.", "OK"]);
-        let slack = SlackClaude::new(runner);
+        let slack = SlackClaude::new(runner).without_delay();
         let result = slack.add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"));
         assert!(result.is_ok());
     }
@@ -611,7 +634,7 @@ mod tests {
     fn a_refusal_slack_actually_made_is_not_retried() {
         // Retrying a missing emoji just burns time and money.
         let runner = ScriptedRunner::new(&["execution_failed: invalid_name", "OK"]);
-        let slack = SlackClaude::new(runner);
+        let slack = SlackClaude::new(runner).without_delay();
         let error = slack
             .add(&MessageId::new("C1", "1.0"), &ReactionName::new("nope"))
             .unwrap_err();
@@ -621,7 +644,7 @@ mod tests {
     #[test]
     fn giving_up_reports_the_last_failure() {
         let runner = ScriptedRunner::new(&["nonsense", "more nonsense", "still nonsense"]);
-        let slack = SlackClaude::new(runner);
+        let slack = SlackClaude::new(runner).without_delay();
         let error = slack
             .add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"))
             .unwrap_err();

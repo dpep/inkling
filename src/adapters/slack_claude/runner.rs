@@ -29,7 +29,14 @@ pub enum RunnerError {
 /// Runs a prompt and returns the model's reply. Behind a trait so tests
 /// replay recorded transcripts instead of spending money and time.
 pub trait Runner {
-    fn run(&self, prompt: &str, allowed_tools: &[&str]) -> Result<String, RunnerError>;
+    /// `attempt` is 0 for the first try. Later attempts vary the cached
+    /// prefix so a retry can't be served the same poisoned tool list.
+    fn run(
+        &self,
+        prompt: &str,
+        allowed_tools: &[&str],
+        attempt: usize,
+    ) -> Result<String, RunnerError>;
 }
 
 /// Replaces Claude Code's default system prompt, which is written for
@@ -77,7 +84,16 @@ impl ClaudeRunner {
     /// `--tools ""` drops every built-in tool definition — the bridge needs
     /// none of them, and their descriptions are large. Not `--bare`, which
     /// looks apt but breaks Anthropic auth.
-    fn args(&self, prompt: &str, allowed_tools: &[&str]) -> Vec<String> {
+    fn args(&self, prompt: &str, allowed_tools: &[&str], attempt: usize) -> Vec<String> {
+        // The marker goes in the *system* prompt, not the user prompt.
+        // Caching is prefix-based and tool definitions sit after the system
+        // prompt but before the user message — appending to the latter would
+        // leave the cached tool payload untouched, which is the one thing a
+        // retry needs to change. Only retries pay for the miss.
+        let system = match attempt {
+            0 => SYSTEM_PROMPT.to_string(),
+            n => format!("{SYSTEM_PROMPT} (attempt {})", n + 1),
+        };
         let mut args = vec![
             "-p".into(),
             prompt.into(),
@@ -86,7 +102,7 @@ impl ClaudeRunner {
             "--tools".into(),
             String::new(),
             "--system-prompt".into(),
-            SYSTEM_PROMPT.into(),
+            system,
             "--allowedTools".into(),
         ];
         args.extend(allowed_tools.iter().map(|t| (*t).to_string()));
@@ -107,9 +123,14 @@ impl ClaudeRunner {
 }
 
 impl Runner for ClaudeRunner {
-    fn run(&self, prompt: &str, allowed_tools: &[&str]) -> Result<String, RunnerError> {
+    fn run(
+        &self,
+        prompt: &str,
+        allowed_tools: &[&str],
+        attempt: usize,
+    ) -> Result<String, RunnerError> {
         let output = Command::new(&self.command)
-            .args(self.args(prompt, allowed_tools))
+            .args(self.args(prompt, allowed_tools, attempt))
             .stdin(Stdio::null())
             .output()
             .map_err(|source| RunnerError::Spawn {
@@ -160,7 +181,7 @@ mod tests {
     fn the_invocation_drops_the_default_prompt_and_tools() {
         // These three flags are the whole cost optimization; a regression here
         // is a 6x price increase that nothing else would catch.
-        let args = ClaudeRunner::default().args("do the thing", &["some_tool"]);
+        let args = ClaudeRunner::default().args("do the thing", &["some_tool"], 0);
         let pairs: Vec<_> = args.windows(2).map(|w| (&w[0], &w[1])).collect();
 
         assert!(pairs.contains(&(&"--tools".to_string(), &String::new())));
@@ -177,23 +198,37 @@ mod tests {
             mcp_config: Some(r#"{"mcpServers":{}}"#.into()),
             ..ClaudeRunner::default()
         };
-        let args = runner.args("x", &["t"]);
+        let args = runner.args("x", &["t"], 0);
         assert!(args.iter().any(|a| a == "--mcp-config"));
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
     #[test]
     fn without_an_mcp_config_neither_flag_appears() {
-        let args = ClaudeRunner::default().args("x", &["t"]);
+        let args = ClaudeRunner::default().args("x", &["t"], 0);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
         assert!(!args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
     #[test]
     fn only_the_named_tools_are_allowed() {
-        let args = ClaudeRunner::default().args("x", &["a", "b"]);
+        let args = ClaudeRunner::default().args("x", &["a", "b"], 0);
         let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(&args[allowed + 1..allowed + 3], ["a", "b"]);
+    }
+
+    #[test]
+    fn a_retry_varies_the_cached_prefix() {
+        // Identical retries get served the same cached tool definitions, so
+        // a bad list poisons every attempt in a run. Varying the system
+        // prompt — which precedes the tools — forces a fresh handshake.
+        let runner = ClaudeRunner::default();
+        let first = runner.args("x", &["t"], 0);
+        let second = runner.args("x", &["t"], 1);
+
+        assert!(first.iter().any(|a| a == SYSTEM_PROMPT));
+        assert!(!second.iter().any(|a| a == SYSTEM_PROMPT));
+        assert!(second.iter().any(|a| a.contains("(attempt 2)")));
     }
 
     #[test]
