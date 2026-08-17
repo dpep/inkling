@@ -34,6 +34,10 @@ pub struct Plan {
     pub desired: Option<ReactionName>,
     /// The emoji to actually add. `None` means nothing to do.
     pub add: Option<ReactionName>,
+    /// The reaction already on the message that made an add unnecessary.
+    /// Often an alias rather than the canonical one, which is why saying
+    /// "canonical already present" would be wrong.
+    pub satisfied_by: Option<ReactionName>,
     /// Whether adding it may be recorded as Inkling's own.
     ///
     /// Only true when evidence was known and showed the emoji absent — the
@@ -51,6 +55,7 @@ impl Plan {
             aggregate: None,
             desired: None,
             add: None,
+            satisfied_by: None,
             ledger: false,
             terminal: false,
         }
@@ -111,20 +116,23 @@ pub fn reconcile(states: &[State], reactions: Option<&[ReactionName]>, config: &
     // Any of this state's emoji counts, from anyone: if a human already
     // signaled it, Inkling has nothing to add.
     let evidence = config.evidence_for(aggregate);
-    let already_signaled = reactions.map(|present| present.iter().any(|r| evidence.contains(r)));
+    let satisfied_by = reactions
+        .and_then(|present| present.iter().find(|r| evidence.contains(r)))
+        .cloned();
 
-    let (add, ledger) = match already_signaled {
-        Some(true) => (None, false),
-        Some(false) => (Some(emoji), true),
+    let (add, ledger) = match (reactions.is_some(), satisfied_by.is_some()) {
+        (_, true) => (None, false),
+        (true, false) => (Some(emoji), true),
         // Unknown: adding is safe because duplicates are harmless, but the
         // add can't be claimed as ours without having seen it was absent.
-        None => (Some(emoji), false),
+        (false, false) => (Some(emoji), false),
     };
 
     Plan {
         aggregate: Some(aggregate),
         desired,
         add,
+        satisfied_by,
         ledger,
         terminal,
     }
@@ -267,6 +275,9 @@ mod tests {
     fn an_alias_someone_else_used_counts_as_evidence() {
         let plan = plan(&[State::Approved], Some(&["lgtm"]));
         assert_eq!(plan.add, None, "a human already signaled it");
+        // Naming the canonical would claim a reaction that isn't there.
+        assert_eq!(plan.satisfied_by, Some(ReactionName::new("lgtm")));
+        assert_eq!(plan.desired, Some(ReactionName::new("white_check_mark")));
     }
 
     #[test]

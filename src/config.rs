@@ -99,11 +99,15 @@ pub struct Filters {
     pub only_my_messages: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+// Default is implemented by hand rather than derived: `#[serde(default)]` on
+// the containing field constructs the whole struct via Default, bypassing the
+// per-field defaults below. Deriving it silently reverts them to false/None.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Slack {
-    /// Search for messages the configured user authored.
-    #[serde(default)]
+    /// Search for messages the configured user authored. On by default, so
+    /// there's always something to search without any configuration.
+    #[serde(default = "d_true")]
     pub personal: bool,
     /// Slack user ID, e.g. `U012ABC345`. Needed by personal mode and by
     /// `only_my_messages`, but resolved from the credentials and cached when
@@ -125,7 +129,9 @@ pub struct GitHub {
     /// meant to be committable.
     #[serde(default)]
     pub token_env: Option<String>,
-    #[serde(default)]
+    /// Defaults to `gh auth token`, which is already set up on most machines
+    /// that would want this.
+    #[serde(default = "d_token_command")]
     pub token_command: Option<String>,
 }
 
@@ -151,20 +157,38 @@ pub struct Run {
 }
 
 impl Config {
+    /// Load from disk, or fall back to defaults when there's no file.
+    ///
+    /// A config file is a way to change Inkling's mind, not a prerequisite for
+    /// running it — every field has a working default, so a fresh machine can
+    /// go straight to `inkling run --dry-run`.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.to_owned(),
-            source,
-        })?;
-        Self::parse(&raw, path)
+        match std::fs::read_to_string(path) {
+            Ok(raw) => Self::parse(&raw, path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::with_defaults()),
+            Err(source) => Err(ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            }),
+        }
+    }
+
+    /// What an empty config file means.
+    pub fn with_defaults() -> Self {
+        Self::parse("", "<defaults>").expect("defaults must be valid")
     }
 
     pub fn parse(raw: &str, path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let config: Config = toml::from_str(raw).map_err(|source| ConfigError::Parse {
+        let mut config: Config = toml::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.as_ref().to_owned(),
             source,
         })?;
+        // Only when nothing was configured at all — a file that names one
+        // state means the others were left out deliberately.
+        if config.status.is_empty() {
+            config.status = default_status();
+        }
         config.validate()?;
         Ok(config)
     }
@@ -272,6 +296,35 @@ fn d_max_references() -> usize {
 fn d_hosts() -> Vec<String> {
     vec!["github.com".to_string()]
 }
+fn d_token_command() -> Option<String> {
+    Some("gh auth token".to_string())
+}
+
+/// Emoji every workspace has. `:merged:` and `:shipit:` are common but not
+/// universal, and adding one the workspace lacks fails with invalid_name —
+/// so they're accepted as evidence, never written.
+fn default_status() -> BTreeMap<String, Status> {
+    BTreeMap::from([
+        (
+            State::Approved.as_str().to_string(),
+            Status {
+                canonical: "white_check_mark".into(),
+                aliases: ["heavy_check_mark", "done", "lgtm", "eyes"]
+                    .map(String::from)
+                    .into(),
+                enabled: true,
+            },
+        ),
+        (
+            State::Merged.as_str().to_string(),
+            Status {
+                canonical: "purple_heart".into(),
+                aliases: ["merged", "shipit"].map(String::from).into(),
+                enabled: true,
+            },
+        ),
+    ])
+}
 fn d_api_url() -> String {
     "https://api.github.com/graphql".to_string()
 }
@@ -313,7 +366,17 @@ impl Default for GitHub {
             hosts: d_hosts(),
             api_url: d_api_url(),
             token_env: None,
-            token_command: None,
+            token_command: d_token_command(),
+        }
+    }
+}
+
+impl Default for Slack {
+    fn default() -> Self {
+        Self {
+            personal: d_true(),
+            user_id: None,
+            channels: Vec::new(),
         }
     }
 }
@@ -347,6 +410,33 @@ mod tests {
 
     fn error(raw: &str) -> String {
         parse(raw).expect_err("should be rejected").to_string()
+    }
+
+    #[test]
+    fn an_empty_config_is_a_working_config() {
+        // A config file changes Inkling's mind; it isn't a prerequisite for
+        // running. A fresh machine should go straight to a dry run.
+        let config = Config::with_defaults();
+        assert!(config.slack.personal, "something must be searchable");
+        assert!(config.filters.only_my_messages);
+        assert_eq!(
+            config.canonical_for(State::Merged),
+            Some(ReactionName::new("purple_heart"))
+        );
+        assert!(config.github.token_command.is_some());
+    }
+
+    #[test]
+    fn a_derived_default_cannot_drift_from_the_serde_defaults() {
+        // `#[serde(default)]` on the containing field builds the struct via
+        // Default, so the two must agree or an omitted section silently
+        // means something different from an empty one.
+        let from_serde = parse("[status.merged]\ncanonical = \"x\"\n").unwrap();
+        assert_eq!(from_serde.slack.personal, Slack::default().personal);
+        assert_eq!(
+            from_serde.github.token_command,
+            GitHub::default().token_command
+        );
     }
 
     #[test]

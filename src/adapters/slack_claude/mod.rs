@@ -103,9 +103,9 @@ enum Retry {
 /// Build the search query for a scope. Scope modifiers only — no keyword.
 /// URL-shaped queries don't tokenize in Slack search, and local detection is
 /// free, so the filter is never outsourced to the search index.
-pub fn search_query(scope: &Scope, user_id: &str) -> String {
+pub fn search_query(scope: &Scope) -> String {
     match scope {
-        Scope::Personal => format!("from:<@{user_id}>"),
+        Scope::Personal(user_id) => format!("from:<@{user_id}>"),
         Scope::Channel(channel) => {
             let name = channel.trim_start_matches('#');
             // Slack spells the two forms differently: `in:#name` for a handle,
@@ -165,16 +165,7 @@ impl<R: Runner> MessageSource for SlackClaude<R> {
         if window.is_empty() {
             return Ok(Vec::new());
         }
-        // A user_id is only needed for personal scope; channel scope ignores it.
-        let query = match scope {
-            Scope::Personal => {
-                return Err(SourceError::Search(
-                    "personal scope needs a user id; use discover_personal".into(),
-                ));
-            }
-            other => search_query(other, ""),
-        };
-        self.discover_with_query(&query, window)
+        self.discover_with_query(&search_query(scope), window)
     }
 
     fn reactions(
@@ -248,16 +239,6 @@ impl<R: Runner> SlackClaude<R> {
             .borrow_mut()
             .insert(name.to_string(), id.clone());
         Ok(id)
-    }
-
-    /// Personal scope needs the configured user id, which the port's
-    /// signature doesn't carry.
-    pub fn discover_personal(
-        &self,
-        user_id: &str,
-        window: &SearchWindow,
-    ) -> Result<Vec<Message>, SourceError> {
-        self.discover_with_query(&search_query(&Scope::Personal, user_id), window)
     }
 
     /// Every message in a channel since `since`, with its reactions.
@@ -518,16 +499,16 @@ mod tests {
     #[test]
     fn queries_use_scope_modifiers_only() {
         assert_eq!(
-            search_query(&Scope::Personal, "U012ABC345"),
+            search_query(&Scope::Personal("U012ABC345".into())),
             "from:<@U012ABC345>"
         );
         assert_eq!(
-            search_query(&Scope::Channel("#inkling".into()), ""),
+            search_query(&Scope::Channel("#inkling".into())),
             "in:#inkling"
         );
         // A channel configured without the hash still works.
         assert_eq!(
-            search_query(&Scope::Channel("inkling".into()), ""),
+            search_query(&Scope::Channel("inkling".into())),
             "in:#inkling"
         );
     }
@@ -537,7 +518,7 @@ mod tests {
         // `in:#C012XYZ6789` is accepted and matches nothing, so getting this
         // wrong looks like an empty channel rather than an error.
         assert_eq!(
-            search_query(&Scope::Channel("C012XYZ6789".into()), ""),
+            search_query(&Scope::Channel("C012XYZ6789".into())),
             "in:<#C012XYZ6789>"
         );
     }

@@ -235,7 +235,9 @@ fn discovery_finds_only_messages_inside_the_window() {
     let last_run = Some("2026-08-12T21:00:00Z".parse().unwrap());
     let window = next_window(&config.window, last_run, now);
 
-    let found = source.discover(&Scope::Personal, &window).unwrap();
+    let found = source
+        .discover(&Scope::Personal("U_ME".into()), &window)
+        .unwrap();
     assert_eq!(found, vec![fresh]);
 }
 

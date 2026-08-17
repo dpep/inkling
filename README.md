@@ -17,7 +17,24 @@ reacts as those PRs move.
 
 ## Setup
 
-Write `~/.config/inkling/config.toml`:
+There's nothing to set up. Every field has a working default — personal mode,
+your own messages only, `gh auth token` for GitHub, and emoji every workspace
+has — so a fresh machine can go straight to:
+
+```sh
+inkling run --dry-run
+```
+
+A config file is how you change Inkling's mind, not a prerequisite for running
+it.
+
+```sh
+inkling config             # what it resolves to, and where that came from
+inkling config path        # where the file would be read from
+inkling config init        # write a commented starter file
+```
+
+`inkling config init` writes `~/.config/inkling/config.toml`, roughly:
 
 ```toml
 [slack]
@@ -46,7 +63,6 @@ are what it accepts as someone having already said it. Only states listed here
 get a signal; `open`, `draft`, and `closed` stay silent unless you add them.
 
 ```sh
-inkling check              # validate config, confirm credentials
 inkling run --dry-run      # see what it would do, change nothing
 inkling run                # do it
 inkling status             # window, tracked records

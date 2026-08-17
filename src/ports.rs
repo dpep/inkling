@@ -10,10 +10,14 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 /// Where to look for messages.
+///
+/// Personal scope carries the user ID rather than leaving the adapter to find
+/// it: a source that can't answer "who am I" would otherwise have to refuse
+/// the scope outright, which is exactly what used to happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// Messages the configured user wrote, wherever they wrote them.
-    Personal,
+    /// Messages this user wrote, wherever they wrote them.
+    Personal(String),
     Channel(String),
 }
 

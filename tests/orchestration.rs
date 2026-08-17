@@ -90,7 +90,7 @@ fn a_configured_channel_name_reaches_slack_as_a_name() {
     // stands between what you write and what gets searched.
     use inkling::adapters::slack_claude::search_query;
     assert_eq!(
-        search_query(&Scope::Channel("#inkling".into()), ""),
+        search_query(&Scope::Channel("#inkling".into())),
         "in:#inkling"
     );
     assert_eq!(
@@ -98,6 +98,41 @@ fn a_configured_channel_name_reaches_slack_as_a_name() {
         vec!["#inkling"],
         "the config value is a handle, and stays one"
     );
+}
+
+#[test]
+fn personal_mode_actually_searches() {
+    // Regression: the scope carried no user id, so the adapter refused it and
+    // every personal-mode run reported a discovery failure. It stayed hidden
+    // while personal defaulted off.
+    let mut config = config();
+    config.slack.personal = true;
+    config.slack.channels.clear();
+    config.slack.user_id = Some("U_ME".into());
+
+    let source = FakeMessageSource::with(vec![merged_message()]);
+    let provider = ScriptedStatusProvider::new();
+    provider.set(&pr("gqls", 1), State::Merged);
+    let sink = RecordingSink::new();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    let report = Run {
+        config: &config,
+        source: &source,
+        provider: &provider,
+        sink: &sink,
+        store: &store,
+        clock: &clock,
+        dry_run: false,
+        since: None,
+    }
+    .execute()
+    .unwrap();
+
+    assert!(!report.discovery_failed());
+    assert_eq!(report.discovered, 1);
+    assert_eq!(sink.emoji_names(), vec!["merged"]);
 }
 
 #[test]

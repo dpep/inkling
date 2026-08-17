@@ -165,7 +165,15 @@ impl Run<'_> {
         }
         let mut scopes = Vec::new();
         if self.config.slack.personal {
-            scopes.push(Scope::Personal);
+            match &self.config.slack.user_id {
+                Some(user_id) => scopes.push(Scope::Personal(user_id.clone())),
+                // Resolved before the run; if it isn't here, personal mode
+                // can't be searched and silently skipping it would hide that.
+                None => {
+                    error!("personal mode is on but no user id was resolved");
+                    return false;
+                }
+            }
         }
         scopes.extend(
             self.config
