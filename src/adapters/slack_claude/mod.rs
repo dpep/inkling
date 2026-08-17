@@ -11,7 +11,9 @@
 mod parse;
 mod runner;
 
-pub use parse::{Reaction, SearchHit, parse_channel_id, parse_reactions, parse_search};
+pub use parse::{
+    Identity, Reaction, SearchHit, parse_channel_id, parse_identity, parse_reactions, parse_search,
+};
 pub use runner::{ClaudeRunner, Runner, RunnerError, extract_result};
 
 use crate::domain::model::{Message, MessageId, ReactionName};
@@ -28,11 +30,12 @@ const READ_TOOL: &str = "mcp__claude_ai_Slack__slack_read_channel";
 const REACT_TOOL: &str = "mcp__claude_ai_Slack__slack_add_reaction";
 const CHANNELS_TOOL: &str = "mcp__claude_ai_Slack__slack_search_channels";
 const THREAD_TOOL: &str = "mcp__claude_ai_Slack__slack_read_thread";
+const PROFILE_TOOL: &str = "mcp__claude_ai_Slack__slack_read_user_profile";
 /// Only ever reachable from `slackmcp post` — deliberately not from anything
 /// Inkling's run loop can call. Inkling annotates; it does not talk.
 const SEND_TOOL: &str = "mcp__claude_ai_Slack__slack_send_message";
 
-/// Slack channel IDs look like `C0BPR3AEAG3` — a `C`, `D`, or `G` followed by
+/// Slack channel IDs look like `C012XYZ6789` — a `C`, `D`, or `G` followed by
 /// uppercase alphanumerics. Anything else is a human-typed handle.
 ///
 /// Distinguishing them locally matters: resolving a handle costs a bridge
@@ -269,6 +272,34 @@ impl<R: Runner> SlackClaude<R> {
             .collect())
     }
 
+    /// Who the credentials belong to.
+    ///
+    /// The profile tool defaults to the calling user when given no ID, which
+    /// is the only self-identification the MCP server offers. Worth having:
+    /// personal mode and the only-my-messages filter both need this ID, and
+    /// nobody knows their own Slack ID off-hand.
+    pub fn whoami(&self) -> Result<Identity, SourceError> {
+        let prompt = format!(
+            "Call {PROFILE_TOOL} with NO arguments, so it returns the current \
+             user's own profile.\n\n\
+             Then output ONLY this JSON, no commentary and no code fence:\n\
+             {{\"id\": \"...\", \"handle\": \"...\", \"name\": \"...\"}}\n\n\
+             `id` is the Slack user ID (starts with U). `handle` is the \
+             username or display name. `name` is the real name. Use an empty \
+             string for anything the profile doesn't have.",
+        );
+        self.attempt(&prompt, &[PROFILE_TOOL], |raw| {
+            match parse_identity(raw) {
+                Ok(identity) if identity.id.starts_with('U') => Ok(identity),
+                // A profile without a user ID means the tool didn't really
+                // answer; retrying is worth a shot.
+                Ok(_) => Err(Retry::Again("profile had no user id".into())),
+                Err(error) => Err(Retry::Again(error)),
+            }
+        })
+        .map_err(SourceError::Search)
+    }
+
     /// A thread's parent message and every reply, with reactions.
     pub fn thread(&self, channel_id: &str, parent_ts: &str) -> Result<Vec<Message>, SourceError> {
         let prompt = format!(
@@ -475,8 +506,8 @@ mod tests {
     #[test]
     fn queries_use_scope_modifiers_only() {
         assert_eq!(
-            search_query(&Scope::Personal, "U0E48AHQA"),
-            "from:<@U0E48AHQA>"
+            search_query(&Scope::Personal, "U012ABC345"),
+            "from:<@U012ABC345>"
         );
         assert_eq!(
             search_query(&Scope::Channel("#inkling".into()), ""),
@@ -491,11 +522,11 @@ mod tests {
 
     #[test]
     fn a_channel_id_uses_slacks_other_spelling() {
-        // `in:#C0BPR3AEAG3` is accepted and matches nothing, so getting this
+        // `in:#C012XYZ6789` is accepted and matches nothing, so getting this
         // wrong looks like an empty channel rather than an error.
         assert_eq!(
-            search_query(&Scope::Channel("C0BPR3AEAG3".into()), ""),
-            "in:<#C0BPR3AEAG3>"
+            search_query(&Scope::Channel("C012XYZ6789".into()), ""),
+            "in:<#C012XYZ6789>"
         );
     }
 
@@ -514,7 +545,7 @@ mod tests {
     fn channel_ids_are_told_apart_from_handles_without_a_lookup() {
         // Resolving a handle costs a bridge call, so an ID must never take
         // that path.
-        assert!(looks_like_channel_id("C0BPR3AEAG3"));
+        assert!(looks_like_channel_id("C012XYZ6789"));
         assert!(looks_like_channel_id("D0AS6PZ20AF"));
         assert!(!looks_like_channel_id("inkling"));
         assert!(!looks_like_channel_id("eng-prs"));

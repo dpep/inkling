@@ -443,7 +443,7 @@ only_my_messages           = true   # annotate only posts authored by slack.user
 [slack]
 adapter  = "claude-mcp"
 personal = true
-user_id  = "U0E48AHQA"                 # for from:<@…>; resolved once if omitted
+# user_id  = "U012ABC345"              # resolved from credentials and cached
 channels = ["#eng-prs", "#team-foo"]
 
 [slack.claude_mcp]

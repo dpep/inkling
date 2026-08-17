@@ -22,7 +22,7 @@ Returns, per result: channel name **and ID**, author display name + **user ID**,
 | Query | Result |
 | --- | --- |
 | `in:#coding` | Works — all channel messages, no keyword needed |
-| `from:<@U0E48AHQA> github` | Works — personal mode; angle brackets are literal |
+| `from:<@U012ABC345> github` | Works — personal mode; angle brackets are literal |
 | `in:#coding github` | Works |
 | `in:#coding github.com/*/pull` | **Zero results** — URL-shaped queries don't tokenize |
 
@@ -135,7 +135,7 @@ makes it possible later.
 
 ## Test corpus
 
-Two real messages in `#coding` (`C0AS6PZ20AF`), which together exercise both interesting outcomes:
+Two real messages in `#coding` (`C012XYZ6789`), which together exercise both interesting outcomes:
 
 | Message | PR | GitHub state | Inkling's verdict |
 | --- | --- | --- | --- |

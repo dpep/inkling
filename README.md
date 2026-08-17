@@ -22,8 +22,9 @@ Write `~/.config/inkling/config.toml`:
 ```toml
 [slack]
 personal = false                 # true to find your own posts anywhere
-user_id  = "U0E48AHQA"           # yours: slackmcp search 'from:@you' shows it
 channels = ["#eng-prs"]
+# user_id is resolved from your credentials on first run and cached.
+# `slackmcp whoami` prints it if you want to pin it explicitly.
 
 [filters]
 only_my_messages = true          # annotate only your posts — start here
@@ -75,9 +76,11 @@ subprocess, because the Slack CLI isn't usable in this environment. That bridge
 is also a standalone binary, so it's useful by hand and easy to debug:
 
 ```sh
+slackmcp whoami                               # who your credentials belong to
 slackmcp search '#eng' --hours 6              # or an ID, or 'from:<@U123> has:link'
 slackmcp reactions '#eng' --since 1786596000
-slackmcp react '#eng' 1786596050.245879 merged
+slackmcp react '#eng' 1786596050.245879 merged eyes
+slackmcp thread '#eng' 1786596050.245879      # parent message plus replies
 slackmcp channel '#eng'                       # handle -> ID
 ```
 

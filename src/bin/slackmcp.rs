@@ -25,7 +25,7 @@ use serde::Serialize;
 Slack is reachable without Slack CLI credentials.\n\n\
 Every call allowlists only the one MCP tool it needs, so this cannot post \
 messages regardless of what any Slack content asks for.\n\n\
-Channels may be given as an ID (C0BPR3AEAG3) or a handle (#eng, eng); handles \
+Channels may be given as an ID (C012XYZ6789) or a handle (#eng, eng); handles \
 cost one extra lookup to resolve."
 )]
 struct Cli {
@@ -73,7 +73,7 @@ enum Command {
     /// Find messages. QUERY takes Slack search syntax, or a bare channel
     /// handle/ID as a shorthand for `in:#channel`.
     Search {
-        /// e.g. "#eng", "C0BPR3AEAG3", "from:<@U123>", "in:#eng has:link"
+        /// e.g. "#eng", "C012XYZ6789", "from:<@U123>", "in:#eng has:link"
         query: String,
         /// Only messages at or after this Unix timestamp.
         #[arg(long)]
@@ -130,6 +130,8 @@ enum Command {
         /// Channel handle, e.g. "#eng" or "eng".
         name: String,
     },
+    /// Show who the Slack credentials belong to — handle and user ID.
+    Whoami,
 }
 
 #[derive(Serialize)]
@@ -287,6 +289,12 @@ fn run(cli: &Cli) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             println!("ok");
             Ok(())
+        }
+        Command::Whoami => {
+            let me = slack.whoami().map_err(|e| e.to_string())?;
+            emit(format, std::slice::from_ref(&me), |r| {
+                vec![r.id.clone(), r.handle.clone(), r.name.clone()]
+            })
         }
         Command::Channel { name } => {
             let id = slack.resolve_channel(name).map_err(|e| e.to_string())?;

@@ -28,6 +28,9 @@ pub struct Snapshot {
     /// bridge call, so this is worth carrying between runs.
     #[serde(default)]
     pub channels: BTreeMap<String, String>,
+    /// Whose credentials these are, resolved once rather than configured.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

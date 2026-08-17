@@ -8,7 +8,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct SearchHit {
@@ -78,6 +78,21 @@ pub fn parse_reactions(raw: &str) -> Result<Vec<Reaction>, String> {
             names: hit.reactions.iter().map(ReactionName::new).collect(),
         })
         .collect())
+}
+
+/// Who the Slack credentials belong to.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Identity {
+    pub id: String,
+    #[serde(default)]
+    pub handle: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+pub fn parse_identity(raw: &str) -> Result<Identity, String> {
+    let json = extract_json(raw)?;
+    serde_json::from_str(&json).map_err(|e| format!("profile response: {e}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,8 +176,8 @@ mod tests {
     use super::*;
 
     const SEARCH: &str = r#"{"messages":[
-        {"channel_id":"C0BPR3AEAG3","ts":"1786596050.245879","user_id":"U0E48AHQA",
-         "permalink":"https://dpepper.slack.com/archives/C0BPR3AEAG3/p1786596050245879",
+        {"channel_id":"C012XYZ6789","ts":"1786596050.245879","user_id":"U012ABC345",
+         "permalink":"https://example.slack.com/archives/C012XYZ6789/p1786596050245879",
          "text":"test fixture — merged PR https://github.com/dpep/gqls/pull/1"}
     ]}"#;
 
@@ -170,7 +185,7 @@ mod tests {
     fn a_clean_search_response_parses() {
         let hits = parse_search(SEARCH).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].channel_id, "C0BPR3AEAG3");
+        assert_eq!(hits[0].channel_id, "C012XYZ6789");
         assert_eq!(hits[0].ts, "1786596050.245879");
     }
 
@@ -244,10 +259,20 @@ mod tests {
     }
 
     #[test]
+    fn an_identity_parses_with_optional_fields_missing() {
+        let me = parse_identity(r#"{"id":"U012ABC345","handle":"dp","name":"D Pepper"}"#).unwrap();
+        assert_eq!(me.id, "U012ABC345");
+        assert_eq!(me.handle, "dp");
+
+        let sparse = parse_identity(r#"{"id":"U012ABC345"}"#).unwrap();
+        assert!(sparse.handle.is_empty());
+    }
+
+    #[test]
     fn a_channel_id_parses_and_a_miss_is_not_an_error() {
         assert_eq!(
-            parse_channel_id(r#"{"id": "C0BPR3AEAG3"}"#).unwrap(),
-            Some("C0BPR3AEAG3".to_string())
+            parse_channel_id(r#"{"id": "C012XYZ6789"}"#).unwrap(),
+            Some("C012XYZ6789".to_string())
         );
         // No such channel is an answer, not a failure.
         assert_eq!(parse_channel_id(r#"{"id": null}"#).unwrap(), None);

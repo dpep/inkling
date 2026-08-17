@@ -105,8 +105,9 @@ pub struct Slack {
     /// Search for messages the configured user authored.
     #[serde(default)]
     pub personal: bool,
-    /// Slack user ID, e.g. `U0E48AHQA`. Required by personal mode and by
-    /// `only_my_messages`.
+    /// Slack user ID, e.g. `U012ABC345`. Needed by personal mode and by
+    /// `only_my_messages`, but resolved from the credentials and cached when
+    /// omitted — nobody knows their own Slack ID off-hand.
     #[serde(default)]
     pub user_id: Option<String>,
     #[serde(default)]
@@ -201,12 +202,8 @@ impl Config {
             ));
         }
 
-        let needs_user_id = self.slack.personal || self.filters.only_my_messages;
-        if needs_user_id && self.slack.user_id.is_none() {
-            return Err(invalid(
-                "slack.user_id is required by slack.personal and filters.only_my_messages".into(),
-            ));
-        }
+        // slack.user_id is deliberately not required: the modes that need it
+        // resolve it from the credentials at run time and cache it.
 
         if self.github.hosts.is_empty() {
             return Err(invalid("github.hosts is empty; nothing would match".into()));
@@ -328,7 +325,7 @@ mod tests {
     const EXAMPLE: &str = r##"
         [slack]
         personal = true
-        user_id = "U0E48AHQA"
+        user_id = "U012ABC345"
         channels = ["#coding"]
 
         [status.approved]
@@ -463,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn modes_that_need_a_user_id_say_so() {
+    fn an_omitted_user_id_is_fine_because_it_gets_resolved() {
         let raw = r#"
             [slack]
             personal = true
@@ -471,7 +468,8 @@ mod tests {
             [status.merged]
             canonical = "merged"
         "#;
-        assert!(error(raw).contains("slack.user_id is required"));
+        let config = parse(raw).unwrap();
+        assert_eq!(config.slack.user_id, None);
     }
 
     #[test]

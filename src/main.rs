@@ -191,6 +191,11 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let github = GitHubProvider::new(&config.github.api_url, token);
             let clock = SystemClock;
 
+            let mut config = config;
+            if config.slack.user_id.is_none() {
+                config.slack.user_id = Some(resolve_identity(&slack, &store)?);
+            }
+
             let run = Run {
                 config: &config,
                 source: &slack,
@@ -206,6 +211,23 @@ fn run(cli: &Cli) -> Result<i32, String> {
             Ok(report.exit_code())
         }
     }
+}
+
+/// Nobody knows their own Slack ID off-hand, so an omitted `slack.user_id` is
+/// resolved from the credentials and cached — it costs a bridge call, and it
+/// can't change for a given set of credentials.
+fn resolve_identity<R: inkling::adapters::slack_claude::Runner>(
+    slack: &SlackClaude<R>,
+    store: &JsonStore,
+) -> Result<String, String> {
+    let mut snapshot = store.load().map_err(|e| e.to_string())?;
+    if let Some(id) = &snapshot.user_id {
+        return Ok(id.clone());
+    }
+    let me = slack.whoami().map_err(|e| e.to_string())?;
+    snapshot.user_id = Some(me.id.clone());
+    store.save(&snapshot).map_err(|e| e.to_string())?;
+    Ok(me.id)
 }
 
 fn credentials(config: &Config) -> String {
