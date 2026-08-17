@@ -219,6 +219,49 @@ fn a_newly_added_channel_gets_a_first_run_window() {
 }
 
 #[test]
+fn the_report_names_what_it_is_watching() {
+    // "tracking 2" is not an answer on its own — the point of the list is to
+    // say which two, and what each one is.
+    let config = config();
+    let mut fresh = merged_message();
+    fresh.posted_at = "2026-08-12T21:25:00Z".parse().unwrap();
+
+    let source = FakeMessageSource::with(vec![fresh]);
+    let provider = ScriptedStatusProvider::new();
+    provider.set_with_author(&pr("gqls", 1), State::Approved, "Daniel Pepper");
+    let sink = RecordingSink::new();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    let report = Run {
+        config: &config,
+        source: &source,
+        provider: &provider,
+        sink: &sink,
+        store: &store,
+        clock: &clock,
+        dry_run: false,
+        since: None,
+    }
+    .execute()
+    .unwrap();
+
+    assert_eq!(report.watching.len(), report.tracked);
+    let watched = &report.watching[0];
+    assert_eq!(watched.channel, "#test");
+    assert_eq!(watched.state, Some(State::Approved));
+    assert_eq!(watched.refs[0].0, "github.com/dpep/gqls#1");
+    assert!(!watched.terminal);
+    // The emoji it just applied shows against the record that carries it.
+    assert_eq!(
+        watched.applied,
+        vec![inkling::domain::model::ReactionName::new(
+            "white_check_mark"
+        )]
+    );
+}
+
+#[test]
 fn a_capped_search_advances_only_as_far_as_it_read() {
     // Slack caps a search page, so a wide window over a busy channel returns
     // a prefix. Advancing to the window's end would step over the remainder;

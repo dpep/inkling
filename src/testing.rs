@@ -105,6 +105,7 @@ impl ScriptedStatusProvider {
             Ok(RefStatus {
                 state,
                 author: author.to_string(),
+                title: String::new(),
             }),
         );
     }

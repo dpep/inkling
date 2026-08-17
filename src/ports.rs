@@ -108,6 +108,8 @@ pub struct RefStatus {
     /// Who opened it. Display only — worth showing because the person who
     /// posted the link often isn't the person who wrote the code.
     pub author: String,
+    /// Display only. A bare `owner/repo#12` says nothing about what it is.
+    pub title: String,
 }
 
 impl RefStatus {
@@ -115,6 +117,7 @@ impl RefStatus {
         Self {
             state,
             author: String::new(),
+            title: String::new(),
         }
     }
 }
