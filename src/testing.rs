@@ -81,7 +81,7 @@ impl MessageSource for FakeMessageSource {
 /// a PR from open to approved to merged and assert what each run does.
 #[derive(Default)]
 pub struct ScriptedStatusProvider {
-    states: RefCell<HashMap<Reference, Result<State, RefError>>>,
+    states: RefCell<HashMap<Reference, Result<RefStatus, RefError>>>,
 }
 
 impl ScriptedStatusProvider {
@@ -92,7 +92,18 @@ impl ScriptedStatusProvider {
     pub fn set(&self, reference: &Reference, state: State) {
         self.states
             .borrow_mut()
-            .insert(reference.clone(), Ok(state));
+            .insert(reference.clone(), Ok(RefStatus::new(state)));
+    }
+
+    /// For display assertions, where who opened the PR is the point.
+    pub fn set_with_author(&self, reference: &Reference, state: State, author: &str) {
+        self.states.borrow_mut().insert(
+            reference.clone(),
+            Ok(RefStatus {
+                state,
+                author: author.to_string(),
+            }),
+        );
     }
 
     pub fn fail(&self, reference: &Reference, error: RefError) {
@@ -156,8 +167,10 @@ impl ReactionSink for RecordingSink {
 pub fn message(id: &str, text: &str, posted_at: &str) -> Message {
     Message {
         id: MessageId::new("C_TEST", id),
+        channel_name: "test".to_string(),
         text: text.to_string(),
         author: "U_ME".to_string(),
+        author_name: "me".to_string(),
         posted_at: posted_at.parse().expect("valid timestamp"),
         permalink: format!("https://example.slack.com/archives/C_TEST/p{id}"),
         reactions: None,

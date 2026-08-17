@@ -13,9 +13,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct SearchHit {
     pub channel_id: String,
+    /// Slack reports this alongside the ID, so capturing it here saves a
+    /// reverse lookup just to print something a human recognizes.
+    #[serde(default)]
+    pub channel_name: String,
     pub ts: String,
     #[serde(default)]
     pub user_id: String,
+    /// Display name, reported alongside the ID.
+    #[serde(default)]
+    pub user_name: String,
     #[serde(default)]
     pub permalink: String,
     #[serde(default)]
@@ -27,8 +34,10 @@ impl SearchHit {
         let posted_at = slack_ts_to_time(&self.ts).unwrap_or_else(Utc::now);
         Message {
             id: MessageId::new(&self.channel_id, &self.ts),
+            channel_name: self.channel_name,
             text: self.text,
             author: self.user_id,
+            author_name: self.user_name,
             posted_at,
             permalink: self.permalink,
             reactions: None,
@@ -283,8 +292,10 @@ mod tests {
     fn a_slack_timestamp_becomes_a_time() {
         let hit = SearchHit {
             channel_id: "C1".into(),
+            channel_name: "eng".into(),
             ts: "1786596050.245879".into(),
             user_id: "U1".into(),
+            user_name: "dp".into(),
             permalink: String::new(),
             text: String::new(),
         };

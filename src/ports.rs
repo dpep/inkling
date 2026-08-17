@@ -60,9 +60,27 @@ pub enum RefError {
     Other(String),
 }
 
+/// What a provider knows about one reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefStatus {
+    pub state: State,
+    /// Who opened it. Display only — worth showing because the person who
+    /// posted the link often isn't the person who wrote the code.
+    pub author: String,
+}
+
+impl RefStatus {
+    pub fn new(state: State) -> Self {
+        Self {
+            state,
+            author: String::new(),
+        }
+    }
+}
+
 /// One reference's outcome. The inner `Result` is the in-band part: a
 /// reference nobody can read shouldn't take its siblings down with it.
-pub type Lookup = (Reference, Result<State, RefError>);
+pub type Lookup = (Reference, Result<RefStatus, RefError>);
 
 pub trait StatusProvider {
     /// Batched lookup.

@@ -420,8 +420,34 @@ fn report_out(report: &Report, dry_run: bool, json: bool) -> Result<(), String> 
 
     if dry_run {
         for detail in &report.details {
-            println!("{}", detail.permalink);
-            println!("  refs     {}", detail.references.join(", "));
+            let channel = if detail.channel_name.is_empty() {
+                detail.id.channel.clone()
+            } else {
+                format!("#{}", detail.channel_name)
+            };
+            let posted = detail
+                .posted_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M");
+            let who = if detail.author.is_empty() {
+                String::new()
+            } else {
+                format!(" by {}", detail.author)
+            };
+            println!("{channel}  {posted}{who}");
+            println!("  link     {}", detail.permalink);
+
+            for (reference, author) in &detail.references {
+                // The person who posted the link often isn't the person who
+                // wrote the code; saying so only when they differ keeps the
+                // common case quiet.
+                let author = match author.as_str() {
+                    "" => String::new(),
+                    a if a.eq_ignore_ascii_case(&detail.author) => String::new(),
+                    a => format!(" (opened by {a})"),
+                };
+                println!("  ref      {reference}{author}");
+            }
             let states: Vec<String> = detail.states.iter().map(ToString::to_string).collect();
             println!("  state    {}", states.join(", "));
             println!(

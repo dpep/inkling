@@ -55,8 +55,13 @@ impl fmt::Display for ReactionName {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub id: MessageId,
+    /// For display only — `id.channel` is the identifier. Empty when the
+    /// source didn't report one.
+    pub channel_name: String,
     pub text: String,
     pub author: String,
+    /// Display name for `author`. Empty when the source didn't report one.
+    pub author_name: String,
     pub posted_at: DateTime<Utc>,
     pub permalink: String,
     /// `None` means the source could not determine them this run — which is

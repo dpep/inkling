@@ -165,8 +165,10 @@ mod tests {
     fn message(text: &str) -> Message {
         Message {
             id: crate::domain::model::MessageId::new("C1", "1786594063.746049"),
+            channel_name: "coding".to_string(),
             text: text.to_string(),
             author: "U_ME".to_string(),
+            author_name: "me".to_string(),
             posted_at: "2026-08-12T21:07:43Z".parse::<DateTime<Utc>>().unwrap(),
             permalink: "https://example.slack.com/archives/C1/p1786594063746049".to_string(),
             reactions: None,

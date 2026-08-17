@@ -138,8 +138,10 @@ enum Command {
 #[derive(Serialize)]
 struct MessageOut {
     channel_id: String,
+    channel_name: String,
     ts: String,
     user_id: String,
+    user_name: String,
     permalink: String,
     text: String,
 }
@@ -148,8 +150,10 @@ impl From<Message> for MessageOut {
     fn from(m: Message) -> Self {
         Self {
             channel_id: m.id.channel,
+            channel_name: m.channel_name,
             ts: m.id.ts,
             user_id: m.author,
+            user_name: m.author_name,
             permalink: m.permalink,
             text: m.text,
         }
@@ -240,7 +244,16 @@ fn dispatch(cli: &Cli, slack: &SlackClaude<ClaudeRunner>, format: Format) -> Res
             emit(format, &rows, |r| {
                 vec![
                     format!("{}:{}", r.channel_id, r.ts),
-                    r.user_id.clone(),
+                    if r.channel_name.is_empty() {
+                        r.channel_id.clone()
+                    } else {
+                        format!("#{}", r.channel_name)
+                    },
+                    if r.user_name.is_empty() {
+                        r.user_id.clone()
+                    } else {
+                        r.user_name.clone()
+                    },
                     r.text.replace('\n', " "),
                 ]
             })
@@ -301,7 +314,16 @@ fn dispatch(cli: &Cli, slack: &SlackClaude<ClaudeRunner>, format: Format) -> Res
             emit(format, &rows, |r| {
                 vec![
                     format!("{}:{}", r.channel_id, r.ts),
-                    r.user_id.clone(),
+                    if r.channel_name.is_empty() {
+                        r.channel_id.clone()
+                    } else {
+                        format!("#{}", r.channel_name)
+                    },
+                    if r.user_name.is_empty() {
+                        r.user_id.clone()
+                    } else {
+                        r.user_name.clone()
+                    },
                     r.text.replace('\n', " "),
                 ]
             })

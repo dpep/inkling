@@ -58,6 +58,12 @@ pub struct TrackedMessage {
     pub id: MessageId,
     #[serde(default)]
     pub permalink: String,
+    /// Display only, captured at discovery so printing a record later needs
+    /// no extra lookup.
+    #[serde(default)]
+    pub channel_name: String,
+    #[serde(default)]
+    pub author_name: String,
     pub references: Vec<Reference>,
     #[serde(default)]
     pub last_state: Option<State>,
@@ -200,6 +206,8 @@ mod tests {
         TrackedMessage {
             id: MessageId::new("C1", "1786596050.245879"),
             permalink: "https://example.slack.com/p1".into(),
+            channel_name: "inkling".into(),
+            author_name: "dpepper".into(),
             references: vec![Reference::GitHubPullRequest {
                 host: "github.com".into(),
                 owner: "dpep".into(),

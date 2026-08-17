@@ -6,7 +6,7 @@
 //! in-band failure the port asks for.
 
 use crate::domain::model::{Reference, State};
-use crate::ports::{Lookup, ProviderError, RefError, StatusProvider};
+use crate::ports::{Lookup, ProviderError, RefError, RefStatus, StatusProvider};
 use crate::secret::Secret;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ fn build_query(references: &[Reference]) -> String {
             ..
         } = reference;
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision author {{ login }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -107,7 +107,14 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
             let alias = format!("r{i}");
             let state = match response.data.get(&alias) {
                 Some(Some(repository)) => match &repository.pull_request {
-                    Some(pr) => Ok(pr.state()),
+                    Some(pr) => Ok(RefStatus {
+                        state: pr.state(),
+                        author: pr
+                            .author
+                            .as_ref()
+                            .map(|a| a.login.clone())
+                            .unwrap_or_default(),
+                    }),
                     None => Err(RefError::NotFound),
                 },
                 // Null data with an error is the normal unreadable-repo shape.
@@ -143,6 +150,14 @@ struct PullRequest {
     state: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(default)]
+    author: Option<Author>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Author {
+    #[serde(default)]
+    login: String,
 }
 
 impl PullRequest {
@@ -195,27 +210,33 @@ mod tests {
     #[test]
     fn a_merged_pull_request_reads_as_merged() {
         let states = interpret(&[pr("gqls", 1)], &parse(MERGED));
-        assert_eq!(states[0].1, Ok(State::Merged));
+        assert_eq!(states[0].1.as_ref().map(|s| s.state), Ok(State::Merged));
     }
 
     #[test]
     fn an_open_unreviewed_pull_request_reads_as_open() {
         let states = interpret(&[pr("polyid", 43)], &parse(OPEN));
-        assert_eq!(states[0].1, Ok(State::Open));
+        assert_eq!(states[0].1.as_ref().map(|s| s.state), Ok(State::Open));
     }
 
     #[test]
     fn review_decision_only_matters_while_the_pull_request_is_live() {
         let approved = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":"APPROVED"}}}}"#;
         assert_eq!(
-            interpret(&[pr("x", 1)], &parse(approved))[0].1,
+            interpret(&[pr("x", 1)], &parse(approved))[0]
+                .1
+                .as_ref()
+                .map(|s| s.state),
             Ok(State::Approved)
         );
 
         // Approved then closed: closed wins, because it's what's true now.
         let closed = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"CLOSED","reviewDecision":"APPROVED"}}}}"#;
         assert_eq!(
-            interpret(&[pr("x", 1)], &parse(closed))[0].1,
+            interpret(&[pr("x", 1)], &parse(closed))[0]
+                .1
+                .as_ref()
+                .map(|s| s.state),
             Ok(State::Closed)
         );
     }
@@ -225,14 +246,23 @@ mod tests {
         // Live and unapproved. Inkling draws nothing either way, and a
         // separate state would need retraction to be honest.
         let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":"CHANGES_REQUESTED"}}}}"#;
-        assert_eq!(interpret(&[pr("x", 1)], &parse(json))[0].1, Ok(State::Open));
+        assert_eq!(
+            interpret(&[pr("x", 1)], &parse(json))[0]
+                .1
+                .as_ref()
+                .map(|s| s.state),
+            Ok(State::Open)
+        );
     }
 
     #[test]
     fn a_draft_reads_as_draft_even_once_approved() {
         let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":true,"state":"OPEN","reviewDecision":"APPROVED"}}}}"#;
         assert_eq!(
-            interpret(&[pr("x", 1)], &parse(json))[0].1,
+            interpret(&[pr("x", 1)], &parse(json))[0]
+                .1
+                .as_ref()
+                .map(|s| s.state),
             Ok(State::Draft)
         );
     }
@@ -256,9 +286,23 @@ mod tests {
         let refs = [pr("gqls", 1), pr("nope-not-real", 1), pr("polyid", 43)];
         let states = interpret(&refs, &parse(json));
 
-        assert_eq!(states[0].1, Ok(State::Merged));
+        assert_eq!(states[0].1.as_ref().map(|s| s.state), Ok(State::Merged));
         assert_eq!(states[1].1, Err(RefError::NotFound));
-        assert_eq!(states[2].1, Ok(State::Open));
+        assert_eq!(states[2].1.as_ref().map(|s| s.state), Ok(State::Open));
+    }
+
+    #[test]
+    fn the_pull_request_author_comes_back_with_the_state() {
+        let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
+            "reviewDecision":null,"author":{"login":"octocat"}}}}}"#;
+        let status = interpret(&[pr("x", 1)], &parse(json))[0].1.clone().unwrap();
+        assert_eq!(status.author, "octocat");
+
+        // A deleted account reports no author; that isn't a failure.
+        let anon = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
+            "reviewDecision":null,"author":null}}}}"#;
+        let status = interpret(&[pr("x", 1)], &parse(anon))[0].1.clone().unwrap();
+        assert!(status.author.is_empty());
     }
 
     #[test]
@@ -291,8 +335,8 @@ mod tests {
         let refs = [pr("gqls", 1), pr("polyid", 43)];
         let states = interpret(&refs, &parse(json));
         assert_eq!(states[0].0, refs[0]);
-        assert_eq!(states[0].1, Ok(State::Merged));
-        assert_eq!(states[1].1, Ok(State::Open));
+        assert_eq!(states[0].1.as_ref().map(|s| s.state), Ok(State::Merged));
+        assert_eq!(states[1].1.as_ref().map(|s| s.state), Ok(State::Open));
     }
 
     #[test]

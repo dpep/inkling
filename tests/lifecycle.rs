@@ -54,7 +54,10 @@ fn run_once(
 ) -> inkling::domain::reconcile::Plan {
     let references = admit(message, config).expect("message should be tracked");
     let looked_up = provider.lookup(&references).expect("provider available");
-    let states: Vec<State> = looked_up.into_iter().filter_map(|(_, s)| s.ok()).collect();
+    let states: Vec<State> = looked_up
+        .into_iter()
+        .filter_map(|(_, s)| s.ok().map(|status| status.state))
+        .collect();
 
     let known = source.reactions(std::slice::from_ref(&message.id)).ok();
     let reactions = known.and_then(|m| m.get(&message.id).cloned());

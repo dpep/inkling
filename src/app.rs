@@ -7,7 +7,7 @@
 
 use crate::adapters::store_json::{Outcome, Snapshot, Store, TrackedMessage, VERSION};
 use crate::config::Config;
-use crate::domain::model::{Message, MessageId, ReactionName, State};
+use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::reconcile::{Plan, SkipReason, admit, reconcile};
 use crate::domain::schedule;
 use crate::domain::window::{SearchWindow, next_window};
@@ -45,7 +45,12 @@ pub struct Report {
 pub struct Detail {
     pub id: MessageId,
     pub permalink: String,
-    pub references: Vec<String>,
+    pub channel_name: String,
+    pub posted_at: DateTime<Utc>,
+    /// Who posted in Slack — often not who wrote the code.
+    pub author: String,
+    /// Each reference and whoever opened it.
+    pub references: Vec<(String, String)>,
     pub states: Vec<State>,
     pub existing: Option<Vec<ReactionName>>,
     pub plan: Plan,
@@ -232,6 +237,8 @@ impl Run<'_> {
                     key,
                     TrackedMessage {
                         id: message.id,
+                        channel_name: message.channel_name,
+                        author_name: message.author_name,
                         permalink: message.permalink,
                         references,
                         last_state: None,
@@ -308,7 +315,13 @@ impl Run<'_> {
                 report.failed += 1;
                 continue;
             }
-            let states: Vec<State> = states.into_iter().filter_map(|(_, s)| s.ok()).collect();
+            // Authors are display-only, but come from the same lookup, so
+            // they ride along rather than costing a second request.
+            let resolved: Vec<(Reference, RefStatus)> = states
+                .into_iter()
+                .filter_map(|(r, s)| s.ok().map(|status| (r, status)))
+                .collect();
+            let states: Vec<State> = resolved.iter().map(|(_, s)| s.state).collect();
 
             let existing = known.as_ref().and_then(|m| m.get(&record.id).cloned());
             let plan = reconcile(&states, existing.as_deref(), self.config);
@@ -329,7 +342,13 @@ impl Run<'_> {
             report.details.push(Detail {
                 id: record.id.clone(),
                 permalink: record.permalink.clone(),
-                references: record.references.iter().map(ToString::to_string).collect(),
+                channel_name: record.channel_name.clone(),
+                posted_at: record.posted_at,
+                author: record.author_name.clone(),
+                references: resolved
+                    .iter()
+                    .map(|(r, s)| (r.to_string(), s.author.clone()))
+                    .collect(),
                 states: states.clone(),
                 existing: existing.clone(),
                 plan: plan.clone(),
