@@ -159,6 +159,12 @@ aliases = ["merged", "shipit", "ship", "done"]
 "##;
 
 fn main() {
+    // Rust ignores SIGPIPE, so writing to a closed pipe returns EPIPE and
+    // println! panics — `inkling logs | head` would abort with a backtrace
+    // instead of stopping. Restore the default so it exits quietly, like
+    // every other command in a pipeline.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     let cli = Cli::parse();
 
     let directory = match cli.common.log_dir.as_deref() {
@@ -354,7 +360,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             );
             let local = |t: DateTime<Utc>| {
                 t.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M")
+                    .format("%Y-%m-%d %H:%M %Z")
                     .to_string()
             };
             println!(
@@ -645,7 +651,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
             let posted = detail
                 .posted_at
                 .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M");
+                .format("%Y-%m-%d %H:%M %Z");
             let who = if detail.author.is_empty() {
                 String::new()
             } else {

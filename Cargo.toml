@@ -16,6 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive"] }
 humantime-serde = "1"
 iriq = { version = "0.34", default-features = false }
+libc = "0.2.189"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

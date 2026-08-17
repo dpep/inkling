@@ -151,6 +151,25 @@ It runs on a small model with Claude Code's default prompt and built-in tools
 stripped out, which makes it ~6x cheaper and ~2x faster than a default
 invocation — see [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md).
 
+## Time zones
+
+Human-facing output — `status`, and the dry-run listing — is in your local
+zone and names its offset, so it lines up with what Slack shows you. `TZ`
+works as you'd expect:
+
+```sh
+TZ=Asia/Tokyo inkling status
+```
+
+Log files stay UTC on purpose: they're correlated across machines and read
+long after the fact, where a fixed zone is worth more than a familiar one.
+Pipe them through [tztr](https://github.com/dpep/tztr) when you'd rather read
+them locally:
+
+```sh
+inkling logs -g reacted | tztr
+```
+
 ### Scoping the Slack MCP server
 
 `--allowedTools` restricts what the bridge may *call*, not what gets *loaded*.

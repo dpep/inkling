@@ -193,6 +193,9 @@ fn default_config_path() -> std::path::PathBuf {
 }
 
 fn main() {
+    // See inkling's main: without this, piping into `head` panics.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     let cli = Cli::parse();
     if let Err(error) = run(&cli) {
         eprintln!("slackmcp: {error}");
