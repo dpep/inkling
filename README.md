@@ -158,3 +158,32 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
+
+### Scoping the Slack MCP server
+
+`--allowedTools` restricts what the bridge may *call*, not what gets *loaded*.
+If the environment spawning the subprocess has many MCP servers configured,
+every one of their tool schemas is pulled into context anyway — enough, in a
+heavy setup, to exceed the model's context limit before the call runs:
+
+```
+Prompt is too long · the request is ~201748 tokens (limit 200000)
+```
+
+Naming a server explicitly scopes the subprocess to it and nothing else:
+
+```toml
+[slack.mcp]
+server = "my-slack-server"
+url = "https://mcp.example.com/proxy/xyz/mcp"
+headers = { "x-api-key" = "${MY_MCP_API_KEY}" }   # env reference, never a literal
+
+# Only if the backend's tool names differ from the defaults.
+[slack.mcp.tools]
+react = "slack_add_reaction"
+```
+
+Omit the table and nothing changes — the bridge inherits the ambient MCP
+configuration exactly as before. This only works for a server declarable as a
+static block; an account-linked OAuth connector can't be named this way, and
+`--strict-mcp-config` would drop it along with everything else.

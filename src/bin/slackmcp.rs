@@ -10,8 +10,9 @@
 
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use inkling::adapters::slack_claude::{ClaudeRunner, SlackClaude};
+use inkling::adapters::slack_claude::{self, ClaudeRunner, SlackClaude};
 use inkling::adapters::store_json::{JsonStore, Store};
+use inkling::config::Config;
 use inkling::domain::model::{Message, MessageId, ReactionName};
 use inkling::domain::window::SearchWindow;
 use inkling::ports::{MessageSource, ReactionSink, Scope};
@@ -181,6 +182,16 @@ struct ReactOut {
     added: bool,
 }
 
+/// Same location `inkling` reads; a missing file just means defaults.
+fn default_config_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("inkling").join("config.toml")
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(error) = run(&cli) {
@@ -213,11 +224,12 @@ fn with_channel_cache<T>(
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
-    let runner = ClaudeRunner {
-        model: Some(cli.model.clone()),
-        ..ClaudeRunner::default()
-    };
-    let slack = SlackClaude::new(runner);
+    // slackmcp reads the same config, so the transport is scoped the same
+    // way inkling scopes it — a bridge that behaves differently by hand than
+    // it does from cron would be a poor debugging tool.
+    let config = Config::load(default_config_path()).map_err(|e| e.to_string())?;
+    let slack =
+        slack_claude::from_config(&config, Some(cli.model.clone())).map_err(|e| e.to_string())?;
     let format = cli.format.resolve();
 
     with_channel_cache(&slack, || dispatch(cli, &slack, format))

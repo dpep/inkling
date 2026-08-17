@@ -16,24 +16,70 @@ pub use parse::{
 };
 pub use runner::{ClaudeRunner, Runner, RunnerError, extract_result};
 
+use crate::config::SlackMcp;
 use crate::domain::model::{Message, MessageId, ReactionName};
 use crate::domain::window::SearchWindow;
 use crate::ports::{MessageSource, ReactionSink, Scope, SinkError, SourceError};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// Tool names are allowlisted per call, so a prompt-injection attempt in a
-/// Slack message has nothing to reach for. The server also exposes
-/// send_message and canvas writes; neither is ever permitted.
-const SEARCH_TOOL: &str = "mcp__claude_ai_Slack__slack_search_public_and_private";
-const READ_TOOL: &str = "mcp__claude_ai_Slack__slack_read_channel";
-const REACT_TOOL: &str = "mcp__claude_ai_Slack__slack_add_reaction";
-const CHANNELS_TOOL: &str = "mcp__claude_ai_Slack__slack_search_channels";
-const THREAD_TOOL: &str = "mcp__claude_ai_Slack__slack_read_thread";
-const PROFILE_TOOL: &str = "mcp__claude_ai_Slack__slack_read_user_profile";
-/// Only ever reachable from `slackmcp post` — deliberately not from anything
-/// Inkling's run loop can call. Inkling annotates; it does not talk.
-const SEND_TOOL: &str = "mcp__claude_ai_Slack__slack_send_message";
+/// The account-linked connector this has always used. Still the default, so
+/// an absent `[slack.mcp]` changes nothing.
+const DEFAULT_SERVER: &str = "claude_ai_Slack";
+
+/// Fully-qualified tool names, by role.
+///
+/// Names are allowlisted per call, so a prompt-injection attempt in a Slack
+/// message has nothing to reach for. `send` is deliberately unreachable from
+/// anything the run loop calls — Inkling annotates; it does not talk.
+#[derive(Debug, Clone)]
+pub struct ToolNames {
+    pub search: String,
+    pub read_channel: String,
+    pub react: String,
+    pub search_channels: String,
+    pub read_thread: String,
+    pub read_user_profile: String,
+    pub send: String,
+}
+
+impl ToolNames {
+    pub fn new(mcp: Option<&SlackMcp>) -> Self {
+        let server = mcp.map_or(DEFAULT_SERVER, |m| m.server.as_str());
+        let tools = mcp.map(|m| m.tools.clone()).unwrap_or_default();
+        let qualify = |tool: &str| format!("mcp__{server}__{tool}");
+        Self {
+            search: qualify(&tools.search),
+            read_channel: qualify(&tools.read_channel),
+            react: qualify(&tools.react),
+            search_channels: qualify(&tools.search_channels),
+            read_thread: qualify(&tools.read_thread),
+            read_user_profile: qualify(&tools.read_user_profile),
+            send: qualify(&tools.send_message),
+        }
+    }
+}
+
+impl Default for ToolNames {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+/// Build the bridge from config: the same wiring both binaries need, so
+/// neither can configure the transport differently by accident.
+pub fn from_config(
+    config: &crate::config::Config,
+    model: Option<String>,
+) -> Result<SlackClaude<ClaudeRunner>, crate::config::ConfigError> {
+    let mcp = config.slack.mcp.as_ref();
+    let runner = ClaudeRunner {
+        mcp_config: mcp.map(|m| m.config_json()).transpose()?,
+        model: model.or_else(|| ClaudeRunner::default().model),
+        ..ClaudeRunner::default()
+    };
+    Ok(SlackClaude::with_tools(runner, ToolNames::new(mcp)))
+}
 
 /// Slack channel IDs look like `C012XYZ6789` — a `C`, `D`, or `G` followed by
 /// uppercase alphanumerics. Anything else is a human-typed handle.
@@ -49,6 +95,7 @@ pub fn looks_like_channel_id(s: &str) -> bool {
 
 pub struct SlackClaude<R: Runner> {
     runner: R,
+    tools: ToolNames,
     channel_ids: RefCell<HashMap<String, String>>,
     user_names: RefCell<HashMap<String, String>>,
 }
@@ -61,8 +108,13 @@ const ATTEMPTS: usize = 3;
 
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
+        Self::with_tools(runner, ToolNames::default())
+    }
+
+    pub fn with_tools(runner: R, tools: ToolNames) -> Self {
         Self {
             runner,
+            tools,
             channel_ids: RefCell::new(HashMap::new()),
             user_names: RefCell::new(HashMap::new()),
         }
@@ -122,12 +174,12 @@ pub fn search_query(scope: &Scope) -> String {
     }
 }
 
-fn search_prompt(query: &str, window: &SearchWindow) -> String {
+fn search_prompt(tool: &str, query: &str, window: &SearchWindow) -> String {
     // The model's whole job: one call, then hand back what came out. The
     // schema is spelled out because the tool returns rendered Markdown, and
     // a shape we can validate is worth more than one we have to scrape.
     format!(
-        "Call {SEARCH_TOOL} with these exact arguments:\n\
+        "Call {tool} with these exact arguments:\n\
          query: {query:?}\n\
          after: {:?}\n\
          before: {:?}\n\
@@ -157,9 +209,9 @@ fn search_prompt(query: &str, window: &SearchWindow) -> String {
     )
 }
 
-fn reactions_prompt(channel_id: &str, oldest: &str) -> String {
+fn reactions_prompt(tool: &str, channel_id: &str, oldest: &str) -> String {
     format!(
-        "Call {READ_TOOL} with these exact arguments:\n\
+        "Call {tool} with these exact arguments:\n\
          channel_id: {channel_id:?}\n\
          oldest: {oldest:?}\n\
          limit: 100\n\
@@ -249,15 +301,16 @@ impl<R: Runner> SlackClaude<R> {
             return Ok(known.clone());
         }
 
+        let tool = &self.tools.search_channels;
         let prompt = format!(
-            "Call {CHANNELS_TOOL} with query {name:?}.\n\n\
+            "Call {tool} with query {name:?}.\n\n\
              Then output ONLY this JSON, no commentary and no code fence:\n\
              {{\"id\": \"...\"}}\n\n\
              Use the id of the channel named exactly {name:?}. If there is no \
              exact match, output {{\"id\": null}}.",
         );
         let id = self
-            .attempt(&prompt, &[CHANNELS_TOOL], |raw| {
+            .attempt(&prompt, &[self.tools.search_channels.as_str()], |raw| {
                 match parse_channel_id(raw) {
                     // A clean "no such channel" is an answer, not a hiccup.
                     Ok(None) => Err(Retry::Fatal(format!("no channel named #{name}"))),
@@ -284,8 +337,8 @@ impl<R: Runner> SlackClaude<R> {
         let oldest = exclusive_bound(since);
         let parsed = self
             .attempt(
-                &reactions_prompt(channel_id, &oldest),
-                &[READ_TOOL],
+                &reactions_prompt(&self.tools.read_channel, channel_id, &oldest),
+                &[self.tools.read_channel.as_str()],
                 |raw| parse_reactions(raw).map_err(Retry::Again),
             )
             .map_err(SourceError::Search)?;
@@ -303,14 +356,15 @@ impl<R: Runner> SlackClaude<R> {
         if let Some(known) = self.user_names.borrow().get(user_id) {
             return Ok(known.clone());
         }
+        let tool = &self.tools.read_user_profile;
         let prompt = format!(
-            "Call {PROFILE_TOOL} with user_id {user_id:?}.\n\n\
+            "Call {tool} with user_id {user_id:?}.\n\n\
              Then output ONLY this JSON, no commentary and no code fence:\n\
              {{\"id\": {user_id:?}, \"handle\": \"...\", \"name\": \"...\"}}\n\n\
              `name` is the person's real or display name.",
         );
         let identity = self
-            .attempt(&prompt, &[PROFILE_TOOL], |raw| {
+            .attempt(&prompt, &[self.tools.read_user_profile.as_str()], |raw| {
                 parse_identity(raw).map_err(Retry::Again)
             })
             .map_err(SourceError::Search)?;
@@ -333,8 +387,9 @@ impl<R: Runner> SlackClaude<R> {
     /// personal mode and the only-my-messages filter both need this ID, and
     /// nobody knows their own Slack ID off-hand.
     pub fn whoami(&self) -> Result<Identity, SourceError> {
+        let tool = &self.tools.read_user_profile;
         let prompt = format!(
-            "Call {PROFILE_TOOL} with NO arguments, so it returns the current \
+            "Call {tool} with NO arguments, so it returns the current \
              user's own profile.\n\n\
              Then output ONLY this JSON, no commentary and no code fence:\n\
              {{\"id\": \"...\", \"handle\": \"...\", \"name\": \"...\"}}\n\n\
@@ -342,7 +397,7 @@ impl<R: Runner> SlackClaude<R> {
              username or display name. `name` is the real name. Use an empty \
              string for anything the profile doesn't have.",
         );
-        self.attempt(&prompt, &[PROFILE_TOOL], |raw| {
+        self.attempt(&prompt, &[self.tools.read_user_profile.as_str()], |raw| {
             match parse_identity(raw) {
                 Ok(identity) if identity.id.starts_with('U') => Ok(identity),
                 // A profile without a user ID means the tool didn't really
@@ -356,8 +411,9 @@ impl<R: Runner> SlackClaude<R> {
 
     /// A thread's parent message and every reply, with reactions.
     pub fn thread(&self, channel_id: &str, parent_ts: &str) -> Result<Vec<Message>, SourceError> {
+        let tool = &self.tools.read_thread;
         let prompt = format!(
-            "Call {THREAD_TOOL} with these exact arguments:\n\
+            "Call {tool} with these exact arguments:\n\
              channel_id: {channel_id:?}\n\
              message_ts: {parent_ts:?}\n\
              limit: 100\n\
@@ -369,7 +425,7 @@ impl<R: Runner> SlackClaude<R> {
              Copy each field verbatim.",
         );
         let hits = self
-            .attempt(&prompt, &[THREAD_TOOL], |raw| {
+            .attempt(&prompt, &[self.tools.read_thread.as_str()], |raw| {
                 parse_search(raw).map_err(Retry::Again)
             })
             .map_err(SourceError::Search)?;
@@ -388,14 +444,15 @@ impl<R: Runner> SlackClaude<R> {
         thread_ts: Option<&str>,
     ) -> Result<(), SourceError> {
         let threading = thread_ts.map_or_else(String::new, |ts| format!("thread_ts: {ts:?}\n"));
+        let tool = &self.tools.send;
         let prompt = format!(
-            "Call {SEND_TOOL} with these exact arguments:\n\
+            "Call {tool} with these exact arguments:\n\
              channel_id: {channel_id:?}\n\
              {threading}\
              message: {text:?}\n\n\
              Then output ONLY the word OK, or the error code if it failed.",
         );
-        self.attempt(&prompt, &[SEND_TOOL], |raw| {
+        self.attempt(&prompt, &[self.tools.send.as_str()], |raw| {
             let lower = raw.to_lowercase();
             if lower.contains("ok") || lower.contains("success") {
                 Ok(())
@@ -424,9 +481,11 @@ impl<R: Runner> SlackClaude<R> {
         window: &SearchWindow,
     ) -> Result<Vec<Message>, SourceError> {
         let hits = self
-            .attempt(&search_prompt(query, window), &[SEARCH_TOOL], |raw| {
-                parse_search(raw).map_err(Retry::Again)
-            })
+            .attempt(
+                &search_prompt(&self.tools.search, query, window),
+                &[self.tools.search.as_str()],
+                |raw| parse_search(raw).map_err(Retry::Again),
+            )
             .map_err(SourceError::Search)?;
         Ok(hits.into_iter().map(SearchHit::into_message).collect())
     }
@@ -434,8 +493,9 @@ impl<R: Runner> SlackClaude<R> {
 
 impl<R: Runner> ReactionSink for SlackClaude<R> {
     fn add(&self, target: &MessageId, emoji: &ReactionName) -> Result<(), SinkError> {
+        let tool = &self.tools.react;
         let prompt = format!(
-            "Call {REACT_TOOL} with these exact arguments:\n\
+            "Call {tool} with these exact arguments:\n\
              channel_id: {:?}\n\
              message_ts: {:?}\n\
              emoji: {:?}\n\n\
@@ -444,7 +504,7 @@ impl<R: Runner> ReactionSink for SlackClaude<R> {
             target.ts,
             emoji.as_str(),
         );
-        self.attempt(&prompt, &[REACT_TOOL], |raw| {
+        self.attempt(&prompt, &[self.tools.react.as_str()], |raw| {
             match interpret_add(raw, emoji) {
                 Ok(()) => Ok(()),
                 // Slack said no for a reason that won't change on a retry.
@@ -590,7 +650,7 @@ mod tests {
             start: "2026-08-12T21:00:00Z".parse().unwrap(),
             end: "2026-08-12T21:30:00Z".parse().unwrap(),
         };
-        let prompt = search_prompt("in:#inkling", &window);
+        let prompt = search_prompt("search_tool", "in:#inkling", &window);
         assert!(prompt.contains("1786568400"), "{prompt}");
         assert!(prompt.contains("1786570200"), "{prompt}");
     }

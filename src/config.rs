@@ -116,6 +116,61 @@ pub struct Slack {
     pub user_id: Option<String>,
     #[serde(default)]
     pub channels: Vec<String>,
+    /// Which Slack MCP server to load, and what its tools are called.
+    ///
+    /// Omitted, the bridge inherits whatever MCP configuration the ambient
+    /// environment has — which is what it has always done, and which makes
+    /// reliability depend on things Inkling can't see.
+    #[serde(default)]
+    pub mcp: Option<SlackMcp>,
+}
+
+/// A declarable MCP server, named explicitly so the subprocess can be scoped
+/// to it and nothing else.
+///
+/// `--allowedTools` restricts what the model may *call*; it does not restrict
+/// what gets *loaded*. A heavy ambient configuration pulls every server's tool
+/// schemas into the subprocess regardless, which can exceed the context limit
+/// before the call runs. Naming one server here lets the bridge pass
+/// `--strict-mcp-config` and collapse that payload.
+///
+/// Only works for a server expressible as a static block. An account-linked
+/// OAuth connector isn't declarable, and `--strict-mcp-config` would drop it
+/// along with everything else.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SlackMcp {
+    /// Name the server is given in the generated config, and therefore the
+    /// middle segment of every `mcp__<server>__<tool>` name.
+    pub server: String,
+    pub url: String,
+    /// Values may reference the environment as `${VAR}`; a literal secret in
+    /// a config file is exactly what this avoids.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tools: SlackMcpTools,
+}
+
+/// Tool names by role. Defaults are the names the current server uses, so a
+/// backend that matches needs none of this.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SlackMcpTools {
+    #[serde(default = "d_search")]
+    pub search: String,
+    #[serde(default = "d_read_channel")]
+    pub read_channel: String,
+    #[serde(default = "d_react")]
+    pub react: String,
+    #[serde(default = "d_search_channels")]
+    pub search_channels: String,
+    #[serde(default = "d_read_thread")]
+    pub read_thread: String,
+    #[serde(default = "d_read_user_profile")]
+    pub read_user_profile: String,
+    #[serde(default = "d_send_message")]
+    pub send_message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -300,6 +355,92 @@ fn d_token_command() -> Option<String> {
     Some("gh auth token".to_string())
 }
 
+// Most roles follow `slack_<role>`; search and react don't, so every default
+// is spelled out rather than derived from a pattern that holds five times
+// out of seven.
+fn d_search() -> String {
+    "slack_search_public_and_private".into()
+}
+fn d_read_channel() -> String {
+    "slack_read_channel".into()
+}
+fn d_react() -> String {
+    "slack_add_reaction".into()
+}
+fn d_search_channels() -> String {
+    "slack_search_channels".into()
+}
+fn d_read_thread() -> String {
+    "slack_read_thread".into()
+}
+fn d_read_user_profile() -> String {
+    "slack_read_user_profile".into()
+}
+fn d_send_message() -> String {
+    "slack_send_message".into()
+}
+
+impl Default for SlackMcpTools {
+    fn default() -> Self {
+        Self {
+            search: d_search(),
+            read_channel: d_read_channel(),
+            react: d_react(),
+            search_channels: d_search_channels(),
+            read_thread: d_read_thread(),
+            read_user_profile: d_read_user_profile(),
+            send_message: d_send_message(),
+        }
+    }
+}
+
+impl SlackMcp {
+    /// The `--mcp-config` payload naming only this server.
+    ///
+    /// Header values are expanded from the environment here rather than at
+    /// load time, so a `Config` never holds a secret in memory longer than
+    /// the call that needs it.
+    pub fn config_json(&self) -> Result<String, ConfigError> {
+        let mut headers = serde_json::Map::new();
+        for (name, value) in &self.headers {
+            headers.insert(name.clone(), expand_env(value)?.into());
+        }
+        let server = serde_json::json!({
+            "type": "http",
+            "url": self.url,
+            "headers": headers,
+        });
+        serde_json::to_string(&serde_json::json!({
+            "mcpServers": { self.server.clone(): server }
+        }))
+        .map_err(|e| ConfigError::Invalid(format!("building mcp config: {e}")))
+    }
+}
+
+/// Replace `${VAR}` with the environment's value.
+fn expand_env(raw: &str) -> Result<String, ConfigError> {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            // An unterminated ${ is a typo, not a literal.
+            return Err(ConfigError::Invalid(format!(
+                "unterminated ${{ in header value: {raw}"
+            )));
+        };
+        let name = &after[..end];
+        let value = std::env::var(name).map_err(|_| {
+            ConfigError::Invalid(format!("header references ${{{name}}}, which is not set"))
+        })?;
+        out.push_str(&value);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// Emoji every workspace has. `:merged:` and `:shipit:` are common but not
 /// universal, and adding one the workspace lacks fails with invalid_name —
 /// so they're accepted as evidence, never written.
@@ -377,6 +518,7 @@ impl Default for Slack {
             personal: d_true(),
             user_id: None,
             channels: Vec::new(),
+            mcp: None,
         }
     }
 }
@@ -491,6 +633,75 @@ mod tests {
                 ReactionName::new("lgtm"),
             ]
         );
+    }
+
+    #[test]
+    fn an_omitted_mcp_table_changes_nothing() {
+        // The whole feature is additive: without it the bridge keeps
+        // inheriting the ambient MCP configuration exactly as before.
+        assert_eq!(example().slack.mcp, None);
+    }
+
+    #[test]
+    fn an_mcp_table_defaults_every_tool_name() {
+        let raw =
+            format!("{EXAMPLE}\n[slack.mcp]\nserver = \"my-slack\"\nurl = \"https://x/mcp\"\n");
+        let mcp = parse(&raw).unwrap().slack.mcp.unwrap();
+        assert_eq!(mcp.server, "my-slack");
+        assert_eq!(mcp.tools, SlackMcpTools::default());
+        assert_eq!(mcp.tools.react, "slack_add_reaction");
+    }
+
+    #[test]
+    fn tool_names_can_be_overridden_one_at_a_time() {
+        let raw = format!(
+            "{EXAMPLE}\n[slack.mcp]\nserver = \"s\"\nurl = \"u\"\n\
+             [slack.mcp.tools]\nreact = \"add_reaction\"\n"
+        );
+        let mcp = parse(&raw).unwrap().slack.mcp.unwrap();
+        assert_eq!(mcp.tools.react, "add_reaction");
+        assert_eq!(mcp.tools.search, d_search(), "the rest keep their defaults");
+    }
+
+    #[test]
+    fn an_unknown_mcp_key_is_rejected() {
+        let raw = format!("{EXAMPLE}\n[slack.mcp]\nserver = \"s\"\nurl = \"u\"\nnope = 1\n");
+        assert!(error(&raw).contains("parsing"));
+    }
+
+    #[test]
+    fn headers_expand_from_the_environment() {
+        // A literal secret in a committed config is exactly what this avoids.
+        unsafe { std::env::set_var("INKLING_TEST_MCP_KEY", "s3cret") };
+        let raw = format!(
+            "{EXAMPLE}\n[slack.mcp]\nserver = \"s\"\nurl = \"https://x/mcp\"\n\
+             headers = {{ \"x-api-key\" = \"${{INKLING_TEST_MCP_KEY}}\" }}\n"
+        );
+        let json = parse(&raw)
+            .unwrap()
+            .slack
+            .mcp
+            .unwrap()
+            .config_json()
+            .unwrap();
+        assert!(json.contains(r#""x-api-key":"s3cret""#), "{json}");
+        assert!(json.contains(r#""mcpServers":{"s""#), "{json}");
+    }
+
+    #[test]
+    fn a_missing_environment_variable_is_named_rather_than_left_empty() {
+        let raw = format!(
+            "{EXAMPLE}\n[slack.mcp]\nserver = \"s\"\nurl = \"u\"\n\
+             headers = {{ \"k\" = \"${{INKLING_DEFINITELY_UNSET}}\" }}\n"
+        );
+        let error = parse(&raw)
+            .unwrap()
+            .slack
+            .mcp
+            .unwrap()
+            .config_json()
+            .unwrap_err();
+        assert!(error.to_string().contains("INKLING_DEFINITELY_UNSET"));
     }
 
     #[test]

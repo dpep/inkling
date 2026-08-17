@@ -46,6 +46,15 @@ pub struct ClaudeRunner {
     pub command: String,
     pub model: Option<String>,
     pub timeout: Duration,
+    /// An MCP config naming exactly the servers this bridge needs. When set,
+    /// the subprocess is scoped strictly to them.
+    ///
+    /// `--allowedTools` gates what may be *called*, not what is *loaded*, so
+    /// a heavy ambient configuration still pays for every server's schemas —
+    /// enough, in some environments, to blow the context limit before the
+    /// call runs. This is the only way to stop paying for servers we don't
+    /// use.
+    pub mcp_config: Option<String>,
 }
 
 impl Default for ClaudeRunner {
@@ -56,6 +65,7 @@ impl Default for ClaudeRunner {
             // both correct and several times cheaper.
             model: Some("haiku".into()),
             timeout: Duration::from_secs(180),
+            mcp_config: None,
         }
     }
 }
@@ -83,6 +93,14 @@ impl ClaudeRunner {
         if let Some(model) = &self.model {
             args.push("--model".into());
             args.push(model.clone());
+        }
+        if let Some(config) = &self.mcp_config {
+            // Both flags or neither: --mcp-config alone would *add* to the
+            // ambient configuration rather than replace it, which is the
+            // opposite of the point.
+            args.push("--mcp-config".into());
+            args.push(config.clone());
+            args.push("--strict-mcp-config".into());
         }
         args
     }
@@ -149,6 +167,26 @@ mod tests {
         assert!(pairs.contains(&(&"--model".to_string(), &"haiku".to_string())));
         assert!(args.iter().any(|a| a == SYSTEM_PROMPT));
         assert!(pairs.contains(&(&"--allowedTools".to_string(), &"some_tool".to_string())));
+    }
+
+    #[test]
+    fn an_mcp_config_is_always_paired_with_strict() {
+        // --mcp-config on its own adds servers instead of replacing them, so
+        // the scoping would silently not happen.
+        let runner = ClaudeRunner {
+            mcp_config: Some(r#"{"mcpServers":{}}"#.into()),
+            ..ClaudeRunner::default()
+        };
+        let args = runner.args("x", &["t"]);
+        assert!(args.iter().any(|a| a == "--mcp-config"));
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn without_an_mcp_config_neither_flag_appears() {
+        let args = ClaudeRunner::default().args("x", &["t"]);
+        assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
+        assert!(!args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
     #[test]

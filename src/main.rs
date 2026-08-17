@@ -3,7 +3,7 @@
 use chrono::{TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
-use inkling::adapters::slack_claude::{ClaudeRunner, SlackClaude};
+use inkling::adapters::slack_claude;
 use inkling::adapters::store_json::{JsonStore, Store};
 use inkling::app::{Report, Run};
 use inkling::config::Config;
@@ -361,7 +361,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             )
             .map_err(|e| e.to_string())?;
 
-            let slack = SlackClaude::new(ClaudeRunner::default());
+            let slack = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
             let github = GitHubProvider::new(&config.github.api_url, token);
             let clock = SystemClock;
 
@@ -475,8 +475,8 @@ fn init(path: &std::path::Path, force: bool) -> Result<i32, String> {
 /// Nobody knows their own Slack ID off-hand, so an omitted `slack.user_id` is
 /// resolved from the credentials and cached — it costs a bridge call, and it
 /// can't change for a given set of credentials.
-fn resolve_identity<R: inkling::adapters::slack_claude::Runner>(
-    slack: &SlackClaude<R>,
+fn resolve_identity<R: slack_claude::Runner>(
+    slack: &slack_claude::SlackClaude<R>,
     store: &JsonStore,
 ) -> Result<String, String> {
     let mut snapshot = store.load().map_err(|e| e.to_string())?;
