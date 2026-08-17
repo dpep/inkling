@@ -296,6 +296,12 @@ fn report_out(report: &Report, dry_run: bool, json: bool) -> Result<(), String> 
         }
     }
 
+    // A discovery failure isn't a per-record failure, so the counters below
+    // all read zero while the run exits nonzero. Say it outright.
+    if report.discovery_failed() {
+        println!("discovery FAILED — the search window was not covered; see the log");
+    }
+
     let verb = if dry_run { "would add" } else { "added" };
     println!(
         "discovered {} · checked {} · {verb} {} · skipped {} · failed {} · tracking {} ({} done)",

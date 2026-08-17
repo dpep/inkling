@@ -60,6 +60,13 @@ impl Report {
         }
     }
 
+    /// Discovery itself failed, as distinct from individual records failing.
+    /// The per-record counters stay at zero in this case, so a caller
+    /// summarizing the run has to ask separately.
+    pub fn discovery_failed(&self) -> bool {
+        self.outcome == Some(Outcome::Failure)
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self.outcome() {
             Outcome::Success => 0,

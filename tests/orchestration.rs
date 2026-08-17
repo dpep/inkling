@@ -180,6 +180,10 @@ fn a_failed_discovery_holds_the_watermark_back() {
     .unwrap();
 
     assert_eq!(report.exit_code(), 2);
+    // The per-record counters all read zero here, so this is the only thing
+    // distinguishing a failed run from a quiet one.
+    assert!(report.discovery_failed());
+    assert_eq!(report.failed, 0);
     assert_eq!(store.load().unwrap().run.last_successful_discovery_at, None);
 }
 

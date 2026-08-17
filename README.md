@@ -57,12 +57,39 @@ then on a post of yours, which is both a small blast radius and legible feedback
 
 ### From cron
 
+`crontab -e`, then — with the paths adjusted to your machine:
+
 ```cron
-*/20 * * * * /usr/local/bin/inkling run >> ~/.local/state/inkling/log 2>&1
+PATH=/Users/you/.local/bin:/opt/homebrew/bin:/usr/bin:/bin
+USER=you
+
+*/20 * * * * $HOME/.claude/bin/inkling run >/dev/null
 ```
 
-Exit codes: `0` clean, `1` partial (some records failed and will retry), `2` the
-run failed. Cron mails you on nonzero.
+Both lines above the schedule matter, and cron's stripped environment is where
+this goes wrong:
+
+- **`PATH`** must reach `claude` (the Slack bridge) and `gh` (if you use
+  `token_command = "gh auth token"`). Without it you get
+  `` `gh auth token` exited 127 ``.
+- **`USER`** is what Claude Code's credentials are looked up against. Without
+  it every bridge call fails with `Not logged in`, which reads like an expired
+  session rather than a missing variable.
+
+Verify before trusting it, by reproducing what cron gives you:
+
+```sh
+env -i HOME="$HOME" USER="$USER" PATH=/Users/you/.local/bin:/opt/homebrew/bin:/usr/bin:/bin \
+  ~/.claude/bin/inkling run --dry-run
+```
+
+`>/dev/null` discards the summary so cron only mails you when something writes
+to stderr. The full run detail is in the log files either way.
+
+Exit codes: `0` clean, `1` partial (some records failed and will retry on their
+own schedule), `2` the run failed. A `2` with all-zero counters means discovery
+itself failed — the search window wasn't covered — and the summary says so
+outright.
 
 State lives at `~/.local/state/inkling/state.json` — readable, hand-editable, and
 safe to delete if you want Inkling to forget everything and rediscover. Deleting
