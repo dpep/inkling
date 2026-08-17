@@ -81,6 +81,17 @@ impl Report {
     }
 }
 
+/// Two decimals, which is all a minute-derived duration actually carries.
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+/// Seconds, for logs. Sub-second digits on a search boundary or a post time
+/// are noise — nothing here is scheduled or compared at that resolution.
+fn ts(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 impl Run<'_> {
     pub fn execute(&self) -> Result<Report, StoreError> {
         let started = std::time::Instant::now();
@@ -178,8 +189,10 @@ impl Run<'_> {
             }
             debug!(
                 scope = %key,
-                start = %window.start,
-                hours = (window.end - window.start).num_minutes() as f64 / 60.0,
+                start = ts(window.start),
+                // Rounded where it's built: a window derived from whole
+                // minutes has no business reporting sixteen decimal places.
+                hours = round2((window.end - window.start).num_minutes() as f64 / 60.0),
                 first_run = !snapshot.run.scopes.contains_key(&key),
                 "searching"
             );
@@ -208,7 +221,7 @@ impl Run<'_> {
                     if !found.complete {
                         info!(
                             scope = %key,
-                            covered_to = %covered_to,
+                            covered_to = ts(covered_to),
                             "search filled a page; the rest of the window waits for the next run"
                         );
                     }
@@ -259,7 +272,7 @@ impl Run<'_> {
                 debug!(
                     message = %message.id,
                     refs = references.len(),
-                    posted_at = %message.posted_at,
+                    posted_at = ts(message.posted_at),
                     "now tracking"
                 );
                 snapshot.tracked.insert(
@@ -501,5 +514,18 @@ impl Run<'_> {
             }
             !(record.terminal && now - record.posted_at > max_lookback)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round2;
+
+    #[test]
+    fn durations_report_the_precision_they_have() {
+        // A ten-minute window used to log 0.16666666666666666.
+        assert_eq!(round2(10.0 / 60.0), 0.17);
+        assert_eq!(round2(24.0), 24.0);
+        assert_eq!(round2(1.0 / 3.0), 0.33);
     }
 }
