@@ -144,7 +144,9 @@ impl State {
 
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // pad, not write_str: write_str ignores width, so `{state:<10}` in a
+        // aligned column would silently do nothing.
+        f.pad(self.as_str())
     }
 }
 

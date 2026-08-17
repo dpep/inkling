@@ -1,6 +1,6 @@
 //! `inkling` — annotate Slack messages with the state of what they link to.
 
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
@@ -289,34 +289,59 @@ fn run(cli: &Cli) -> Result<i32, String> {
         Command::Logs { .. } => unreachable!(),
         // Show is the default; Init and Path returned above.
         Command::Config { .. } => {
-            let source = if path.exists() {
-                path.display().to_string()
+            let absent = if path.exists() {
+                ""
             } else {
-                format!("{} (absent — using defaults)", path.display())
+                "   (absent — using defaults)"
             };
-            println!("config    {source}");
-            println!("state     {}", store.path().display());
-            println!("personal  {}", config.slack.personal);
+            println!("config     {}{absent}", tildify(&path));
+            println!("state      {}", tildify(store.path()));
+            println!("logs       {}", tildify(&obs::default_log_directory()));
+
+            println!();
+            println!("personal   {}", config.slack.personal);
             println!(
-                "channels  {}",
+                "channels   {}",
                 if config.slack.channels.is_empty() {
                     "none".to_string()
                 } else {
                     config.slack.channels.join(", ")
                 }
             );
-            println!("mine only {}", config.filters.only_my_messages);
-            for state in inkling::domain::model::State::ALL {
-                if let Some(emoji) = config.canonical_for(state) {
-                    let evidence: Vec<String> = config
-                        .evidence_for(state)
-                        .iter()
-                        .map(|e| format!(":{e}:"))
-                        .collect();
-                    println!("{state:9} :{emoji}:  (accepts {})", evidence.join(" "));
+            println!("mine only  {}", config.filters.only_my_messages);
+            println!("github     {}", credentials(&config));
+
+            // Canonical emoji vary in width, so the "also" column is padded to
+            // the widest one rather than a guess that breaks on a long name.
+            let drawn: Vec<_> = inkling::domain::model::State::ALL
+                .into_iter()
+                .filter_map(|state| config.canonical_for(state).map(|e| (state, e)))
+                .collect();
+            let widest = drawn
+                .iter()
+                .map(|(_, emoji)| emoji.as_str().len())
+                .max()
+                .unwrap_or(0);
+
+            if !drawn.is_empty() {
+                println!();
+            }
+            for (state, emoji) in drawn {
+                // The canonical is in the evidence list too; repeating it in
+                // "also" would suggest it's a second, different emoji.
+                let also: Vec<String> = config
+                    .evidence_for(state)
+                    .iter()
+                    .filter(|e| **e != emoji)
+                    .map(|e| format!(":{e}:"))
+                    .collect();
+                let canonical = format!(":{emoji}:");
+                let padded = format!("{canonical:<width$}", width = widest + 2);
+                match also.is_empty() {
+                    true => println!("{state:<10} {padded}"),
+                    false => println!("{state:<10} {padded}  also {}", also.join(" ")),
                 }
             }
-            println!("github    {}", credentials(&config));
             Ok(0)
         }
         Command::Status => {
@@ -327,24 +352,40 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 snapshot.run.last_successful_discovery_at,
                 now,
             );
-            println!("last run    {:?}", snapshot.run.last_run_outcome);
+            let local = |t: DateTime<Utc>| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            };
+            println!(
+                "last run    {}",
+                match snapshot.run.last_run_outcome {
+                    Some(outcome) => format!("{outcome:?}").to_lowercase(),
+                    None => "never".into(),
+                }
+            );
             println!(
                 "last search {}",
                 snapshot
                     .run
                     .last_successful_discovery_at
-                    .map_or("never".into(), |t| t.to_rfc3339())
+                    .map_or("never".into(), local)
             );
+
+            println!();
             println!(
                 "next window {} .. {}",
-                window.start.to_rfc3339(),
-                window.end.to_rfc3339()
+                local(window.start),
+                local(window.end)
             );
+
+            println!();
+            let live = snapshot.tracked.values().filter(|t| !t.terminal).count();
             println!("tracked     {}", snapshot.tracked.len());
-            println!(
-                "  live      {}",
-                snapshot.tracked.values().filter(|t| !t.terminal).count()
-            );
+            println!("  live      {live}");
+            println!("  done      {}", snapshot.tracked.len() - live);
+
+            println!();
             println!("github      {}", credentials(&config));
             Ok(0)
         }
@@ -498,6 +539,22 @@ fn resolve_identity<R: slack_claude::Runner>(
     }
     store.save(&snapshot).map_err(|e| e.to_string())?;
     Ok(me.id)
+}
+
+/// Shorten a path under $HOME to `~/…`. These are printed to be read, and a
+/// full home path is mostly a prefix you already know.
+fn tildify(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => {
+            let home = std::path::Path::new(&home).display().to_string();
+            match text.strip_prefix(&home) {
+                Some(rest) => format!("~{rest}"),
+                None => text,
+            }
+        }
+        _ => text,
+    }
 }
 
 fn credentials(config: &Config) -> String {
