@@ -85,6 +85,22 @@ fn merged_message() -> inkling::domain::model::Message {
 }
 
 #[test]
+fn a_configured_channel_name_reaches_slack_as_a_name() {
+    // Config takes handles, and search accepts them directly — no ID lookup
+    // stands between what you write and what gets searched.
+    use inkling::adapters::slack_claude::search_query;
+    assert_eq!(
+        search_query(&Scope::Channel("#inkling".into()), ""),
+        "in:#inkling"
+    );
+    assert_eq!(
+        config().slack.channels,
+        vec!["#inkling"],
+        "the config value is a handle, and stays one"
+    );
+}
+
+#[test]
 fn a_clean_run_signals_and_advances_the_watermark() {
     let config = config();
     let source = FakeMessageSource::with(vec![merged_message()]);

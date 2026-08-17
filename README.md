@@ -22,7 +22,7 @@ Write `~/.config/inkling/config.toml`:
 ```toml
 [slack]
 personal = false                 # true to find your own posts anywhere
-channels = ["#eng-prs"]
+channels = ["#eng-prs"]          # handles, not IDs; "eng-prs" works too
 # user_id is resolved from your credentials on first run and cached.
 # `slackmcp whoami` prints it if you want to pin it explicitly.
 
@@ -111,9 +111,11 @@ slackmcp thread '#eng' 1786596050.245879      # parent message plus replies
 slackmcp channel '#eng'                       # handle -> ID
 ```
 
-Channels take an ID or a handle anywhere. `--json` and `--ndjson` make the
-output machine-readable; plain output is tab-separated for pipes. `--help`
-covers the rest.
+Channels take a handle or an ID anywhere — use handles, they're what you know.
+Search sends them straight to Slack; the commands that need a real ID resolve
+it once and cache it in the state file, so a repeat call costs nothing.
+`--json` and `--ndjson` make the output machine-readable; plain output is
+tab-separated for pipes. `--help` covers the rest.
 
 Each call allowlists only the one MCP tool it needs, so the bridge cannot post
 messages even if something in a Slack message tries to talk it into doing so.

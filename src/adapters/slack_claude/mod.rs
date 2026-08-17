@@ -202,6 +202,18 @@ impl<R: Runner> MessageSource for SlackClaude<R> {
 }
 
 impl<R: Runner> SlackClaude<R> {
+    /// Prime the handle-to-ID cache from somewhere durable. Channel IDs never
+    /// change, so a resolution is worth keeping across processes rather than
+    /// paying a bridge call for it every invocation.
+    pub fn seed_channels(&self, known: impl IntoIterator<Item = (String, String)>) {
+        self.channel_ids.borrow_mut().extend(known);
+    }
+
+    /// Everything resolved so far, for the caller to persist.
+    pub fn known_channels(&self) -> HashMap<String, String> {
+        self.channel_ids.borrow().clone()
+    }
+
     /// Turn a channel handle into an ID, passing IDs straight through.
     ///
     /// Resolutions are memoized for the process: a run touching the same
@@ -539,6 +551,26 @@ mod tests {
         let prompt = search_prompt("in:#inkling", &window);
         assert!(prompt.contains("1786568400"), "{prompt}");
         assert!(prompt.contains("1786570200"), "{prompt}");
+    }
+
+    #[test]
+    fn a_seeded_handle_resolves_without_a_bridge_call() {
+        // Empty script: any bridge call would return "" and fail to parse.
+        let slack = SlackClaude::new(ScriptedRunner::new(&[]));
+        slack.seed_channels([("eng".to_string(), "C012XYZ6789".to_string())]);
+
+        assert_eq!(slack.resolve_channel("#eng").unwrap(), "C012XYZ6789");
+        assert_eq!(*slack.runner.calls.borrow(), 0);
+    }
+
+    #[test]
+    fn resolutions_are_exposed_for_persisting() {
+        let slack = SlackClaude::new(ScriptedRunner::new(&[r#"{"id":"C012XYZ6789"}"#]));
+        slack.resolve_channel("eng").unwrap();
+        assert_eq!(
+            slack.known_channels().get("eng").map(String::as_str),
+            Some("C012XYZ6789")
+        );
     }
 
     #[test]

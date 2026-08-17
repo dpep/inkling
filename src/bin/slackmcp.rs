@@ -11,6 +11,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use inkling::adapters::slack_claude::{ClaudeRunner, SlackClaude};
+use inkling::adapters::store_json::{JsonStore, Store};
 use inkling::domain::model::{Message, MessageId, ReactionName};
 use inkling::domain::window::SearchWindow;
 use inkling::ports::{MessageSource, ReactionSink, Scope};
@@ -184,6 +185,29 @@ fn main() {
     }
 }
 
+/// Channel IDs never change, so resolving a handle is worth remembering
+/// between invocations — otherwise every `slackmcp reactions '#eng'` pays a
+/// bridge call before doing anything. Shares the state file with `inkling`.
+fn with_channel_cache<T>(
+    slack: &SlackClaude<ClaudeRunner>,
+    body: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let store = JsonStore::new(JsonStore::default_path());
+    let before = store.load().unwrap_or_default();
+    slack.seed_channels(before.channels.clone());
+
+    let result = body();
+
+    // Best-effort: a cache write failing shouldn't fail the command.
+    let learned = slack.known_channels();
+    if learned.len() > before.channels.len() {
+        let mut after = store.load().unwrap_or(before);
+        after.channels.extend(learned);
+        let _ = store.save(&after);
+    }
+    result
+}
+
 fn run(cli: &Cli) -> Result<(), String> {
     let runner = ClaudeRunner {
         model: Some(cli.model.clone()),
@@ -192,6 +216,10 @@ fn run(cli: &Cli) -> Result<(), String> {
     let slack = SlackClaude::new(runner);
     let format = cli.format.resolve();
 
+    with_channel_cache(&slack, || dispatch(cli, &slack, format))
+}
+
+fn dispatch(cli: &Cli, slack: &SlackClaude<ClaudeRunner>, format: Format) -> Result<(), String> {
     match &cli.command {
         Command::Search {
             query,
@@ -207,7 +235,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 .unwrap_or_else(|| end - TimeDelta::hours(*hours));
 
             let window = SearchWindow { start, end };
-            let messages = search(&slack, query, &window)?;
+            let messages = search(slack, query, &window)?;
             let rows: Vec<MessageOut> = messages.into_iter().map(Into::into).collect();
             emit(format, &rows, |r| {
                 vec![
