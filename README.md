@@ -151,14 +151,6 @@ It runs on a small model with Claude Code's default prompt and built-in tools
 stripped out, which makes it ~6x cheaper and ~2x faster than a default
 invocation — see [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md).
 
-## Development
-
-```sh
-cargo test
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-```
-
 ### Scoping the Slack MCP server
 
 `--allowedTools` restricts what the bridge may *call*, not what gets *loaded*.
@@ -187,3 +179,11 @@ Omit the table and nothing changes — the bridge inherits the ambient MCP
 configuration exactly as before. This only works for a server declarable as a
 static block; an account-linked OAuth connector can't be named this way, and
 `--strict-mcp-config` would drop it along with everything else.
+
+## Development
+
+```sh
+cargo test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
