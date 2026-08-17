@@ -53,13 +53,16 @@ impl FakeMessageSource {
 }
 
 impl MessageSource for FakeMessageSource {
-    fn discover(&self, _scope: &Scope, window: &SearchWindow) -> Result<Vec<Message>, SourceError> {
-        Ok(self
+    fn discover(&self, _scope: &Scope, window: &SearchWindow) -> Result<Discovered, SourceError> {
+        let mut messages: Vec<Message> = self
             .messages
             .iter()
             .filter(|m| m.posted_at >= window.start && m.posted_at <= window.end)
             .cloned()
-            .collect())
+            .collect();
+        // Oldest first, like the real source.
+        messages.sort_by_key(|m| m.posted_at);
+        Ok(Discovered::all(messages))
     }
 
     fn reactions(

@@ -384,6 +384,7 @@ fn search<R: inkling::adapters::slack_claude::Runner>(
     }
     slack
         .discover(&Scope::Channel(query.to_string()), window)
+        .map(|found| found.messages)
         .map_err(|e| e.to_string())
 }
 

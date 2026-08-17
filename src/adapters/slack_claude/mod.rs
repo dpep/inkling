@@ -19,7 +19,7 @@ pub use runner::{ClaudeRunner, Runner, RunnerError, extract_result};
 use crate::config::SlackMcp;
 use crate::domain::model::{Message, MessageId, ReactionName};
 use crate::domain::window::SearchWindow;
-use crate::ports::{MessageSource, ReactionSink, Scope, SinkError, SourceError};
+use crate::ports::{Discovered, MessageSource, ReactionSink, Scope, SinkError, SourceError};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -106,6 +106,9 @@ pub struct SlackClaude<R: Runner> {
 /// bounded retry. Without this, a healthy run reports a spurious failure.
 const ATTEMPTS: usize = 3;
 
+/// The tool's own maximum. A full page means there is more behind it.
+pub const PAGE_LIMIT: usize = 20;
+
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
         Self::with_tools(runner, ToolNames::default())
@@ -186,7 +189,8 @@ fn search_prompt(tool: &str, query: &str, window: &SearchWindow) -> String {
          limit: 20\n\
          include_context: false\n\
          response_format: \"detailed\"\n\
-         sort: \"timestamp\"\n\n\
+         sort: \"timestamp\"\n\
+         sort_dir: \"asc\"\n\n\
          Then convert every result into this JSON, and output ONLY the JSON \
          with no commentary and no code fence:\n\
          {{\"total\": 0, \"messages\": [{{\"channel_id\": \"...\", \
@@ -225,9 +229,9 @@ fn reactions_prompt(tool: &str, channel_id: &str, oldest: &str) -> String {
 }
 
 impl<R: Runner> MessageSource for SlackClaude<R> {
-    fn discover(&self, scope: &Scope, window: &SearchWindow) -> Result<Vec<Message>, SourceError> {
+    fn discover(&self, scope: &Scope, window: &SearchWindow) -> Result<Discovered, SourceError> {
         if window.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Discovered::all(Vec::new()));
         }
         self.discover_with_query(&search_query(scope), window)
     }
@@ -472,14 +476,14 @@ impl<R: Runner> SlackClaude<R> {
         query: &str,
         window: &SearchWindow,
     ) -> Result<Vec<Message>, SourceError> {
-        self.discover_with_query(query, window)
+        Ok(self.discover_with_query(query, window)?.messages)
     }
 
     fn discover_with_query(
         &self,
         query: &str,
         window: &SearchWindow,
-    ) -> Result<Vec<Message>, SourceError> {
+    ) -> Result<Discovered, SourceError> {
         let hits = self
             .attempt(
                 &search_prompt(&self.tools.search, query, window),
@@ -487,7 +491,14 @@ impl<R: Runner> SlackClaude<R> {
                 |raw| parse_search(raw).map_err(Retry::Again),
             )
             .map_err(SourceError::Search)?;
-        Ok(hits.into_iter().map(SearchHit::into_message).collect())
+
+        // A full page means Slack had more to give. Saying so lets the caller
+        // advance its mark only as far as it actually covered.
+        let complete = hits.len() < PAGE_LIMIT;
+        Ok(Discovered {
+            messages: hits.into_iter().map(SearchHit::into_message).collect(),
+            complete,
+        })
     }
 }
 

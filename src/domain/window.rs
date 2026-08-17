@@ -51,7 +51,7 @@ mod tests {
     use std::time::Duration;
 
     fn config() -> WindowConfig {
-        WindowConfig::default() // overlap 10m, max_lookback 24h, initial 2h
+        WindowConfig::default() // overlap 10m, max_lookback 24h, initial 24h
     }
 
     fn at(s: &str) -> DateTime<Utc> {
@@ -62,7 +62,7 @@ mod tests {
     fn the_first_run_looks_back_by_the_initial_lookback() {
         let now = at("2026-08-12T12:00:00Z");
         let window = next_window(&config(), None, now);
-        assert_eq!(window.start, at("2026-08-12T10:00:00Z"));
+        assert_eq!(window.start, at("2026-08-11T12:00:00Z"));
         assert_eq!(window.end, now);
     }
 

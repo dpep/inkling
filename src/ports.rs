@@ -42,10 +42,31 @@ pub enum SourceError {
     Transport(String),
 }
 
+/// One search's worth of messages, and whether it exhausted the window.
+///
+/// Slack caps a search page, so a wide window over a busy channel returns a
+/// prefix. Saying so lets the caller advance its mark only as far as it
+/// actually covered, and pick the rest up next run — rather than skipping it.
+#[derive(Debug, Default)]
+pub struct Discovered {
+    pub messages: Vec<Message>,
+    pub complete: bool,
+}
+
+impl Discovered {
+    /// Everything the window held.
+    pub fn all(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            complete: true,
+        }
+    }
+}
+
 pub trait MessageSource {
-    /// Messages in scope within the window. May over-return; the caller
-    /// filters precisely.
-    fn discover(&self, scope: &Scope, window: &SearchWindow) -> Result<Vec<Message>, SourceError>;
+    /// Messages in scope within the window, oldest first. May over-return;
+    /// the caller filters precisely.
+    fn discover(&self, scope: &Scope, window: &SearchWindow) -> Result<Discovered, SourceError>;
 
     /// Current reactions for tracked messages.
     ///

@@ -328,7 +328,10 @@ fn d_max_lookback() -> Duration {
     Duration::from_secs(24 * 60 * 60)
 }
 fn d_initial_lookback() -> Duration {
-    Duration::from_secs(2 * 60 * 60)
+    // Same as max_lookback: 24h is already the most this will ever look back,
+    // so a first run covering less was an arbitrary extra limit. A scope set
+    // up in the afternoon should still find the morning's pull requests.
+    Duration::from_secs(24 * 60 * 60)
 }
 fn d_max_tracking_age() -> Duration {
     Duration::from_secs(7 * 24 * 60 * 60)
@@ -587,6 +590,10 @@ mod tests {
     fn omitted_sections_fall_back_to_defaults() {
         let config = example();
         assert_eq!(config.window.overlap, Duration::from_secs(600));
+        assert_eq!(
+            config.window.initial_lookback, config.window.max_lookback,
+            "a first run should cover as much as the clamp allows"
+        );
         assert_eq!(
             config.tracking.max_tracking_age,
             Duration::from_secs(7 * 24 * 3600)

@@ -241,7 +241,7 @@ fn discovery_finds_only_messages_inside_the_window() {
     let found = source
         .discover(&Scope::Personal("U_ME".into()), &window)
         .unwrap();
-    assert_eq!(found, vec![fresh]);
+    assert_eq!(found.messages, vec![fresh]);
 }
 
 #[test]

@@ -24,6 +24,10 @@
   bounded retries. Also shipped as the standalone `slackmcp` CLI.
 - JSON state store, carrying the tracked records, the ownership ledger, and a channel-ID cache.
 - `inkling run` / `status` / `check`, with `--dry-run` and `--json`.
+- **A first run now looks back 24h, not 2h**, matching `window.max_lookback` — 24h was already the
+  most Inkling would ever look back, so a shorter first run was an arbitrary extra limit. Searches
+  now read oldest-first and a capped page advances the mark only as far as it actually read, so a
+  busy channel catches up over successive runs instead of losing the remainder.
 - **Discovery progress is now tracked per scope.** Previously one watermark covered every scope, so
   adding a channel to a running setup told it the recent past was already searched — it would find
   nothing until someone posted again. Each scope now gets its own mark, and a new one gets a

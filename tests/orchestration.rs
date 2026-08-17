@@ -57,7 +57,7 @@ impl MessageSource for BrokenSource {
         &self,
         _scope: &Scope,
         _window: &inkling::domain::window::SearchWindow,
-    ) -> Result<Vec<inkling::domain::model::Message>, SourceError> {
+    ) -> Result<Discovered, SourceError> {
         Err(SourceError::Search("slack is down".into()))
     }
     fn reactions(
@@ -111,7 +111,7 @@ fn author_names_are_resolved_and_remembered() {
             &self,
             scope: &Scope,
             window: &inkling::domain::window::SearchWindow,
-        ) -> Result<Vec<inkling::domain::model::Message>, SourceError> {
+        ) -> Result<Discovered, SourceError> {
             self.0.discover(scope, window)
         }
         fn reactions(
@@ -216,6 +216,62 @@ fn a_newly_added_channel_gets_a_first_run_window() {
         saved.run.scopes["personal"], recent,
         "an untouched scope keeps its own mark"
     );
+}
+
+#[test]
+fn a_capped_search_advances_only_as_far_as_it_read() {
+    // Slack caps a search page, so a wide window over a busy channel returns
+    // a prefix. Advancing to the window's end would step over the remainder;
+    // advancing to the newest message read leaves it for the next run.
+    struct CappedSource(Vec<inkling::domain::model::Message>);
+
+    impl MessageSource for CappedSource {
+        fn discover(
+            &self,
+            _scope: &Scope,
+            _window: &inkling::domain::window::SearchWindow,
+        ) -> Result<Discovered, SourceError> {
+            Ok(Discovered {
+                messages: self.0.clone(),
+                complete: false,
+            })
+        }
+        fn reactions(
+            &self,
+            _ids: &[inkling::domain::model::MessageId],
+        ) -> Result<
+            std::collections::HashMap<
+                inkling::domain::model::MessageId,
+                Vec<inkling::domain::model::ReactionName>,
+            >,
+            SourceError,
+        > {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    let config = config();
+    let newest = merged_message();
+    let covered_to = newest.posted_at;
+
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+    Run {
+        config: &config,
+        source: &CappedSource(vec![newest]),
+        provider: &ScriptedStatusProvider::new(),
+        sink: &RecordingSink::new(),
+        store: &store,
+        clock: &clock,
+        dry_run: false,
+        since: None,
+    }
+    .execute()
+    .unwrap();
+
+    let mark = store.load().unwrap().run.scopes["channel:inkling"];
+    assert_eq!(mark, covered_to, "the unread remainder stays searchable");
+    assert!(mark < clock.now());
 }
 
 #[test]

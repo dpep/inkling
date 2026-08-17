@@ -185,9 +185,34 @@ impl Run<'_> {
             );
 
             match self.source.discover(scope, &window) {
-                Ok(messages) => {
-                    debug!(scope = %key, returned = messages.len(), "searched");
-                    for message in messages {
+                Ok(found) => {
+                    debug!(
+                        scope = %key,
+                        returned = found.messages.len(),
+                        complete = found.complete,
+                        "searched"
+                    );
+                    // Results come oldest-first, so a capped page is a prefix
+                    // of the window. Advancing only to the newest message we
+                    // saw leaves the remainder for the next run instead of
+                    // stepping over it.
+                    let covered_to = match found.complete {
+                        true => window.end,
+                        false => found
+                            .messages
+                            .iter()
+                            .map(|m| m.posted_at)
+                            .max()
+                            .unwrap_or(window.start),
+                    };
+                    if !found.complete {
+                        info!(
+                            scope = %key,
+                            covered_to = %covered_to,
+                            "search filled a page; the rest of the window waits for the next run"
+                        );
+                    }
+                    for message in found.messages {
                         if self.track(snapshot, message, now, report) {
                             report.discovered += 1;
                         }
@@ -196,8 +221,8 @@ impl Run<'_> {
                     // the mark, or a hand-run after a long sleep would
                     // silently skip the gap it didn't cover.
                     if window.start <= computed.start {
-                        snapshot.run.scopes.insert(key, window.end);
-                        snapshot.run.last_successful_discovery_at = Some(window.end);
+                        snapshot.run.scopes.insert(key, covered_to);
+                        snapshot.run.last_successful_discovery_at = Some(covered_to);
                     } else {
                         info!(scope = %key, "watermark held: --since narrowed the window");
                     }
