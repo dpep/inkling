@@ -39,13 +39,13 @@ pub struct Report {
     pub outcome: Option<Outcome>,
     /// Per-record detail, for dry-run output.
     pub details: Vec<Detail>,
-    /// Everything being watched, newest message first. For verbose output.
-    pub watching: Vec<Watched>,
+    /// Every tracked record, newest message first. For verbose output.
+    pub tracking: Vec<Tracked>,
 }
 
 /// One tracked message, flattened for display.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Watched {
+pub struct Tracked {
     pub channel: String,
     pub posted_at: DateTime<Utc>,
     pub state: Option<State>,
@@ -99,11 +99,11 @@ impl Report {
 
 /// Flatten the tracked set for display, newest message first — what someone
 /// is asking about is usually what just happened.
-fn summarize(snapshot: &Snapshot) -> Vec<Watched> {
-    let mut watching: Vec<Watched> = snapshot
+fn summarize(snapshot: &Snapshot) -> Vec<Tracked> {
+    let mut tracking: Vec<Tracked> = snapshot
         .tracked
         .values()
-        .map(|record| Watched {
+        .map(|record| Tracked {
             channel: match record.channel_name.is_empty() {
                 true => record.id.channel.clone(),
                 false => format!("#{}", record.channel_name),
@@ -124,8 +124,8 @@ fn summarize(snapshot: &Snapshot) -> Vec<Watched> {
             permalink: record.permalink.clone(),
         })
         .collect();
-    watching.sort_by_key(|w| std::cmp::Reverse(w.posted_at));
-    watching
+    tracking.sort_by_key(|t| std::cmp::Reverse(t.posted_at));
+    tracking
 }
 
 /// Two decimals, which is all a minute-derived duration actually carries.
@@ -173,7 +173,7 @@ impl Run<'_> {
 
         report.tracked = snapshot.tracked.len();
         report.terminal = snapshot.tracked.values().filter(|t| t.terminal).count();
-        report.watching = summarize(&snapshot);
+        report.tracking = summarize(&snapshot);
         snapshot.run.last_run_outcome = Some(report.outcome());
 
         if !self.dry_run {

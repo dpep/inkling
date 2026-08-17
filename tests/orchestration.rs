@@ -219,7 +219,7 @@ fn a_newly_added_channel_gets_a_first_run_window() {
 }
 
 #[test]
-fn the_report_names_what_it_is_watching() {
+fn the_report_names_what_it_is_tracking() {
     // "tracking 2" is not an answer on its own — the point of the list is to
     // say which two, and what each one is.
     let config = config();
@@ -246,15 +246,15 @@ fn the_report_names_what_it_is_watching() {
     .execute()
     .unwrap();
 
-    assert_eq!(report.watching.len(), report.tracked);
-    let watched = &report.watching[0];
-    assert_eq!(watched.channel, "#test");
-    assert_eq!(watched.state, Some(State::Approved));
-    assert_eq!(watched.refs[0].0, "github.com/dpep/gqls#1");
-    assert!(!watched.terminal);
+    assert_eq!(report.tracking.len(), report.tracked);
+    let tracked = &report.tracking[0];
+    assert_eq!(tracked.channel, "#test");
+    assert_eq!(tracked.state, Some(State::Approved));
+    assert_eq!(tracked.refs[0].0, "github.com/dpep/gqls#1");
+    assert!(!tracked.terminal);
     // The emoji it just applied shows against the record that carries it.
     assert_eq!(
-        watched.applied,
+        tracked.applied,
         vec![inkling::domain::model::ReactionName::new(
             "white_check_mark"
         )]

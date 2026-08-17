@@ -549,14 +549,14 @@ fn resolve_identity<R: slack_claude::Runner>(
 
 /// How many tracked records to list before summarizing the rest. Enough to
 /// see everything on a normal week, short enough not to bury the summary.
-const WATCH_LIMIT: usize = 15;
+const TRACKING_LIMIT: usize = 15;
 
-/// List what's being watched, so "tracking 7" says which seven.
+/// List the tracked records, so "tracking 7" says which seven.
 ///
 /// One line per reference: state, what's on it, the ref, and its title —
 /// `dpep/gqls#1` alone doesn't tell you what it is. Live records come first,
 /// since finished ones are only waiting to age out.
-fn watching(records: &[inkling::app::Watched]) {
+fn tracking(records: &[inkling::app::Tracked]) {
     if records.is_empty() {
         return;
     }
@@ -574,8 +574,8 @@ fn watching(records: &[inkling::app::Watched]) {
     let used = 2 + 8 + 2 + 14 + 2 + width + 2;
     let budget = terminal_width().saturating_sub(used).max(24);
 
-    println!("watching {}", ordered.len());
-    for record in ordered.iter().take(WATCH_LIMIT) {
+    println!("tracking");
+    for record in ordered.iter().take(TRACKING_LIMIT) {
         let state = record.state.map_or("?", |s| s.as_str());
         let marks = match record.applied.is_empty() {
             true => "—".to_string(),
@@ -591,8 +591,8 @@ fn watching(records: &[inkling::app::Watched]) {
             println!("  {state:<8}  {marks:<14}  {name:<width$}  {title}");
         }
     }
-    if ordered.len() > WATCH_LIMIT {
-        println!("  … and {} more", ordered.len() - WATCH_LIMIT);
+    if ordered.len() > TRACKING_LIMIT {
+        println!("  … and {} more", ordered.len() - TRACKING_LIMIT);
     }
     println!();
 }
@@ -734,7 +734,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
     }
 
     if verbose > 0 {
-        watching(&report.watching);
+        tracking(&report.tracking);
     }
 
     let verb = if dry_run { "would add" } else { "added" };

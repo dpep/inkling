@@ -20,7 +20,7 @@ inkling status              # window, tracked records
 inkling logs -f             # -n, -g, --path
 ```
 
-`-v` lists what's being watched and why each decision was made.
+`-v` lists the tracked records and why each decision was made.
 
 ## Config
 
