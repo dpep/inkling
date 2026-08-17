@@ -569,6 +569,11 @@ fn watching(records: &[inkling::app::Watched]) {
         .max()
         .unwrap_or(0);
 
+    // Titles are arbitrary prose. Left whole they wrap, and a wrapped row
+    // stops being a row — the columns no longer line up with anything.
+    let used = 2 + 8 + 2 + 14 + 2 + width + 2;
+    let budget = terminal_width().saturating_sub(used).max(24);
+
     println!("watching {}", ordered.len());
     for record in ordered.iter().take(WATCH_LIMIT) {
         let state = record.state.map_or("?", |s| s.as_str());
@@ -582,6 +587,7 @@ fn watching(records: &[inkling::app::Watched]) {
                 .join(" "),
         };
         for (name, title) in &record.refs {
+            let title = ellipsize(title, budget);
             println!("  {state:<8}  {marks:<14}  {name:<width$}  {title}");
         }
     }
@@ -589,6 +595,28 @@ fn watching(records: &[inkling::app::Watched]) {
         println!("  … and {} more", ordered.len() - WATCH_LIMIT);
     }
     println!();
+}
+
+/// Columns of the terminal, or a reasonable width when output isn't a tty.
+fn terminal_width() -> usize {
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // Ask the terminal directly; COLUMNS isn't exported to children by most
+    // shells, so it can't be relied on.
+    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
+    match ok && size.ws_col > 0 {
+        true => size.ws_col as usize,
+        false => 100,
+    }
+}
+
+/// Cut to `max` characters, marking that something was removed. Counts
+/// characters rather than bytes so a multi-byte title isn't split mid-glyph.
+fn ellipsize(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
 }
 
 /// Shorten a path under $HOME to `~/…`. These are printed to be read, and a
@@ -721,4 +749,26 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
         report.terminal,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ellipsize;
+
+    #[test]
+    fn long_titles_are_cut_rather_than_wrapped() {
+        // A wrapped row stops being a row: the columns stop lining up, and
+        // the tail reads as a stray label on its own line.
+        // Cut at the limit rather than a word boundary — a table column
+        // wants as much of the title as fits.
+        assert_eq!(ellipsize("Tighten result ranking", 10), "Tighten r…");
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("exactly-10", 10), "exactly-10");
+    }
+
+    #[test]
+    fn cutting_counts_characters_not_bytes() {
+        // Truncating by byte would split a multi-byte glyph in half.
+        assert_eq!(ellipsize("émoji—dash ok", 6), "émoji…");
+    }
 }
