@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Merged now defaults to `:rocket:`, not `:purple_heart:`**, and `:done:` moved from approved to
+  merged. A heart said nothing about shipping; a rocket is what engineers already use, and "done"
+  means finished, which is merged rather than approved. Update with
+  `inkling config set status.merged.canonical rocket`.
 - **`:eyes:` is no longer treated as approval.** It conventionally means "I'm looking at this", so
   accepting it as evidence kept Inkling silent on a PR someone had merely glanced at — and it
   stayed silent when that PR was actually approved. If you have it in your own

@@ -62,11 +62,11 @@ token_command = "gh auth token"  # or token_env = "GITHUB_TOKEN"
 
 [status.approved]
 canonical = "white_check_mark"
-aliases   = ["done", "lgtm", "approved"]
+aliases   = ["lgtm", "approved"]
 
 [status.merged]
-canonical = "merged"
-aliases   = ["purple_heart", "shipit"]
+canonical = "rocket"
+aliases   = ["merged", "shipit", "ship", "done"]
 ```
 
 Emoji vocabulary is entirely yours — `canonical` is what Inkling adds, `aliases`

@@ -450,7 +450,7 @@ fn default_status() -> BTreeMap<String, Status> {
             State::Approved.as_str().to_string(),
             Status {
                 canonical: "white_check_mark".into(),
-                aliases: ["heavy_check_mark", "done", "lgtm", "approved"]
+                aliases: ["heavy_check_mark", "lgtm", "approved"]
                     .map(String::from)
                     .into(),
                 enabled: true,
@@ -459,8 +459,10 @@ fn default_status() -> BTreeMap<String, Status> {
         (
             State::Merged.as_str().to_string(),
             Status {
-                canonical: "purple_heart".into(),
-                aliases: ["merged", "shipit"].map(String::from).into(),
+                canonical: "rocket".into(),
+                aliases: ["merged", "shipit", "ship", "done"]
+                    .map(String::from)
+                    .into(),
                 enabled: true,
             },
         ),
@@ -563,7 +565,7 @@ mod tests {
         assert!(config.filters.only_my_messages);
         assert_eq!(
             config.canonical_for(State::Merged),
-            Some(ReactionName::new("purple_heart"))
+            Some(ReactionName::new("rocket"))
         );
         assert!(config.github.token_command.is_some());
     }
