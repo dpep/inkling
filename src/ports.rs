@@ -43,6 +43,13 @@ pub trait MessageSource {
         &self,
         ids: &[MessageId],
     ) -> Result<HashMap<MessageId, Vec<ReactionName>>, SourceError>;
+
+    /// Human names for user IDs. Defaulted empty: a source that can't answer
+    /// should degrade to showing whatever the message already carried, not
+    /// fail the run over a display detail.
+    fn user_names(&self, _ids: &[String]) -> Result<HashMap<String, String>, SourceError> {
+        Ok(HashMap::new())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

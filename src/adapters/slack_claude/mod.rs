@@ -50,6 +50,7 @@ pub fn looks_like_channel_id(s: &str) -> bool {
 pub struct SlackClaude<R: Runner> {
     runner: R,
     channel_ids: RefCell<HashMap<String, String>>,
+    user_names: RefCell<HashMap<String, String>>,
 }
 
 /// A model occasionally answers with prose instead of doing the job — most
@@ -63,6 +64,7 @@ impl<R: Runner> SlackClaude<R> {
         Self {
             runner,
             channel_ids: RefCell::new(HashMap::new()),
+            user_names: RefCell::new(HashMap::new()),
         }
     }
 
@@ -142,8 +144,11 @@ fn search_prompt(query: &str, window: &SearchWindow) -> String {
          `channel_name` is the channel's name without the leading #, and \\
          `user_name` is the author's display name.\n\
          Copy each field verbatim from the tool output. Do not summarize, \
-         re-word, or omit any message. If there are no results, output \
-         {{\"messages\": []}}.",
+         re-word, or omit any message.\n\
+         Output {{\"messages\": []}} ONLY if the tool ran and returned no \
+         results. If you cannot run the tool for any reason, say so in plain \
+         text instead — an empty list is indistinguishable from a quiet \
+         channel, so reporting one you didn't earn hides the failure.",
         window.start.timestamp().to_string(),
         window.end.timestamp().to_string(),
     )
@@ -170,6 +175,17 @@ impl<R: Runner> MessageSource for SlackClaude<R> {
             return Ok(Vec::new());
         }
         self.discover_with_query(&search_query(scope), window)
+    }
+
+    fn user_names(&self, ids: &[String]) -> Result<HashMap<String, String>, SourceError> {
+        let mut names = HashMap::new();
+        for id in ids {
+            // One bad profile shouldn't cost the rest their names.
+            if let Ok(name) = self.resolve_user(id) {
+                names.insert(id.clone(), name);
+            }
+        }
+        Ok(names)
     }
 
     fn reactions(
@@ -207,6 +223,14 @@ impl<R: Runner> SlackClaude<R> {
     /// Everything resolved so far, for the caller to persist.
     pub fn known_channels(&self) -> HashMap<String, String> {
         self.channel_ids.borrow().clone()
+    }
+
+    pub fn seed_users(&self, known: impl IntoIterator<Item = (String, String)>) {
+        self.user_names.borrow_mut().extend(known);
+    }
+
+    pub fn known_users(&self) -> HashMap<String, String> {
+        self.user_names.borrow().clone()
     }
 
     /// Turn a channel handle into an ID, passing IDs straight through.
@@ -267,6 +291,36 @@ impl<R: Runner> SlackClaude<R> {
             .into_iter()
             .map(|r| (MessageId::new(channel_id, &r.ts), r.names))
             .collect())
+    }
+
+    /// Real name for a user ID, cached. One profile call per person ever —
+    /// a Slack username isn't a name, and the search results only carry the
+    /// username.
+    fn resolve_user(&self, user_id: &str) -> Result<String, SourceError> {
+        if let Some(known) = self.user_names.borrow().get(user_id) {
+            return Ok(known.clone());
+        }
+        let prompt = format!(
+            "Call {PROFILE_TOOL} with user_id {user_id:?}.\n\n\
+             Then output ONLY this JSON, no commentary and no code fence:\n\
+             {{\"id\": {user_id:?}, \"handle\": \"...\", \"name\": \"...\"}}\n\n\
+             `name` is the person's real or display name.",
+        );
+        let identity = self
+            .attempt(&prompt, &[PROFILE_TOOL], |raw| {
+                parse_identity(raw).map_err(Retry::Again)
+            })
+            .map_err(SourceError::Search)?;
+
+        let name = if identity.name.trim().is_empty() {
+            identity.handle
+        } else {
+            identity.name
+        };
+        self.user_names
+            .borrow_mut()
+            .insert(user_id.to_string(), name.clone());
+        Ok(name)
     }
 
     /// Who the credentials belong to.

@@ -101,6 +101,78 @@ fn a_configured_channel_name_reaches_slack_as_a_name() {
 }
 
 #[test]
+fn author_names_are_resolved_and_remembered() {
+    // Slack search reports usernames, not names. Resolving costs a call per
+    // person, so the answer is cached rather than re-fetched every run.
+    struct NamingSource(FakeMessageSource, RefCell<usize>);
+
+    impl MessageSource for NamingSource {
+        fn discover(
+            &self,
+            scope: &Scope,
+            window: &inkling::domain::window::SearchWindow,
+        ) -> Result<Vec<inkling::domain::model::Message>, SourceError> {
+            self.0.discover(scope, window)
+        }
+        fn reactions(
+            &self,
+            ids: &[inkling::domain::model::MessageId],
+        ) -> Result<
+            std::collections::HashMap<
+                inkling::domain::model::MessageId,
+                Vec<inkling::domain::model::ReactionName>,
+            >,
+            SourceError,
+        > {
+            self.0.reactions(ids)
+        }
+        fn user_names(
+            &self,
+            ids: &[String],
+        ) -> Result<std::collections::HashMap<String, String>, SourceError> {
+            *self.1.borrow_mut() += 1;
+            Ok(ids
+                .iter()
+                .map(|id| (id.clone(), "Daniel Pepper".to_string()))
+                .collect())
+        }
+    }
+
+    let config = config();
+    let mut nameless = merged_message();
+    nameless.author_name.clear();
+
+    let source = NamingSource(FakeMessageSource::with(vec![nameless]), RefCell::new(0));
+    let provider = ScriptedStatusProvider::new();
+    provider.set(&pr("gqls", 1), State::Open);
+    let sink = RecordingSink::new();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    let run = || {
+        Run {
+            config: &config,
+            source: &source,
+            provider: &provider,
+            sink: &sink,
+            store: &store,
+            clock: &clock,
+            dry_run: false,
+            since: None,
+        }
+        .execute()
+        .unwrap()
+    };
+
+    let report = run();
+    assert_eq!(report.details[0].author, "Daniel Pepper");
+    assert_eq!(*source.1.borrow(), 1);
+
+    run();
+    assert_eq!(*source.1.borrow(), 1, "the name is cached, not re-fetched");
+}
+
+#[test]
 fn personal_mode_actually_searches() {
     // Regression: the scope carried no user id, so the adapter refused it and
     // every personal-mode run reported a discovery failure. It stayed hidden

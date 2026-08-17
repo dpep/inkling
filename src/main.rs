@@ -57,6 +57,10 @@ struct Common {
 enum Command {
     /// Discover new messages and bring tracked ones up to date.
     Run {
+        /// Only search these channels, ignoring the configured scope. Handles
+        /// or IDs. Given any, personal mode is off for this run — asking for
+        /// a channel and getting your DMs too would be surprising.
+        channels: Vec<String>,
         /// Report what would happen, changing nothing in Slack or on disk.
         #[arg(long, short = 'n')]
         dry_run: bool,
@@ -310,6 +314,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             Ok(0)
         }
         Command::Run {
+            channels,
             dry_run,
             since_hours,
             json,
@@ -326,6 +331,12 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let clock = SystemClock;
 
             let mut config = config;
+            if !channels.is_empty() {
+                config.slack.channels = channels.clone();
+                config.slack.personal = false;
+            }
+            // Still needed with an explicit channel: only_my_messages filters
+            // by author regardless of how a message was found.
             if config.slack.user_id.is_none() {
                 config.slack.user_id = Some(resolve_identity(&slack, &store)?);
             }
@@ -380,6 +391,17 @@ fn resolve_identity<R: inkling::adapters::slack_claude::Runner>(
     }
     let me = slack.whoami().map_err(|e| e.to_string())?;
     snapshot.user_id = Some(me.id.clone());
+
+    // whoami already carries the name, so seed it here rather than paying a
+    // second profile call for the one author who appears on every message.
+    let name = if me.name.trim().is_empty() {
+        me.handle
+    } else {
+        me.name
+    };
+    if !name.is_empty() {
+        snapshot.users.insert(me.id.clone(), name);
+    }
     store.save(&snapshot).map_err(|e| e.to_string())?;
     Ok(me.id)
 }

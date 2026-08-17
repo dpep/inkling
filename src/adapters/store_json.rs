@@ -28,6 +28,10 @@ pub struct Snapshot {
     /// bridge call, so this is worth carrying between runs.
     #[serde(default)]
     pub channels: BTreeMap<String, String>,
+    /// User ID to real name. Slack search only reports usernames, and a
+    /// profile call per person is worth making exactly once.
+    #[serde(default)]
+    pub users: BTreeMap<String, String>,
     /// Whose credentials these are, resolved once rather than configured.
     #[serde(default)]
     pub user_id: Option<String>,
@@ -62,6 +66,9 @@ pub struct TrackedMessage {
     /// no extra lookup.
     #[serde(default)]
     pub channel_name: String,
+    /// Slack user ID of whoever posted.
+    #[serde(default)]
+    pub author: String,
     #[serde(default)]
     pub author_name: String,
     pub references: Vec<Reference>,
@@ -207,7 +214,8 @@ mod tests {
             id: MessageId::new("C1", "1786596050.245879"),
             permalink: "https://example.slack.com/p1".into(),
             channel_name: "inkling".into(),
-            author_name: "dpepper".into(),
+            author: "U1".into(),
+            author_name: "Daniel Pepper".into(),
             references: vec![Reference::GitHubPullRequest {
                 host: "github.com".into(),
                 owner: "dpep".into(),

@@ -74,9 +74,10 @@ are what it accepts as someone having already said it. Only states listed here
 get a signal; `open`, `draft`, and `closed` stay silent unless you add them.
 
 ```sh
-inkling run --dry-run      # see what it would do, change nothing
-inkling run                # do it
-inkling status             # window, tracked records
+inkling run --dry-run       # see what it would do, change nothing
+inkling run                 # do it
+inkling run '#eng' '#design'  # just these channels, ignoring the configured scope
+inkling status              # window, tracked records
 ```
 
 Start with `only_my_messages = true` and one channel. Every reaction it leaves is

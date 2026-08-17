@@ -74,7 +74,7 @@ fn build_query(references: &[Reference]) -> String {
             ..
         } = reference;
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision author {{ login }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision author {{ login ... on User {{ name }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -109,11 +109,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                 Some(Some(repository)) => match &repository.pull_request {
                     Some(pr) => Ok(RefStatus {
                         state: pr.state(),
-                        author: pr
-                            .author
-                            .as_ref()
-                            .map(|a| a.login.clone())
-                            .unwrap_or_default(),
+                        author: pr.author.as_ref().map(Author::display).unwrap_or_default(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -158,6 +154,19 @@ struct PullRequest {
 struct Author {
     #[serde(default)]
     login: String,
+    /// Real name, when the account has one and is a User (bots don't).
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl Author {
+    /// Prefer the human name; a login is a fallback, not an identity.
+    fn display(&self) -> String {
+        match self.name.as_deref() {
+            Some(name) if !name.trim().is_empty() => name.to_string(),
+            _ => self.login.clone(),
+        }
+    }
 }
 
 impl PullRequest {
@@ -294,9 +303,15 @@ mod tests {
     #[test]
     fn the_pull_request_author_comes_back_with_the_state() {
         let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
-            "reviewDecision":null,"author":{"login":"octocat"}}}}}"#;
+            "reviewDecision":null,"author":{"login":"dpep","name":"Daniel Pepper"}}}}}"#;
         let status = interpret(&[pr("x", 1)], &parse(json))[0].1.clone().unwrap();
-        assert_eq!(status.author, "octocat");
+        assert_eq!(status.author, "Daniel Pepper", "a name beats a login");
+
+        // Bots and name-less accounts still identify as something.
+        let bare = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
+            "reviewDecision":null,"author":{"login":"dependabot"}}}}}"#;
+        let status = interpret(&[pr("x", 1)], &parse(bare))[0].1.clone().unwrap();
+        assert_eq!(status.author, "dependabot");
 
         // A deleted account reports no author; that isn't a failure.
         let anon = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",

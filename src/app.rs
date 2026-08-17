@@ -117,6 +117,7 @@ impl Run<'_> {
         // discovery is the one thing no later run recovers from.
         let discovery_ok = self.discover(&mut snapshot, &window, now, &mut report);
 
+        self.name_authors(&mut snapshot);
         self.reconcile_due(&mut snapshot, now, &mut report);
         self.prune(&mut snapshot, now);
 
@@ -238,6 +239,7 @@ impl Run<'_> {
                     TrackedMessage {
                         id: message.id,
                         channel_name: message.channel_name,
+                        author: message.author,
                         author_name: message.author_name,
                         permalink: message.permalink,
                         references,
@@ -257,6 +259,34 @@ impl Run<'_> {
                 debug!(message = %message.id, ?reason, "skipped");
                 report.skipped += 1;
                 false
+            }
+        }
+    }
+
+    /// Fill in real names for authors we only know by ID. Display-only, so a
+    /// failure here is logged and shrugged off rather than failing the run.
+    fn name_authors(&self, snapshot: &mut Snapshot) {
+        // Search reports a username, not a name. Resolve anyone we haven't
+        // looked up before, even if a username is already sitting there —
+        // "dpepper" is a handle, and the point is to show a person.
+        let mut unknown: Vec<String> = snapshot
+            .tracked
+            .values()
+            .map(|t| t.author.clone())
+            .filter(|id| !id.is_empty() && !snapshot.users.contains_key(id))
+            .collect();
+        unknown.sort();
+        unknown.dedup();
+
+        if !unknown.is_empty() {
+            match self.source.user_names(&unknown) {
+                Ok(found) => snapshot.users.extend(found),
+                Err(error) => debug!(%error, "could not resolve author names"),
+            }
+        }
+        for record in snapshot.tracked.values_mut() {
+            if let Some(name) = snapshot.users.get(&record.author) {
+                record.author_name = name.clone();
             }
         }
     }
