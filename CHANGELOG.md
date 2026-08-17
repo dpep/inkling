@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`:eyes:` is no longer treated as approval.** It conventionally means "I'm looking at this", so
+  accepting it as evidence kept Inkling silent on a PR someone had merely glanced at — and it
+  stayed silent when that PR was actually approved. If you have it in your own
+  `status.approved.aliases`, remove it: `inkling config set status.approved.aliases '...'`.
+
 - Project scaffold: library + binary crate, CI running tests, fmt, and clippy.
 - Domain model — messages, references, and the lifecycle `State` whose ordering drives aggregation.
 - Reference detection: GitHub pull-request links in Slack message text, including Slack's

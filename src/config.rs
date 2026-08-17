@@ -450,7 +450,7 @@ fn default_status() -> BTreeMap<String, Status> {
             State::Approved.as_str().to_string(),
             Status {
                 canonical: "white_check_mark".into(),
-                aliases: ["heavy_check_mark", "done", "lgtm", "eyes"]
+                aliases: ["heavy_check_mark", "done", "lgtm", "approved"]
                     .map(String::from)
                     .into(),
                 enabled: true,
@@ -632,6 +632,19 @@ mod tests {
                 ReactionName::new("heavy_check_mark"),
                 ReactionName::new("lgtm"),
             ]
+        );
+    }
+
+    #[test]
+    fn seen_is_not_approved() {
+        // :eyes: conventionally means "I'm looking at this", not "approved".
+        // Accepting it as evidence would keep Inkling silent on a PR someone
+        // merely glanced at, and it would stay silent when the PR really was
+        // approved — a wrong non-action, which nothing else would surface.
+        let evidence = Config::with_defaults().evidence_for(State::Approved);
+        assert!(
+            !evidence.contains(&ReactionName::new("eyes")),
+            "{evidence:?}"
         );
     }
 

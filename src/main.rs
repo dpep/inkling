@@ -151,7 +151,7 @@ token_command = "gh auth token"   # or token_env = "GITHUB_TOKEN"
 # what count as someone having already said it, so it stays quiet.
 [status.approved]
 canonical = "white_check_mark"
-aliases = ["heavy_check_mark", "done", "lgtm", "eyes"]
+aliases = ["heavy_check_mark", "done", "lgtm", "approved"]
 
 [status.merged]
 canonical = "purple_heart"        # swap for "merged" if your workspace has it

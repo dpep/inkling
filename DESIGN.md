@@ -460,7 +460,7 @@ token_env = "GITHUB_TOKEN"             # or token_command = "gh auth token"
 # vocabulary differs by org — this is where that lives, not in the code.
 [status.approved]
 canonical = "white_check_mark"
-aliases   = ["heavy_check_mark", "eyes", "approved", "lgtm"]
+aliases   = ["heavy_check_mark", "approved", "lgtm"]
 
 [status.merged]
 # Defaults are emoji every workspace has. `:merged:` and `:shipit:` are common

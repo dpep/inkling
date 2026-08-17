@@ -62,7 +62,7 @@ token_command = "gh auth token"  # or token_env = "GITHUB_TOKEN"
 
 [status.approved]
 canonical = "white_check_mark"
-aliases   = ["done", "lgtm", "eyes"]
+aliases   = ["done", "lgtm", "approved"]
 
 [status.merged]
 canonical = "merged"
