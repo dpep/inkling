@@ -7,6 +7,7 @@ use inkling::adapters::slack_claude::{ClaudeRunner, SlackClaude};
 use inkling::adapters::store_json::{JsonStore, Store};
 use inkling::app::{Report, Run};
 use inkling::config::Config;
+use inkling::config_edit;
 use inkling::obs;
 use inkling::ports::SystemClock;
 use inkling::secret::Secret;
@@ -87,6 +88,19 @@ enum ConfigAction {
         /// Overwrite an existing config.
         #[arg(long)]
         force: bool,
+    },
+    /// Print one key's value, as written in the file.
+    Get {
+        /// Dotted path, e.g. slack.personal or status.merged.canonical
+        key: String,
+    },
+    /// Set one key. An empty value removes it.
+    Set {
+        /// Dotted path, e.g. slack.personal or status.merged.canonical
+        key: String,
+        /// Type is inferred: true/false, whole numbers, comma-separated
+        /// lists, otherwise a string. Pass "" to remove the key.
+        value: String,
     },
 }
 
@@ -189,6 +203,36 @@ fn run(cli: &Cli) -> Result<i32, String> {
             action: Some(ConfigAction::Path),
         } => {
             println!("{}", path.display());
+            return Ok(0);
+        }
+        Command::Config {
+            action: Some(ConfigAction::Get { key }),
+        } => {
+            let document = config_edit::load(&path).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                config_edit::get(&document, key).map_err(|e| format!(
+                    "{e}\n  the file only holds what you've changed; \
+                     `inkling config` shows effective values"
+                ))?
+            );
+            return Ok(0);
+        }
+        Command::Config {
+            action: Some(ConfigAction::Set { key, value }),
+        } => {
+            let mut document = config_edit::load(&path).map_err(|e| e.to_string())?;
+            config_edit::set(&mut document, key, value).map_err(|e| e.to_string())?;
+            config_edit::save(&path, &document).map_err(|e| e.to_string())?;
+
+            if value.is_empty() {
+                println!("removed {key} — now using the default");
+            } else {
+                println!(
+                    "{key} = {}",
+                    config_edit::get(&document, key).unwrap_or_default()
+                );
+            }
             return Ok(0);
         }
         _ => {}

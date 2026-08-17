@@ -29,10 +29,21 @@ A config file is how you change Inkling's mind, not a prerequisite for running
 it.
 
 ```sh
-inkling config             # what it resolves to, and where that came from
-inkling config path        # where the file would be read from
-inkling config init        # write a commented starter file
+inkling config                              # what it resolves to, and where that came from
+inkling config path                         # where the file would be read from
+inkling config init                         # write a commented starter file
+inkling config get status.merged.canonical  # one key, as written in the file
+inkling config set status.merged.canonical merged
+inkling config set slack.channels '#eng, #design'
+inkling config set slack.personal ''        # empty removes it, back to the default
 ```
+
+`config` shows effective values; `get` and `set` operate on the file, so `get`
+on a key you've never set says so rather than reporting a default as if you'd
+chosen it. Types are inferred — `true`/`false`, whole numbers, comma-separated
+lists, otherwise a string, which is what durations like `20m` need. Comments
+survive edits, and a change that would make the config invalid is refused
+before anything is written.
 
 `inkling config init` writes `~/.config/inkling/config.toml`, roughly:
 
