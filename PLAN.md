@@ -185,6 +185,10 @@ it off the critical path.
 
 ## What is deliberately not in this plan
 
+Decisions deferred *since* this plan was written — with the measurements
+behind them — live in [docs/deferred.md](docs/deferred.md).
+
+
 Jira, Calendar, or CI providers. Non-reaction enrichments. The Slack Web API adapter, and with it
 retraction, the retraction plumbing, and `ChangesRequested` signaling. SQLite. Postgres. Any
 hosted-service component. Each has a named seam in DESIGN.md and none is built now.

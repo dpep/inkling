@@ -7,6 +7,7 @@ It never posts; it only annotates messages that already exist.
 - [DESIGN.md](DESIGN.md) — domain model and architecture.
 - [PLAN.md](PLAN.md) — milestones.
 - [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md) — what the Slack MCP server does, and what a bridge call costs.
+- [docs/deferred.md](docs/deferred.md) — what was decided against, and what would change the answer.
 
 ## Running
 
