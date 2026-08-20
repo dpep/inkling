@@ -155,14 +155,22 @@ impl<R: Runner> SlackClaude<R> {
             }
             match self.runner.run(prompt, tools, attempt) {
                 Ok(raw) => match interpret(&raw) {
-                    Ok(value) => return Ok(value),
+                    Ok(value) => {
+                        // Worth one line when it took more than one go, and
+                        // silence when it didn't. A recovered call logged at
+                        // WARN reads like breakage on a run that succeeded.
+                        if attempt > 0 {
+                            tracing::info!(attempts = attempt + 1, "bridge call recovered");
+                        }
+                        return Ok(value);
+                    }
                     Err(Retry::Fatal(error)) => return Err(error),
                     Err(Retry::Again(error)) => last = error,
                 },
                 Err(error) => last = error.to_string(),
             }
             if attempt + 1 < ATTEMPTS {
-                tracing::warn!(attempt = attempt + 1, error = %last, "bridge call failed, retrying");
+                tracing::debug!(attempt = attempt + 1, error = %last, "bridge call failed, retrying");
             }
         }
         Err(format!("after {ATTEMPTS} attempts: {last}"))

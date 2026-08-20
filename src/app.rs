@@ -445,25 +445,16 @@ impl Run<'_> {
             return;
         }
 
-        // One reactions read per channel beats one per message; the source
-        // groups internally.
-        let ids: Vec<MessageId> = due
-            .iter()
-            .filter_map(|key| snapshot.tracked.get(key).map(|t| t.id.clone()))
-            .collect();
-        debug!(due = ids.len(), "reconciling");
-        let known = match self.source.reactions(&ids) {
-            Ok(found) => Some(found),
-            Err(error) => {
-                // Not fatal: adds are idempotent. But without evidence we
-                // can't claim ownership of what we add.
-                warn!(%error, "could not read reactions; adds this run stay unclaimed");
-                None
-            }
-        };
+        debug!(due = due.len(), "reconciling");
 
-        for key in due {
-            let Some(record) = snapshot.tracked.get(&key).cloned() else {
+        // GitHub first, Slack second. The status lookup is a fast, reliable
+        // HTTP call; reading reactions is a slow, flaky bridge invocation.
+        // Doing them this way round means a run where nothing is signalable —
+        // every pull request still open, which is most runs — skips the
+        // bridge call entirely instead of fetching evidence nobody needs.
+        let mut checked: Vec<(String, Vec<(Reference, RefStatus)>)> = Vec::new();
+        for key in &due {
+            let Some(record) = snapshot.tracked.get(key).cloned() else {
                 continue;
             };
             report.checked += 1;
@@ -488,14 +479,13 @@ impl Run<'_> {
                 report.failed += 1;
                 continue;
             }
-            // Authors are display-only, but come from the same lookup, so
-            // they ride along rather than costing a second request.
+            // Authors and titles are display-only but ride along on the same
+            // lookup rather than costing a second request.
             let resolved: Vec<(Reference, RefStatus)> = states
                 .into_iter()
                 .filter_map(|(r, s)| s.ok().map(|status| (r, status)))
                 .collect();
-            let states: Vec<State> = resolved.iter().map(|(_, s)| s.state).collect();
-            if let Some(record) = snapshot.tracked.get_mut(&key) {
+            if let Some(record) = snapshot.tracked.get_mut(key) {
                 for (reference, status) in &resolved {
                     if !status.title.is_empty() {
                         record
@@ -504,6 +494,42 @@ impl Run<'_> {
                     }
                 }
             }
+            checked.push((key.clone(), resolved));
+        }
+
+        // Only records whose state has an emoji at all need evidence; for the
+        // rest there is nothing to add and so nothing to check against.
+        let wants_evidence: Vec<MessageId> = checked
+            .iter()
+            .filter(|(_, resolved)| {
+                resolved
+                    .iter()
+                    .map(|(_, s)| s.state)
+                    .min()
+                    .is_some_and(|state| self.config.canonical_for(state).is_some())
+            })
+            .filter_map(|(key, _)| snapshot.tracked.get(key).map(|t| t.id.clone()))
+            .collect();
+
+        let known = match wants_evidence.is_empty() {
+            true => Some(std::collections::HashMap::new()),
+            // One read per channel beats one per message; the source groups.
+            false => match self.source.reactions(&wants_evidence) {
+                Ok(found) => Some(found),
+                Err(error) => {
+                    // Not fatal: adds are idempotent. But without evidence we
+                    // can't claim ownership of what we add.
+                    warn!(%error, "could not read reactions; adds this run stay unclaimed");
+                    None
+                }
+            },
+        };
+
+        for (key, resolved) in checked {
+            let Some(record) = snapshot.tracked.get(&key).cloned() else {
+                continue;
+            };
+            let states: Vec<State> = resolved.iter().map(|(_, s)| s.state).collect();
 
             let existing = known.as_ref().and_then(|m| m.get(&record.id).cloned());
             let plan = reconcile(&states, existing.as_deref(), self.config);

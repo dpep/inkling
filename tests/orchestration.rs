@@ -716,3 +716,70 @@ fn an_expired_message_stops_being_tracked() {
     let report = run(&clock);
     assert_eq!(report.tracked, 0);
 }
+
+#[test]
+fn nothing_signalable_means_no_reactions_call() {
+    // Reading reactions is the slow, flaky half. A run where every PR is
+    // still open has nothing to add, so there's no evidence worth fetching.
+    struct CountingSource(FakeMessageSource, RefCell<usize>);
+
+    impl MessageSource for CountingSource {
+        fn discover(
+            &self,
+            scope: &Scope,
+            window: &inkling::domain::window::SearchWindow,
+        ) -> Result<Discovered, SourceError> {
+            self.0.discover(scope, window)
+        }
+        fn reactions(
+            &self,
+            ids: &[inkling::domain::model::MessageId],
+        ) -> Result<
+            std::collections::HashMap<
+                inkling::domain::model::MessageId,
+                Vec<inkling::domain::model::ReactionName>,
+            >,
+            SourceError,
+        > {
+            *self.1.borrow_mut() += 1;
+            self.0.reactions(ids)
+        }
+    }
+
+    let config = config();
+    let source = CountingSource(
+        FakeMessageSource::with(vec![merged_message()]),
+        RefCell::new(0),
+    );
+    let provider = ScriptedStatusProvider::new();
+    let sink = RecordingSink::new();
+    let store = MemoryStore::default();
+    let clock = FixedClock::at("2026-08-12T21:30:00Z");
+
+    let run = || {
+        Run {
+            config: &config,
+            source: &source,
+            provider: &provider,
+            sink: &sink,
+            store: &store,
+            clock: &clock,
+            dry_run: false,
+            since: None,
+            force: vec![pr("gqls", 1)],
+        }
+        .execute()
+        .unwrap()
+    };
+
+    provider.set(&pr("gqls", 1), State::Open);
+    run();
+    assert_eq!(*source.1.borrow(), 0, "open draws nothing, so asks nothing");
+
+    // Once it merges there is something to add, and evidence is needed to
+    // know whether to add it — and whether the add can be claimed.
+    provider.set(&pr("gqls", 1), State::Merged);
+    run();
+    assert_eq!(*source.1.borrow(), 1);
+    assert_eq!(sink.emoji_names(), vec!["merged"]);
+}
