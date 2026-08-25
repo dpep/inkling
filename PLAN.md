@@ -48,7 +48,9 @@ DESIGN §5 so the `domain`/`adapters` boundary exists from commit one.
 
 Dependency budget, decided up front so it doesn't creep: `clap` (derive), `serde` + `serde_json`,
 `toml`, `chrono`, `humantime-serde`, `thiserror`, `anyhow` (binary only), `tracing` +
-`tracing-subscriber`, `ureq`, `fs2`, `iriq` (see M3). No tokio.
+`tracing-subscriber`, `ureq`, `humantime`, `iriq` (see M3). No tokio. (`fs2` was budgeted for
+the advisory lock but not used: `libc` was already a dependency and `flock` is a dozen lines —
+see docs/waiting.md.)
 
 ## M2 — Domain model
 
@@ -186,7 +188,9 @@ it off the critical path.
 ## What is deliberately not in this plan
 
 Decisions deferred *since* this plan was written — with the measurements
-behind them — live in [docs/deferred.md](docs/deferred.md).
+behind them — live in [docs/deferred.md](docs/deferred.md). `inkling wait`
+and its milestones W0–W3 have their own design in
+[docs/waiting.md](docs/waiting.md).
 
 
 Jira, Calendar, or CI providers. Non-reaction enrichments. The Slack Web API adapter, and with it

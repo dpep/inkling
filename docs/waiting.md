@@ -1,6 +1,7 @@
 # Waiting
 
-Status: exploratory. A design to argue with, not a plan of record.
+Status: built, W0–W3. This is the design as it was argued; the notes below
+record where the build departed from it.
 
 The idea: `inkling wait <pr>` blocks until a condition on that pull request is
 met, then exits with a code that says how it resolved. Callers are people,
@@ -242,19 +243,32 @@ PLAN.md's rules apply: each lands independently, tree green, changelog entry.
   Measured cost of a 3-reference batch *including* the rollup: **1 point** of
   GitHub's 5000/hour, so a 30-minute wait at the default interval costs ~120
   points and batching more references into it is free.
-- **W1 — `inkling wait` on the PR lifecycle.** Single process, polls GitHub
-  itself, no shared file. `--until merged|approved|open|done`, multi-PR fold,
-  `--timeout`, the exit-code table, JSON output. The loop is written around
-  an `observe()` step so W3 swaps the implementation, not the shape.
-  Independently shippable, and already retires the dumb polling loops.
-- **W2 — `--until checks`.** `CheckState`, the rollup field, fail-fast on
-  no-checks, the terminality caveat confined to the wait loop.
-- **W3 — deduplicated polling.** `waits.json`, the poller lease, batched
-  shared observation, deadline-based garbage collection. No interface
-  changes — only `observe()`'s implementation. Sequenced last not because it
-  is an afterthought — it is the architectural spine above — but because
-  coordination built before two predicate kinds exist would be scaffolding
-  without load. If fan-out waiters show up during W1/W2, promote it.
+- **W1 — `inkling wait` on the PR lifecycle. Done.** As designed.
+- **W2 — `--until checks`. Done.** As designed.
+- **W3 — deduplicated polling. Done.** As designed, and on by default rather
+  than behind a flag: with one waiter the shared path is the same query plus
+  a lock and a small write, which is not worth a flag to avoid.
+
+### Where the build departed from the design
+
+- **The lock is `flock` via `libc`, not `fs2`.** PLAN's dependency budget
+  named `fs2`, but `libc` is already a direct dependency and the mechanism is
+  a dozen lines. It also gets the property a hand-rolled lockfile misses: the
+  kernel releases the lock when the process dies, so a `kill -9` can't leave
+  a stale one. `state.json` got the lock DESIGN §4 always promised, as its
+  own change.
+- **A partial reading is not judged.** Not in the design, and load-bearing: a
+  waiter whose shared readings cover only some of its references would fold
+  `min` over the subset and could report met while the missing reference is
+  nowhere near. The loop now distinguishes "fewer readings than references"
+  from "nothing to judge".
+- **`ERROR` joins `FAILURE`.** A check that failed to *run* is the same news
+  as one that failed, for someone waiting to respond. Any unrecognized rollup
+  state reads as pending, so an unfamiliar value makes a wait keep waiting
+  rather than announce a result GitHub didn't give.
+- **A waiter's identity carries a counter**, not just pid and timestamp — two
+  observers constructed in the same millisecond otherwise collide, and each
+  would think it already held the other's lease.
 
 ## What would tell us this is wrong
 
