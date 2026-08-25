@@ -5,6 +5,7 @@
 //! sink captures exactly what would have been written.
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
+use crate::domain::wait::CheckState;
 use crate::domain::window::SearchWindow;
 use crate::ports::*;
 use chrono::{DateTime, Utc};
@@ -85,6 +86,7 @@ impl MessageSource for FakeMessageSource {
 #[derive(Default)]
 pub struct ScriptedStatusProvider {
     states: RefCell<HashMap<Reference, Result<RefStatus, RefError>>>,
+    lookups: RefCell<usize>,
 }
 
 impl ScriptedStatusProvider {
@@ -103,11 +105,27 @@ impl ScriptedStatusProvider {
         self.states.borrow_mut().insert(
             reference.clone(),
             Ok(RefStatus {
-                state,
                 author: author.to_string(),
-                title: String::new(),
+                ..RefStatus::new(state)
             }),
         );
+    }
+
+    /// For waits on CI, where the lifecycle state is beside the point.
+    pub fn set_checks(&self, reference: &Reference, state: State, checks: CheckState) {
+        self.states.borrow_mut().insert(
+            reference.clone(),
+            Ok(RefStatus {
+                checks: Some(checks),
+                ..RefStatus::new(state)
+            }),
+        );
+    }
+
+    /// How many times the provider was actually asked — the measurement
+    /// deduplicated polling exists to keep down.
+    pub fn calls(&self) -> usize {
+        *self.lookups.borrow()
     }
 
     pub fn fail(&self, reference: &Reference, error: RefError) {
@@ -119,6 +137,7 @@ impl ScriptedStatusProvider {
 
 impl StatusProvider for ScriptedStatusProvider {
     fn lookup(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError> {
+        *self.lookups.borrow_mut() += 1;
         let states = self.states.borrow();
         Ok(references
             .iter()

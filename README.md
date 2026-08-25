@@ -8,6 +8,7 @@ It never posts; it only annotates messages that already exist.
 - [PLAN.md](PLAN.md) — milestones.
 - [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md) — what the Slack MCP server does, and what a bridge call costs.
 - [docs/deferred.md](docs/deferred.md) — what was decided against, and what would change the answer.
+- [docs/waiting.md](docs/waiting.md) — the design behind `inkling wait`.
 
 ## Running
 
@@ -23,6 +24,41 @@ inkling logs -f             # -n, -g, --path
 ```
 
 `-v` lists the tracked records and why each decision was made.
+
+## Waiting
+
+`inkling wait` blocks until a pull request gets somewhere, for whoever — or
+whatever — is blocked on it:
+
+```sh
+inkling wait 42                          # until it moves — whatever the next step is
+inkling wait --until merged 42 && deploy # something specific
+inkling wait --until checks 42           # CI finished; 0 green, 3 red
+inkling wait --until approved 42 43      # both of them
+inkling wait --until done 42 -t 2h       # merged or closed, either way
+```
+
+The default asks the question you usually have — *what happens next* — without
+needing to guess the answer in advance. A pull request with nothing left to
+change (merged, or closed) says so immediately rather than waiting out the
+timeout.
+
+| exit | meaning |
+| --- | --- |
+| 0 | condition met |
+| 2 | error — config, credentials, GitHub unreachable |
+| 3 | can no longer be met: closed while waiting to merge, CI red, or nothing left to change |
+| 4 | timed out, still undecided |
+| 5 | no such pull request, or not visible with these credentials |
+
+A timeout still prints the last reading, so there's something to act on. Give
+several pull requests and all of them must satisfy the condition. `--json`
+emits the outcome for a script to read.
+
+Waits are deduplicated: several `inkling wait` processes watching overlapping
+pull requests share one poll, coordinated through `waits.json`. Nothing to
+start or manage — a killed waiter is taken over, and every watch expires at
+the deadline its `--timeout` already implies.
 
 `run` arguments are either channels or pull requests, told apart by shape — a
 URL, `github.com/owner/repo#12`, `owner/repo#12`, `repo#12`, or a bare `12`.

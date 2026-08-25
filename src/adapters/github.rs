@@ -6,6 +6,7 @@
 //! in-band failure the port asks for.
 
 use crate::domain::model::{Reference, State};
+use crate::domain::wait::CheckState;
 use crate::ports::{Lookup, ProviderError, RefError, RefStatus, StatusProvider};
 use crate::secret::Secret;
 use serde::Deserialize;
@@ -74,7 +75,7 @@ fn build_query(references: &[Reference]) -> String {
             ..
         } = reference;
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -111,6 +112,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                         state: pr.state(),
                         author: pr.author.as_ref().map(Author::display).unwrap_or_default(),
                         title: pr.title.clone(),
+                        checks: pr.checks(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -151,6 +153,32 @@ struct PullRequest {
     author: Option<Author>,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    commits: Commits,
+}
+
+/// Checks hang off the head commit, so the rollup arrives down this shaft
+/// rather than on the pull request itself.
+#[derive(Debug, Deserialize, Default)]
+struct Commits {
+    #[serde(default)]
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitNode {
+    commit: Commit,
+}
+
+#[derive(Debug, Deserialize)]
+struct Commit {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<Rollup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Rollup {
+    state: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +205,28 @@ impl PullRequest {
     /// independently. Inkling owns the collapse into one lifecycle position —
     /// this is the business logic, and it deliberately lives here rather than
     /// being asked of a model.
+    /// GitHub reports more rollup states than matter here. Anything not
+    /// plainly finished reads as pending, so an unfamiliar one makes a wait
+    /// keep waiting rather than declare a result it didn't get.
+    fn checks(&self) -> Option<CheckState> {
+        let state = self
+            .commits
+            .nodes
+            .first()?
+            .commit
+            .status_check_rollup
+            .as_ref()?
+            .state
+            .as_str();
+        Some(match state {
+            "SUCCESS" => CheckState::Success,
+            // ERROR is a check that failed to run; for someone waiting to
+            // respond, that is the same news as a failing one.
+            "FAILURE" | "ERROR" => CheckState::Failure,
+            _ => CheckState::Pending,
+        })
+    }
+
     fn state(&self) -> State {
         match self.state.as_str() {
             "MERGED" => State::Merged,
@@ -355,6 +405,74 @@ mod tests {
         assert_eq!(states[0].0, refs[0]);
         assert_eq!(states[0].1.as_ref().map(|s| s.state), Ok(State::Merged));
         assert_eq!(states[1].1.as_ref().map(|s| s.state), Ok(State::Open));
+    }
+
+    /// The four rollup shapes, recorded from the live API (docs/waiting.md,
+    /// W0). Trimmed to the checks path; the lifecycle fields are asserted
+    /// elsewhere.
+    fn with_rollup(rollup: &str) -> String {
+        format!(
+            r#"{{"data":{{"r0":{{"pullRequest":{{"isDraft":false,"state":"OPEN",
+            "reviewDecision":null,"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":{rollup}}}}}]}}}}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn every_recorded_rollup_shape_maps_to_a_check_state() {
+        // SUCCESS from dpep/inkling#1, PENDING from rust-lang/rust#161731,
+        // FAILURE from rust-lang/rust#161685.
+        for (rollup, expected) in [
+            (r#"{"state":"SUCCESS"}"#, Some(CheckState::Success)),
+            (r#"{"state":"PENDING"}"#, Some(CheckState::Pending)),
+            (r#"{"state":"FAILURE"}"#, Some(CheckState::Failure)),
+            // sinatra/sinatra#100 — merged before Actions existed.
+            ("null", None),
+        ] {
+            let status = interpret(&[pr("x", 1)], &parse(&with_rollup(rollup)))[0]
+                .1
+                .clone()
+                .unwrap();
+            assert_eq!(status.checks, expected, "rollup {rollup}");
+        }
+    }
+
+    #[test]
+    fn a_pull_request_with_no_commits_reports_no_checks() {
+        // Not the same as no checks configured, but indistinguishable from
+        // here and identical in consequence: there is nothing to wait for.
+        let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
+            "reviewDecision":null,"commits":{"nodes":[]}}}}}"#;
+        let status = interpret(&[pr("x", 1)], &parse(json))[0].1.clone().unwrap();
+        assert_eq!(status.checks, None);
+    }
+
+    #[test]
+    fn an_unfamiliar_rollup_state_reads_as_pending() {
+        // Better to keep waiting than to report a result GitHub didn't give.
+        // EXPECTED and QUEUED are real values; the point is the default.
+        for rollup in [r#"{"state":"EXPECTED"}"#, r#"{"state":"WHAT_IS_THIS"}"#] {
+            let status = interpret(&[pr("x", 1)], &parse(&with_rollup(rollup)))[0]
+                .1
+                .clone()
+                .unwrap();
+            assert_eq!(status.checks, Some(CheckState::Pending), "rollup {rollup}");
+        }
+    }
+
+    #[test]
+    fn a_check_that_errored_counts_as_failed() {
+        let status = interpret(&[pr("x", 1)], &parse(&with_rollup(r#"{"state":"ERROR"}"#)))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Failure));
+    }
+
+    #[test]
+    fn the_query_asks_for_the_head_commits_rollup() {
+        let query = build_query(&[pr("gqls", 1)]);
+        assert!(query.contains("commits(last: 1)"), "{query}");
+        assert!(query.contains("statusCheckRollup"), "{query}");
     }
 
     #[test]

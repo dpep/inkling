@@ -5,6 +5,7 @@
 //! whether state lives in a file or a database.
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
+use crate::domain::wait::CheckState;
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -86,7 +87,7 @@ pub trait MessageSource {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
     #[error("github request failed: {0}")]
     Transport(String),
@@ -110,6 +111,12 @@ pub struct RefStatus {
     pub author: String,
     /// Display only. A bare `owner/repo#12` says nothing about what it is.
     pub title: String,
+    /// Where CI stands, or `None` when the repository runs none.
+    ///
+    /// Read by `wait` and by nothing else. It deliberately never reaches the
+    /// tracked snapshot: a finished suite can go back to pending on a push,
+    /// and the snapshot's terminality means "stop polling forever".
+    pub checks: Option<CheckState>,
 }
 
 impl RefStatus {
@@ -118,6 +125,7 @@ impl RefStatus {
             state,
             author: String::new(),
             title: String::new(),
+            checks: None,
         }
     }
 }
@@ -129,6 +137,39 @@ pub type Lookup = (Reference, Result<RefStatus, RefError>);
 pub trait StatusProvider {
     /// Batched lookup.
     fn lookup(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError>;
+}
+
+/// Where a wait gets its readings.
+///
+/// Identical in shape to `StatusProvider` and deliberately separate: a wait
+/// asks "what is true now", on behalf of someone blocked, while the run loop
+/// asks on a cron cadence. Naming the seam is what lets one waiter poll on
+/// everyone's behalf without the callers knowing (docs/waiting.md, W3), and
+/// is where webhook delivery would land if polling ever stops being the
+/// mechanism.
+pub trait Observer {
+    fn observe(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError>;
+}
+
+/// Trivially true for the direct case: a lone waiter just asks GitHub.
+impl<T: StatusProvider> Observer for T {
+    fn observe(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError> {
+        self.lookup(references)
+    }
+}
+
+/// Passing time. Behind a trait so a test of a thirty-minute wait takes no
+/// longer than any other test.
+pub trait Sleeper {
+    fn sleep(&self, duration: std::time::Duration);
+}
+
+pub struct RealSleeper;
+
+impl Sleeper for RealSleeper {
+    fn sleep(&self, duration: std::time::Duration) {
+        std::thread::sleep(duration);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

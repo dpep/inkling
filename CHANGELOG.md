@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **New: `inkling wait`.** Blocks until pull requests reach a state, then exits with a code saying
+  how it resolved — 0 met, 3 precluded (closed while you waited for a merge), 4 timed out, 5 no
+  such reference. `--until merged|approved|open|draft|done`, `--timeout`, `--interval`, `--json`.
+  Several pull requests means all of them. Composes with the shell:
+  `inkling wait --until merged 42 && deploy`.
+- **`wait` defaults to `--until changed`** — the next move, whatever it turns out to be. It's the
+  condition you can ask for without knowing the answer in advance. Something with nothing left to
+  change (merged, or closed) resolves immediately rather than waiting out the timeout. Scripts that
+  meant "until it merges" should say `--until merged`.
+- **`inkling wait --until checks`** waits for CI to finish, exiting 0 green and 3 red. A repository
+  that runs no checks resolves on the first poll rather than waiting out the timeout.
+- **Every wait logs a summary line** — which predicate, how it resolved, how long it took, and
+  whether sharing a poller actually saved anything (`polled` vs `shared`, `peak_watches`,
+  `peak_batch`). Read with `inkling logs -g "wait finished"`.
+- **Waiters share one poll.** Several `inkling wait` processes watching overlapping pull requests
+  now coordinate through `waits.json`: one holds a lease and queries GitHub for everyone, the rest
+  read its results. A killed holder is taken over after a couple of intervals, and every watch is
+  cleaned up by the deadline its `--timeout` already implies. `--waits` overrides the path.
+
+- **Overlapping runs can no longer clobber each other.** `inkling run` now takes an advisory lock
+  on the state file, as the design always specified but the code never did; a second run finds it
+  held, says so, and exits 0. Without it two concurrent runs each rewrote the whole snapshot, and
+  the loser's ownership ledger was gone for good.
+
 - **Merged now defaults to `:rocket:`, not `:purple_heart:`**, and `:done:` moved from approved to
   merged. A heart said nothing about shipping; a rocket is what engineers already use, and "done"
   means finished, which is merged rather than approved. Update with
