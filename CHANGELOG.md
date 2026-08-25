@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **New: `inkling wait`.** Blocks until pull requests reach a state, then exits with a code saying
+  how it resolved — 0 met, 3 precluded (closed while you waited for a merge), 4 timed out, 5 no
+  such reference. `--until merged|approved|open|draft|done`, `--timeout`, `--interval`, `--json`.
+  Several pull requests means all of them. Composes with the shell: `inkling wait 42 && deploy`.
+
 - **Overlapping runs can no longer clobber each other.** `inkling run` now takes an advisory lock
   on the state file, as the design always specified but the code never did; a second run finds it
   held, says so, and exits 0. Without it two concurrent runs each rewrote the whole snapshot, and

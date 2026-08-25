@@ -75,6 +75,31 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Block until pull requests reach a given state.
+    ///
+    /// Exits 0 when the condition is met, 3 when it can no longer be met
+    /// (closed while waiting for a merge, or a red suite), 4 on timeout, and
+    /// 5 when a reference can't be read. Composes with the shell:
+    /// `inkling wait 42 && deploy`.
+    Wait {
+        /// Pull requests to wait on — a URL, `github.com/owner/repo#12`, or a
+        /// bare number matching something already tracked. Several means all
+        /// of them must satisfy the condition.
+        targets: Vec<String>,
+        /// What to wait for. `done` is either terminal state, merged or
+        /// closed; `checks` is CI finishing, green or red.
+        #[arg(long, short, default_value = "merged", value_parser = parse_until)]
+        until: inkling::domain::wait::Until,
+        /// Give up after this long, e.g. 90s, 30m, 2h.
+        #[arg(long, short, default_value = "30m", value_parser = humantime::parse_duration)]
+        timeout: std::time::Duration,
+        /// How often to look.
+        #[arg(long, default_value = "15s", value_parser = humantime::parse_duration)]
+        interval: std::time::Duration,
+        /// Emit the outcome as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the search window, tracked records, and credential status.
     Status,
     /// Inspect or create the config file.
@@ -398,6 +423,43 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("github      {}", credentials(&config));
             Ok(0)
         }
+        Command::Wait {
+            targets,
+            until,
+            timeout,
+            interval,
+            json,
+        } => {
+            if targets.is_empty() {
+                return Err("wait needs at least one pull request".into());
+            }
+            let token = Secret::resolve(
+                config.github.token_env.as_deref(),
+                config.github.token_command.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            // Read-only, and no lock: a wait never writes the snapshot. It
+            // reads it only to expand short references like `inkling#2`.
+            let snapshot = store.load().map_err(|e| e.to_string())?;
+            let references = wait_targets(targets, &config.github.hosts, &snapshot)?;
+
+            let github = GitHubProvider::new(&config.github.api_url, token);
+            let report = inkling::wait::Wait {
+                references,
+                until: *until,
+                timeout: *timeout,
+                interval: *interval,
+                observer: &github,
+                clock: &SystemClock,
+                sleeper: &inkling::ports::RealSleeper,
+            }
+            .execute()
+            .map_err(|e| e.to_string())?;
+
+            wait_out(&report, *json)?;
+            Ok(report.exit_code())
+        }
         Command::Run {
             targets,
             dry_run,
@@ -683,6 +745,27 @@ fn resolve(
 /// A bare number is resolved against what's already tracked, and only when
 /// exactly one record matches. Guessing a repository would react to the
 /// wrong pull request, which is worse than asking for a fuller reference.
+/// clap needs an owned error; `Until`'s own is already one.
+fn parse_until(arg: &str) -> Result<inkling::domain::wait::Until, String> {
+    arg.parse()
+        .map_err(|e: inkling::domain::wait::UnknownUntil| e.to_string())
+}
+
+/// The same targets `run` takes, minus channels — there is no such thing as
+/// waiting for a channel, and reading one as a typo'd pull request is kinder
+/// than polling something that will never resolve.
+fn wait_targets(
+    targets: &[String],
+    hosts: &[String],
+    snapshot: &inkling::adapters::store_json::Snapshot,
+) -> Result<Vec<inkling::domain::model::Reference>, String> {
+    let (channels, references) = classify(targets, hosts, snapshot)?;
+    match channels.first() {
+        Some(channel) => Err(format!("{channel}: wait takes pull requests, not channels")),
+        None => Ok(references),
+    }
+}
+
 fn classify(
     targets: &[String],
     hosts: &[String],
@@ -765,6 +848,70 @@ fn credentials(config: &Config) -> String {
         Ok(_) => "ok".into(),
         Err(error) => format!("unavailable ({error})"),
     }
+}
+
+fn wait_out(report: &inkling::wait::Report, json: bool) -> Result<(), String> {
+    let waited = report.waited.as_secs();
+
+    if json {
+        let out = serde_json::json!({
+            "outcome": report.outcome.as_str(),
+            "until": report.until.to_string(),
+            // Whole seconds: a poll-interval-derived duration has no finer
+            // precision, and printing more would invent some.
+            "waited_seconds": waited,
+            "polls": report.polls,
+            "references": report.observations.iter().map(|o| serde_json::json!({
+                "reference": o.reference.to_string(),
+                "state": o.state.as_str(),
+                "checks": o.checks.map(|c| c.as_str()),
+                "title": o.title,
+            })).collect::<Vec<_>>(),
+            "vanished": report.vanished.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    for reference in &report.vanished {
+        println!("{reference}: not found, or not visible with these credentials");
+    }
+
+    let width = report
+        .observations
+        .iter()
+        .map(|o| o.reference.to_string().len())
+        .max()
+        .unwrap_or(0);
+    let budget = terminal_width()
+        .saturating_sub(2 + 10 + 2 + width + 2)
+        .max(24);
+
+    for observation in &report.observations {
+        let name = observation.reference.to_string();
+        // The check state is the answer when that's what was asked for, and
+        // noise otherwise.
+        let state = match (report.until, observation.checks) {
+            (inkling::domain::wait::Until::Checks, Some(checks)) => checks.to_string(),
+            (inkling::domain::wait::Until::Checks, None) => "no checks".to_string(),
+            _ => observation.state.to_string(),
+        };
+        let title = ellipsize(&observation.title, budget);
+        println!("  {state:<10}  {name:<width$}  {title}");
+    }
+
+    println!();
+    println!(
+        "{} after {} ({} {})",
+        report.outcome.as_str().replace('_', " "),
+        humantime::format_duration(std::time::Duration::from_secs(waited)),
+        report.polls,
+        if report.polls == 1 { "poll" } else { "polls" }
+    );
+    Ok(())
 }
 
 fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result<(), String> {
