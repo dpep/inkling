@@ -5,7 +5,12 @@
 - **New: `inkling wait`.** Blocks until pull requests reach a state, then exits with a code saying
   how it resolved — 0 met, 3 precluded (closed while you waited for a merge), 4 timed out, 5 no
   such reference. `--until merged|approved|open|draft|done`, `--timeout`, `--interval`, `--json`.
-  Several pull requests means all of them. Composes with the shell: `inkling wait 42 && deploy`.
+  Several pull requests means all of them. Composes with the shell:
+  `inkling wait --until merged 42 && deploy`.
+- **`wait` defaults to `--until changed`** — the next move, whatever it turns out to be. It's the
+  condition you can ask for without knowing the answer in advance. Something with nothing left to
+  change (merged, or closed) resolves immediately rather than waiting out the timeout. Scripts that
+  meant "until it merges" should say `--until merged`.
 - **`inkling wait --until checks`** waits for CI to finish, exiting 0 green and 3 red. A repository
   that runs no checks resolves on the first poll rather than waiting out the timeout.
 - **Waiters share one poll.** Several `inkling wait` processes watching overlapping pull requests

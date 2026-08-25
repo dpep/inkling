@@ -78,20 +78,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Block until pull requests reach a given state.
+    /// Block until pull requests move.
+    ///
+    /// By default that means any change at all — the next step, whatever it
+    /// turns out to be. Name a condition with --until to wait for something
+    /// specific.
     ///
     /// Exits 0 when the condition is met, 3 when it can no longer be met
-    /// (closed while waiting for a merge, or a red suite), 4 on timeout, and
-    /// 5 when a reference can't be read. Composes with the shell:
-    /// `inkling wait 42 && deploy`.
+    /// (closed while waiting for a merge, a red suite, or nothing left to
+    /// change), 4 on timeout, and 5 when a reference can't be read. Composes
+    /// with the shell: `inkling wait --until merged 42 && deploy`.
     Wait {
         /// Pull requests to wait on — a URL, `github.com/owner/repo#12`, or a
         /// bare number matching something already tracked. Several means all
         /// of them must satisfy the condition.
         targets: Vec<String>,
-        /// What to wait for. `done` is either terminal state, merged or
+        /// What to wait for. The default, `changed`, returns on the next
+        /// move in any direction. `done` is either terminal state, merged or
         /// closed; `checks` is CI finishing, green or red.
-        #[arg(long, short, default_value = "merged", value_parser = parse_until)]
+        #[arg(long, short, default_value = "changed", value_parser = parse_until)]
         until: inkling::domain::wait::Until,
         /// Give up after this long, e.g. 90s, 30m, 2h.
         #[arg(long, short, default_value = "30m", value_parser = humantime::parse_duration)]

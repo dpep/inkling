@@ -6,7 +6,7 @@
 //! poller (docs/waiting.md, W3) differ only in what is passed in.
 
 use crate::domain::model::Reference;
-use crate::domain::wait::{Observation, Resolution, Until, resolve};
+use crate::domain::wait::{Observation, Resolution, Until, aggregate, resolve};
 use crate::ports::{Clock, Observer, ProviderError, RefError, Sleeper};
 use std::time::Duration;
 
@@ -83,6 +83,9 @@ impl Wait<'_> {
         let mut polls = 0;
         let mut failures = 0;
         let mut last = Vec::new();
+        // Where this wait started, set by the first complete reading.
+        // `--until changed` measures against it; nothing else looks.
+        let mut baseline = None;
 
         loop {
             polls += 1;
@@ -113,7 +116,11 @@ impl Wait<'_> {
                 Ok(Poll::Seen(observations)) => {
                     failures = 0;
                     last = observations;
-                    let outcome = match resolve(self.until, &last) {
+                    // Before judging, not after: a pull request that is
+                    // already finished should say so on the first poll
+                    // rather than sit out an interval to discover it.
+                    baseline = baseline.or_else(|| aggregate(&last));
+                    let outcome = match resolve(self.until, &last, baseline) {
                         Resolution::Met => Some(Outcome::Met),
                         Resolution::Precluded => Some(Outcome::Precluded),
                         Resolution::Pending => None,

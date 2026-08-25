@@ -31,17 +31,23 @@ inkling logs -f             # -n, -g, --path
 whatever — is blocked on it:
 
 ```sh
-inkling wait 42 && deploy               # merged is the default
-inkling wait --until checks 42          # CI finished; 0 green, 3 red
-inkling wait --until approved 42 43     # both of them
-inkling wait --until done 42 -t 2h      # merged or closed, either way
+inkling wait 42                          # until it moves — whatever the next step is
+inkling wait --until merged 42 && deploy # something specific
+inkling wait --until checks 42           # CI finished; 0 green, 3 red
+inkling wait --until approved 42 43      # both of them
+inkling wait --until done 42 -t 2h       # merged or closed, either way
 ```
+
+The default asks the question you usually have — *what happens next* — without
+needing to guess the answer in advance. A pull request with nothing left to
+change (merged, or closed) says so immediately rather than waiting out the
+timeout.
 
 | exit | meaning |
 | --- | --- |
 | 0 | condition met |
 | 2 | error — config, credentials, GitHub unreachable |
-| 3 | can no longer be met: closed while waiting to merge, or CI red |
+| 3 | can no longer be met: closed while waiting to merge, CI red, or nothing left to change |
 | 4 | timed out, still undecided |
 | 5 | no such pull request, or not visible with these credentials |
 
