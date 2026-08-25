@@ -166,8 +166,7 @@ impl Wait<'_> {
                 Ok(status) => observations.push(Observation {
                     reference,
                     state: status.state,
-                    // Filled in by W2, once the provider reads the rollup.
-                    checks: None,
+                    checks: status.checks,
                     title: status.title,
                 }),
                 Err(RefError::NotFound) => vanished.push(reference),
@@ -397,6 +396,41 @@ mod tests {
 
         assert!(result.is_err(), "a bad token is not something to sit out");
         assert_eq!(*script.polls.borrow(), MAX_CONSECUTIVE_FAILURES as usize);
+    }
+
+    #[test]
+    fn a_wait_on_checks_ends_when_the_suite_settles() {
+        use crate::domain::wait::CheckState;
+
+        let pending = RefStatus {
+            checks: Some(CheckState::Pending),
+            ..RefStatus::new(State::Open)
+        };
+        let green = RefStatus {
+            checks: Some(CheckState::Success),
+            ..RefStatus::new(State::Open)
+        };
+        let script = Script::of(vec![
+            Ok(vec![(reference(1), Ok(pending))]),
+            Ok(vec![(reference(1), Ok(green))]),
+        ]);
+        let report = wait_for(Until::Checks, &script, Duration::from_secs(1800));
+
+        assert_eq!(report.outcome, Outcome::Met);
+        assert_eq!(report.polls, 2);
+    }
+
+    #[test]
+    fn a_repository_without_checks_ends_the_wait_on_the_first_poll() {
+        // RefStatus::new leaves checks None, which is what a repo running no
+        // CI reports. Spinning for the full timeout would be the bug.
+        let report = wait_for(
+            Until::Checks,
+            &Script::always(State::Open),
+            Duration::from_secs(1800),
+        );
+        assert_eq!(report.outcome, Outcome::Precluded);
+        assert_eq!(report.polls, 1);
     }
 
     #[test]

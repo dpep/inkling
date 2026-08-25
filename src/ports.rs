@@ -5,6 +5,7 @@
 //! whether state lives in a file or a database.
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
+use crate::domain::wait::CheckState;
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -110,6 +111,12 @@ pub struct RefStatus {
     pub author: String,
     /// Display only. A bare `owner/repo#12` says nothing about what it is.
     pub title: String,
+    /// Where CI stands, or `None` when the repository runs none.
+    ///
+    /// Read by `wait` and by nothing else. It deliberately never reaches the
+    /// tracked snapshot: a finished suite can go back to pending on a push,
+    /// and the snapshot's terminality means "stop polling forever".
+    pub checks: Option<CheckState>,
 }
 
 impl RefStatus {
@@ -118,6 +125,7 @@ impl RefStatus {
             state,
             author: String::new(),
             title: String::new(),
+            checks: None,
         }
     }
 }

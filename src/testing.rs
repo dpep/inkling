@@ -5,6 +5,7 @@
 //! sink captures exactly what would have been written.
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
+use crate::domain::wait::CheckState;
 use crate::domain::window::SearchWindow;
 use crate::ports::*;
 use chrono::{DateTime, Utc};
@@ -103,9 +104,19 @@ impl ScriptedStatusProvider {
         self.states.borrow_mut().insert(
             reference.clone(),
             Ok(RefStatus {
-                state,
                 author: author.to_string(),
-                title: String::new(),
+                ..RefStatus::new(state)
+            }),
+        );
+    }
+
+    /// For waits on CI, where the lifecycle state is beside the point.
+    pub fn set_checks(&self, reference: &Reference, state: State, checks: CheckState) {
+        self.states.borrow_mut().insert(
+            reference.clone(),
+            Ok(RefStatus {
+                checks: Some(checks),
+                ..RefStatus::new(state)
             }),
         );
     }
