@@ -86,6 +86,7 @@ impl MessageSource for FakeMessageSource {
 #[derive(Default)]
 pub struct ScriptedStatusProvider {
     states: RefCell<HashMap<Reference, Result<RefStatus, RefError>>>,
+    lookups: RefCell<usize>,
 }
 
 impl ScriptedStatusProvider {
@@ -121,6 +122,12 @@ impl ScriptedStatusProvider {
         );
     }
 
+    /// How many times the provider was actually asked — the measurement
+    /// deduplicated polling exists to keep down.
+    pub fn calls(&self) -> usize {
+        *self.lookups.borrow()
+    }
+
     pub fn fail(&self, reference: &Reference, error: RefError) {
         self.states
             .borrow_mut()
@@ -130,6 +137,7 @@ impl ScriptedStatusProvider {
 
 impl StatusProvider for ScriptedStatusProvider {
     fn lookup(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError> {
+        *self.lookups.borrow_mut() += 1;
         let states = self.states.borrow();
         Ok(references
             .iter()

@@ -8,6 +8,10 @@
   Several pull requests means all of them. Composes with the shell: `inkling wait 42 && deploy`.
 - **`inkling wait --until checks`** waits for CI to finish, exiting 0 green and 3 red. A repository
   that runs no checks resolves on the first poll rather than waiting out the timeout.
+- **Waiters share one poll.** Several `inkling wait` processes watching overlapping pull requests
+  now coordinate through `waits.json`: one holds a lease and queries GitHub for everyone, the rest
+  read its results. A killed holder is taken over after a couple of intervals, and every watch is
+  cleaned up by the deadline its `--timeout` already implies. `--waits` overrides the path.
 
 - **Overlapping runs can no longer clobber each other.** `inkling run` now takes an advisory lock
   on the state file, as the design always specified but the code never did; a second run finds it

@@ -17,7 +17,10 @@ use std::str::FromStr;
 /// because a red suite is decisive — the caller waiting to "respond when CI
 /// finishes" can respond the moment one thing goes red, without waiting on
 /// whatever is still running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckState {
     Failure,
     Pending,

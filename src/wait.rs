@@ -105,6 +105,11 @@ impl Wait<'_> {
                         polls,
                     });
                 }
+                // A shared poller answers with nothing until its first
+                // reading lands. That is not "no references to judge" — the
+                // fold is a minimum, so judging a subset could report met
+                // while the missing reference is nowhere near.
+                Ok(Poll::Incomplete) => {}
                 Ok(Poll::Seen(observations)) => {
                     failures = 0;
                     last = observations;
@@ -179,9 +184,12 @@ impl Wait<'_> {
         if !vanished.is_empty() {
             return Ok(Poll::Vanished(vanished));
         }
-        match failed {
-            Some(message) => Err(ProviderError::Transport(message)),
-            None => Ok(Poll::Seen(observations)),
+        if let Some(message) = failed {
+            return Err(ProviderError::Transport(message));
+        }
+        match observations.len() < self.references.len() {
+            true => Ok(Poll::Incomplete),
+            false => Ok(Poll::Seen(observations)),
         }
     }
 }
@@ -189,6 +197,8 @@ impl Wait<'_> {
 enum Poll {
     Seen(Vec<Observation>),
     Vanished(Vec<Reference>),
+    /// Fewer readings than references — no verdict is safe on those.
+    Incomplete,
 }
 
 #[cfg(test)]
@@ -431,6 +441,39 @@ mod tests {
         );
         assert_eq!(report.outcome, Outcome::Precluded);
         assert_eq!(report.polls, 1);
+    }
+
+    #[test]
+    fn a_partial_answer_is_not_judged() {
+        // Waiting on two, told about one merged: folding over the subset
+        // would report met while the other is untouched.
+        let script = Script::of(vec![
+            Ok(vec![(reference(1), Ok(RefStatus::new(State::Merged)))]),
+            Ok(vec![
+                (reference(1), Ok(RefStatus::new(State::Merged))),
+                (reference(2), Ok(RefStatus::new(State::Open))),
+            ]),
+        ]);
+        let clock = FixedClock::at("2026-08-25T12:00:00Z");
+        let sleeper = Fast(&clock);
+        let report = Wait {
+            references: vec![reference(1), reference(2)],
+            until: Until::Reached(State::Merged),
+            timeout: Duration::from_secs(45),
+            interval: Duration::from_secs(15),
+            observer: &script,
+            clock: &clock,
+            sleeper: &sleeper,
+        }
+        .execute()
+        .unwrap();
+
+        assert_eq!(report.outcome, Outcome::TimedOut);
+        assert_eq!(
+            report.observations.len(),
+            2,
+            "the reading it did report is the complete one"
+        );
     }
 
     #[test]

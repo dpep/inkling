@@ -4,3 +4,4 @@ pub mod github;
 pub mod lock;
 pub mod slack_claude;
 pub mod store_json;
+pub mod waits_json;

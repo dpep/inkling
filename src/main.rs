@@ -9,7 +9,7 @@ use inkling::app::{Report, Run};
 use inkling::config::Config;
 use inkling::config_edit;
 use inkling::obs;
-use inkling::ports::SystemClock;
+use inkling::ports::{Clock, SystemClock};
 use inkling::secret::Secret;
 use std::path::PathBuf;
 
@@ -38,6 +38,9 @@ struct Common {
     /// State file. Defaults to $XDG_STATE_HOME/inkling/state.json
     #[arg(long, global = true)]
     state: Option<PathBuf>,
+    /// Where waiters coordinate. Defaults to $XDG_STATE_HOME/inkling/waits.json
+    #[arg(long, global = true)]
+    waits: Option<PathBuf>,
     /// More detail. -v adds per-message decisions, -vv adds message text.
     #[arg(long, short, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -445,13 +448,31 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let references = wait_targets(targets, &config.github.hosts, &snapshot)?;
 
             let github = GitHubProvider::new(&config.github.api_url, token);
+            let clock = SystemClock;
+
+            // Waiters coordinate through a file so N of them cost one poll.
+            // With a single waiter this is the same query plus a lock and a
+            // small write — the shared path is not worth a flag to avoid.
+            let waits_path = cli
+                .common
+                .waits
+                .clone()
+                .unwrap_or_else(inkling::adapters::waits_json::Waits::default_path);
+            let shared = inkling::adapters::waits_json::SharedObserver::new(
+                waits_path,
+                clock.now() + TimeDelta::from_std(*timeout).unwrap_or(TimeDelta::zero()),
+                *interval,
+                &github,
+                &clock,
+            );
+
             let report = inkling::wait::Wait {
                 references,
                 until: *until,
                 timeout: *timeout,
                 interval: *interval,
-                observer: &github,
-                clock: &SystemClock,
+                observer: &shared,
+                clock: &clock,
                 sleeper: &inkling::ports::RealSleeper,
             }
             .execute()
