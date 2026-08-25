@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Overlapping runs can no longer clobber each other.** `inkling run` now takes an advisory lock
+  on the state file, as the design always specified but the code never did; a second run finds it
+  held, says so, and exits 0. Without it two concurrent runs each rewrote the whole snapshot, and
+  the loser's ownership ledger was gone for good.
+
 - **Merged now defaults to `:rocket:`, not `:purple_heart:`**, and `:done:` moved from approved to
   merged. A heart said nothing about shipping; a rocket is what engineers already use, and "done"
   means finished, which is merged rather than approved. Update with

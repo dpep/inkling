@@ -415,6 +415,22 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let github = GitHubProvider::new(&config.github.api_url, token);
             let clock = SystemClock;
 
+            // One writer at a time. The snapshot is rewritten whole, so two
+            // overlapping runs would silently last-writer-win — and the
+            // casualty would be the ownership ledger, which cannot be
+            // reconstructed from anything else.
+            let lock_path = inkling::adapters::lock::FileLock::path_for(store.path());
+            let _lock = match inkling::adapters::lock::FileLock::try_acquire(&lock_path) {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    // Cron overlap is expected, not a fault: the next run
+                    // picks up whatever this one leaves.
+                    tracing::info!("another run holds the state lock; leaving it to finish");
+                    return Ok(0);
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+
             let mut config = config;
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let (channels, force) = classify(targets, &config.github.hosts, &snapshot)?;
