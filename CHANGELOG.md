@@ -13,6 +13,9 @@
   meant "until it merges" should say `--until merged`.
 - **`inkling wait --until checks`** waits for CI to finish, exiting 0 green and 3 red. A repository
   that runs no checks resolves on the first poll rather than waiting out the timeout.
+- **Every wait logs a summary line** — which predicate, how it resolved, how long it took, and
+  whether sharing a poller actually saved anything (`polled` vs `shared`, `peak_watches`,
+  `peak_batch`). Read with `inkling logs -g "wait finished"`.
 - **Waiters share one poll.** Several `inkling wait` processes watching overlapping pull requests
   now coordinate through `waits.json`: one holds a lease and queries GitHub for everyone, the rest
   read its results. A killed holder is taken over after a couple of intervals, and every watch is

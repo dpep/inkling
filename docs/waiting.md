@@ -270,6 +270,44 @@ PLAN.md's rules apply: each lands independently, tree green, changelog entry.
   observers constructed in the same millisecond otherwise collide, and each
   would think it already held the other's lease.
 
+## Measuring whether this earns itself
+
+Every wait writes one summary line to the log, which is where the open
+question gets settled by counting rather than by recollection:
+
+```
+wait finished until=changed outcome="timed_out" waited_seconds=20 polls=5
+  watching=1 polled=5 shared=0 starved=0 peak_watches=2 peak_batch=1
+  takeovers=0 incomplete=0 failures=0
+```
+
+What each field is there to answer:
+
+- **`peak_watches`** — the one that decides W3's fate. Stuck at 1 across real
+  usage means the lease is coordination without load; delete it and keep
+  `wait` a self-contained poll loop.
+- **`polled` vs `shared`** — the saving, per waiter. A waiter with
+  `polled=0, shared=4` made no GitHub request at all; its four readings came
+  from somebody else's one query.
+- **`peak_batch` vs `watching`** — whether a poll covered more than its own
+  waiter's references. Equal means no dedup happened even when several
+  waiters were present, i.e. they were watching disjoint things.
+- **`until` and `outcome`** — which predicates people actually reach for, and
+  whether waits resolve or expire. Mostly `timed_out` would say the default
+  30m is too short, or that the wrong thing is being waited on.
+- **`waited_seconds`** against `polls` — what a real wait costs, which is
+  what the `--timeout` and `--interval` defaults should be tuned from rather
+  than guessed at.
+- **`starved`** — ticks where a non-holder found no fresh reading. Persistent
+  non-zero says readings arrive slower than waiters ask, which argues for a
+  shorter interval, not for more pollers.
+- **`takeovers`** and **`failures`** — how often a holder dies mid-wait and
+  how often GitHub blips. Both are meant to be rare; neither being rare is
+  its own finding.
+
+Read them with `inkling logs -g "wait finished"`, or `--log-json` for a
+collector.
+
 ## What would tell us this is wrong
 
 - **Waits cluster on Slack-side conditions.** If what people actually ask is

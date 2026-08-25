@@ -59,6 +59,12 @@ pub struct Report {
     pub vanished: Vec<Reference>,
     pub waited: Duration,
     pub polls: u32,
+    /// Ticks that produced no complete reading. With a shared poller this is
+    /// time spent waiting on someone else's query, not on the pull request.
+    pub incomplete: u32,
+    /// Provider errors ridden out. A wait that resolved despite these is the
+    /// retry budget doing its job.
+    pub failures: u32,
 }
 
 impl Report {
@@ -82,6 +88,8 @@ impl Wait<'_> {
         let started = self.clock.now();
         let mut polls = 0;
         let mut failures = 0;
+        let mut incomplete = 0;
+        let mut total_failures = 0;
         let mut last = Vec::new();
         // Where this wait started, set by the first complete reading.
         // `--until changed` measures against it; nothing else looks.
@@ -106,13 +114,15 @@ impl Wait<'_> {
                         vanished: gone,
                         waited: elapsed(),
                         polls,
+                        incomplete,
+                        failures: total_failures,
                     });
                 }
                 // A shared poller answers with nothing until its first
                 // reading lands. That is not "no references to judge" — the
                 // fold is a minimum, so judging a subset could report met
                 // while the missing reference is nowhere near.
-                Ok(Poll::Incomplete) => {}
+                Ok(Poll::Incomplete) => incomplete += 1,
                 Ok(Poll::Seen(observations)) => {
                     failures = 0;
                     last = observations;
@@ -133,11 +143,14 @@ impl Wait<'_> {
                             vanished: Vec::new(),
                             waited: elapsed(),
                             polls,
+                            incomplete,
+                            failures: total_failures,
                         });
                     }
                 }
                 Err(error) => {
                     failures += 1;
+                    total_failures += 1;
                     if failures >= MAX_CONSECUTIVE_FAILURES {
                         return Err(error);
                     }
@@ -160,6 +173,8 @@ impl Wait<'_> {
                     vanished: Vec::new(),
                     waited: spent,
                     polls,
+                    incomplete,
+                    failures: total_failures,
                 });
             }
             // Never sleep past the deadline: a wait's last nap is usually

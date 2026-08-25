@@ -124,22 +124,29 @@ impl Waits {
     }
 
     /// Take the lease if it's free or its holder has gone quiet.
-    fn claim(&mut self, holder: &str, now: DateTime<Utc>, stale_after: Duration) -> bool {
-        let stale = match &self.lease {
-            None => true,
-            Some(lease) if lease.holder == holder => true,
+    ///
+    /// Reports *how* it went, not just whether: a takeover means a waiter
+    /// died or stalled, which is worth counting rather than inferring from a
+    /// gap in the logs.
+    fn claim(&mut self, holder: &str, now: DateTime<Utc>, stale_after: Duration) -> Claim {
+        let claim = match &self.lease {
+            None => Claim::Free,
+            Some(lease) if lease.holder == holder => Claim::Held,
             Some(lease) => {
                 let quiet = (now - lease.heartbeat).to_std().unwrap_or(Duration::ZERO);
-                quiet > stale_after
+                match quiet > stale_after {
+                    true => Claim::TakenOver,
+                    false => Claim::Denied,
+                }
             }
         };
-        if stale {
+        if claim.polls() {
             self.lease = Some(Lease {
                 holder: holder.to_string(),
                 heartbeat: now,
             });
         }
-        stale
+        claim
     }
 
     /// The readings for one waiter's references — but only as a complete set.
@@ -199,6 +206,48 @@ impl Waits {
     }
 }
 
+/// How this process came by the lease on one tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// Nobody held it.
+    Free,
+    /// We already did.
+    Held,
+    /// The holder stopped reporting, so we stepped in.
+    TakenOver,
+    /// Somebody else is polling; read their readings instead.
+    Denied,
+}
+
+impl Claim {
+    fn polls(self) -> bool {
+        !matches!(self, Claim::Denied)
+    }
+}
+
+/// What actually happened while waiting — enough to answer whether the
+/// coordination earns itself, which docs/waiting.md names as the open
+/// question this design should be judged on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// Ticks where this process queried GitHub, for itself and everyone else.
+    pub polled: u32,
+    /// Ticks where another waiter's reading answered instead — the saving.
+    pub shared: u32,
+    /// Ticks with no complete fresh reading to read. Non-zero means waiters
+    /// are asking faster than readings arrive, which argues for a shorter
+    /// interval rather than for more polling.
+    pub starved: u32,
+    /// Most watches in the file at once, this one included. Stuck at 1 means
+    /// the lease is coordination without load.
+    pub peak_watches: usize,
+    /// Most references covered by one of our polls. Above the number we
+    /// asked for is the dedup doing work.
+    pub peak_batch: usize,
+    /// Times we found a holder that had gone quiet and stepped in.
+    pub takeovers: u32,
+}
+
 /// Reads and writes `waits.json` under the lock, and polls when it holds the
 /// lease. One per waiting process.
 pub struct SharedObserver<'a> {
@@ -212,6 +261,7 @@ pub struct SharedObserver<'a> {
     tolerance: Duration,
     provider: &'a dyn StatusProvider,
     clock: &'a dyn Clock,
+    stats: std::cell::RefCell<Stats>,
 }
 
 impl<'a> SharedObserver<'a> {
@@ -238,7 +288,13 @@ impl<'a> SharedObserver<'a> {
             tolerance: interval.saturating_mul(2),
             provider,
             clock,
+            stats: std::cell::RefCell::default(),
         }
+    }
+
+    /// What this waiter saw. Read once, at the end, for the summary line.
+    pub fn stats(&self) -> Stats {
+        *self.stats.borrow()
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -308,19 +364,42 @@ impl Observer for SharedObserver<'_> {
                     deadline: self.deadline,
                 },
             );
-            let polling = waits.claim(&self.holder, now, self.tolerance);
+            let claim = waits.claim(&self.holder, now, self.tolerance);
             let existing = waits.complete_reading(references, now, self.tolerance);
             let wanted = waits.all_references();
+
+            let mut stats = self.stats.borrow_mut();
+            stats.peak_watches = stats.peak_watches.max(waits.watches.len());
+            if claim == Claim::TakenOver {
+                stats.takeovers += 1;
+                tracing::debug!(
+                    watches = waits.watches.len(),
+                    "took over the poller lease from a waiter that went quiet"
+                );
+            }
+            drop(stats);
+
             self.save(&waits)
                 .map_err(|e| ProviderError::Transport(e.to_string()))?;
-            (polling.then_some(wanted), existing)
+            (claim.polls().then_some(wanted), existing)
         };
 
         let Some(wanted) = polling else {
             // Somebody else is polling. Their readings, or nothing yet —
             // nothing yet reads as "keep waiting", which is correct.
+            let mut stats = self.stats.borrow_mut();
+            stats.shared += 1;
+            if existing.is_none() {
+                stats.starved += 1;
+            }
             return Ok(existing.unwrap_or_default());
         };
+
+        {
+            let mut stats = self.stats.borrow_mut();
+            stats.polled += 1;
+            stats.peak_batch = stats.peak_batch.max(wanted.len());
+        }
 
         // The lock is not held across this: it's a network call, and holding
         // it would block every other waiter for its duration.
@@ -463,9 +542,9 @@ mod tests {
     fn a_live_lease_holder_keeps_everyone_else_out() {
         let now = at("2026-08-25T12:00:00Z");
         let mut waits = Waits::default();
-        assert!(waits.claim("first", now, Duration::from_secs(30)));
+        assert!(waits.claim("first", now, Duration::from_secs(30)).polls());
         assert!(
-            !waits.claim("second", now, Duration::from_secs(30)),
+            !waits.claim("second", now, Duration::from_secs(30)).polls(),
             "one poller at a time is the whole point"
         );
     }
@@ -476,11 +555,13 @@ mod tests {
         waits.claim("first", at("2026-08-25T12:00:00Z"), Duration::from_secs(30));
 
         assert!(
-            waits.claim(
-                "second",
-                at("2026-08-25T12:00:31Z"),
-                Duration::from_secs(30)
-            ),
+            waits
+                .claim(
+                    "second",
+                    at("2026-08-25T12:00:31Z"),
+                    Duration::from_secs(30)
+                )
+                .polls(),
             "a holder that stopped reporting must not stall every waiter"
         );
         assert_eq!(waits.lease.unwrap().holder, "second");
@@ -491,7 +572,7 @@ mod tests {
         let mut waits = Waits::default();
         let now = at("2026-08-25T12:00:00Z");
         waits.claim("me", now, Duration::from_secs(30));
-        assert!(waits.claim("me", now, Duration::from_secs(30)));
+        assert!(waits.claim("me", now, Duration::from_secs(30)).polls());
     }
 
     #[test]
@@ -633,6 +714,86 @@ mod tests {
             "a finished waiter hands the lease on rather than leaving it to time out"
         );
         assert!(on_disk.watches.is_empty());
+    }
+
+    #[test]
+    fn the_stats_show_who_polled_and_who_read() {
+        // The measurement the open question turns on: a second waiter must
+        // show up as `shared`, not as another `polled`.
+        let clock = FixedClock::at("2026-08-25T12:00:00Z");
+        let provider = ScriptedStatusProvider::new();
+        provider.set(&reference(1), State::Open);
+        let path = scratch("stats");
+        let deadline = at("2099-01-01T00:00:00Z");
+
+        let holder =
+            SharedObserver::new(&path, deadline, Duration::from_secs(15), &provider, &clock);
+        holder.observe(&[reference(1)]).unwrap();
+        let reader =
+            SharedObserver::new(&path, deadline, Duration::from_secs(15), &provider, &clock);
+        reader.observe(&[reference(1)]).unwrap();
+
+        assert_eq!(holder.stats().polled, 1);
+        assert_eq!(holder.stats().shared, 0);
+        assert_eq!(
+            reader.stats().polled,
+            0,
+            "the second waiter queried nothing"
+        );
+        assert_eq!(reader.stats().shared, 1);
+        assert_eq!(
+            reader.stats().peak_watches,
+            2,
+            "fan-out is what makes the sharing worth having"
+        );
+    }
+
+    #[test]
+    fn a_poll_covering_more_than_we_asked_for_is_visible_in_the_stats() {
+        // peak_batch above `watching` is the dedup doing work; equal to it
+        // means the lease is coordination without load.
+        let clock = FixedClock::at("2026-08-25T12:00:00Z");
+        let provider = ScriptedStatusProvider::new();
+        provider.set(&reference(1), State::Open);
+        provider.set(&reference(2), State::Open);
+        let path = scratch("batch");
+        let deadline = at("2099-01-01T00:00:00Z");
+
+        // The first observer takes the free lease, so it is the poller; the
+        // second only registers. The poller's *next* tick is the one that
+        // covers both.
+        let holder =
+            SharedObserver::new(&path, deadline, Duration::from_secs(15), &provider, &clock);
+        holder.observe(&[reference(1)]).unwrap();
+        let bystander =
+            SharedObserver::new(&path, deadline, Duration::from_secs(15), &provider, &clock);
+        bystander.observe(&[reference(2)]).unwrap();
+        holder.observe(&[reference(1)]).unwrap();
+
+        assert_eq!(
+            holder.stats().peak_batch,
+            2,
+            "one reference of its own, two covered"
+        );
+    }
+
+    #[test]
+    fn a_takeover_is_counted() {
+        let clock = FixedClock::at("2026-08-25T12:00:00Z");
+        let provider = ScriptedStatusProvider::new();
+        provider.set(&reference(1), State::Open);
+        let path = scratch("takeover-stats");
+        let deadline = at("2099-01-01T00:00:00Z");
+
+        let dead = SharedObserver::new(&path, deadline, Duration::from_secs(15), &provider, &clock);
+        dead.observe(&[reference(1)]).unwrap();
+        std::mem::forget(dead); // a killed waiter never deregisters
+
+        clock.advance(chrono::TimeDelta::seconds(31));
+        let next = SharedObserver::new(&path, deadline, Duration::from_secs(15), &provider, &clock);
+        next.observe(&[reference(1)]).unwrap();
+
+        assert_eq!(next.stats().takeovers, 1);
     }
 
     #[test]

@@ -471,6 +471,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 &clock,
             );
 
+            let watching = references.len();
             let report = inkling::wait::Wait {
                 references,
                 until: *until,
@@ -482,6 +483,28 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             .execute()
             .map_err(|e| e.to_string())?;
+
+            // One line per wait, to the log file rather than stdout. The
+            // question docs/waiting.md leaves open — whether sharing a poller
+            // ever carries load — is answered by `shared` and `peak_watches`
+            // across many of these, not by any single run.
+            let shared = shared.stats();
+            tracing::info!(
+                until = %report.until,
+                outcome = report.outcome.as_str(),
+                waited_seconds = report.waited.as_secs(),
+                polls = report.polls,
+                watching,
+                polled = shared.polled,
+                shared = shared.shared,
+                starved = shared.starved,
+                peak_watches = shared.peak_watches,
+                peak_batch = shared.peak_batch,
+                takeovers = shared.takeovers,
+                incomplete = report.incomplete,
+                failures = report.failures,
+                "wait finished"
+            );
 
             wait_out(&report, *json)?;
             Ok(report.exit_code())
