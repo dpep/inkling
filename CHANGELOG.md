@@ -31,7 +31,9 @@
   `[serve]` configures `interval`, `idle_after` and `max_lifetime`.
 - **`inkling status` shows the server and the readers** — whether one is running (from the lock,
   so a `kill -9` doesn't read as healthy), its pid, uptime, ticks and failures, and for each reader
-  whether it is attached, where it has got to, and how many watches it owns. Never the token.
+  whether it is attached, where it has got to, and how many watches it owns. Never the token. A
+  reader nothing can reach — detached, watching nothing, owed nothing — is counted as dormant rather
+  than listed; its cursor is still kept for a week in case that session comes back.
 - **You must do something: every watch now has an owner, and every read names one.** With several
   sessions running, one session's CI result arriving in another's turn is noise it can't act on.
   A watch registered from a session's Bash belongs to that session; from a terminal it belongs to

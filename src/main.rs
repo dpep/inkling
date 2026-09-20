@@ -1980,8 +1980,23 @@ fn serve_out(status: &inkling::serve::Status) {
 /// to. Never the token, and never the socket path — neither is anybody's
 /// business at a glance.
 fn subscribers_out(watches: &inkling::adapters::watches_json::Watches, now: DateTime<Utc>) {
-    println!("subscribers {}", watches.subscribers.len());
-    for (id, subscriber) in &watches.subscribers {
+    // A reader nothing can reach — detached, watching nothing, owed nothing —
+    // is a cursor waiting out its retention, and a row about it says the same
+    // nothing every day. Counted, so it is still accounted for.
+    let (live, dormant): (Vec<_>, Vec<_>) = watches
+        .subscribers
+        .iter()
+        .partition(|(id, _)| watches.reachable(id, now));
+
+    println!(
+        "subscribers {}{}",
+        live.len(),
+        match dormant.len() {
+            0 => String::new(),
+            n => format!(" ({n} dormant)"),
+        }
+    );
+    for (id, subscriber) in live {
         let watching = watches
             .watches
             .values()

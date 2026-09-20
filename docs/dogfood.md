@@ -11,6 +11,12 @@ fixed, say where and leave the line.
 - The PostToolUse hook fired live: `gh pr view 3` auto-watched #3 with the
   right owner, and the log said which command matched. #3 was already merged
   and was dropped at its first reading without a message. Good.
+- A subscriber left over from before ownership — detached, no watches, owed
+  nothing — sat in `inkling status` for hours. The GC rule is right and does
+  collect it: seven days of silence, chosen so a session that is waiting for
+  something (silent by definition) keeps the cursor `--resume` comes back to.
+  What was wrong was the listing. Fixed in this PR: a reader nothing can reach
+  is counted as dormant, not given a row.
 - `inkling hook` read stdin to EOF with no timeout. Claude Code always closes
   it, so nothing was observed going wrong — but the worst case of a hook that
   waits forever is a hung session, which is the wrong worst case to leave

@@ -226,6 +226,23 @@ impl Watches {
             .any(|watch| watch.deadline > now && watch.owners.contains(subscriber))
     }
 
+    /// Whether anything can still reach this reader: somewhere to push to, a
+    /// live watch to produce news, or news already owed.
+    ///
+    /// A reader with none of the three is a cursor and nothing else. Its record
+    /// stays until `SUBSCRIBER_RETENTION` — a resumed session keeps its id, and
+    /// a line of JSON is cheap — but there is nothing to *say* about it, which
+    /// is why `inkling status` counts these rather than listing them. A watch it
+    /// registers later starts it at the head in any case.
+    pub fn reachable(&self, subscriber: &str, now: DateTime<Utc>) -> bool {
+        let Some(entry) = self.subscribers.get(subscriber) else {
+            return false;
+        };
+        entry.address.is_some()
+            || self.has_live_watch(subscriber, now)
+            || !crate::domain::watch::addressed(&self.events, entry.cursor, subscriber).is_empty()
+    }
+
     /// The subscriber listening on this socket, if one is.
     ///
     /// How a watch registered from inside a session finds its owner without
@@ -956,6 +973,33 @@ mod tests {
             watches.subscribers.is_empty(),
             "but a week of nothing at all is gone"
         );
+    }
+
+    #[test]
+    fn a_reader_nothing_can_reach_has_nothing_to_report() {
+        // The leftover dogfooding found in `inkling status`: detached, watching
+        // nothing, owed nothing. Its cursor is kept for a week in case the
+        // session comes back, but it is a row that says nothing every time.
+        let mut watches = Watches::default();
+        watches.take("s-1", now());
+        assert!(!watches.reachable("s-1", now()));
+
+        watches.attach("s-1", address("/tmp/s"), now());
+        assert!(watches.reachable("s-1", now()), "somewhere to push to");
+        watches.detach("s-1");
+
+        watches.watch(&pr(3), "s-1", at("2026-09-21T12:00:00Z"), now());
+        assert!(watches.reachable("s-1", now()), "news can still happen");
+
+        // Baselined, then a transition addressed to it, then it withdraws:
+        // what it is owed is owed for as long as the log keeps it.
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
+        watches.unwatch(&pr(3), "s-1");
+        assert!(watches.reachable("s-1", now()), "one event still owed");
+
+        watches.take("s-1", now());
+        assert!(!watches.reachable("s-1", now()), "and now nothing is");
     }
 
     fn address(path: &str) -> SessionAddress {
