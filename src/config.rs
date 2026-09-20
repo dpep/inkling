@@ -47,6 +47,8 @@ pub struct Config {
     pub status: BTreeMap<String, Status>,
     #[serde(default)]
     pub run: Run,
+    #[serde(default)]
+    pub serve: Serve,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -202,6 +204,28 @@ pub struct Status {
     /// Keep the mapping, stop drawing it.
     #[serde(default = "d_true")]
     pub enabled: bool,
+}
+
+/// The resident server: how often it looks, and when it gives up.
+///
+/// Nobody starts it — `inkling subscribe` and `inkling watch` do, when there
+/// is something to serve — so these are the only knobs it has.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Serve {
+    /// How often it polls and delivers. Short, because CI moving is the news
+    /// it exists to carry and a minute of it is a minute of a session
+    /// waiting.
+    #[serde(with = "humantime_serde", default = "d_serve_interval")]
+    pub interval: Duration,
+    /// How long with nothing to do before standing down. Generous on
+    /// purpose: a session that detaches and reattaches shouldn't cost a
+    /// respawn.
+    #[serde(with = "humantime_serde", default = "d_serve_idle_after")]
+    pub idle_after: Duration,
+    /// A cap, so a resident process eventually picks up a newer build.
+    #[serde(with = "humantime_serde", default = "d_serve_max_lifetime")]
+    pub max_lifetime: Duration,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -473,6 +497,25 @@ fn default_status() -> BTreeMap<String, Status> {
 }
 fn d_api_url() -> String {
     "https://api.github.com/graphql".to_string()
+}
+fn d_serve_interval() -> Duration {
+    Duration::from_secs(15)
+}
+fn d_serve_idle_after() -> Duration {
+    Duration::from_secs(300)
+}
+fn d_serve_max_lifetime() -> Duration {
+    Duration::from_secs(60 * 60 * 24)
+}
+
+impl Default for Serve {
+    fn default() -> Self {
+        Self {
+            interval: d_serve_interval(),
+            idle_after: d_serve_idle_after(),
+            max_lifetime: d_serve_max_lifetime(),
+        }
+    }
 }
 
 impl Default for Window {

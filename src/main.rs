@@ -170,6 +170,39 @@ enum Command {
         #[arg(long, conflicts_with = "json")]
         ndjson: bool,
     },
+    /// Have this session told the moment something moves.
+    ///
+    /// Attaches the session's inbox — Claude Code exports the socket and
+    /// token to its hooks and Bash commands — so a resident inkling can push
+    /// a transition in rather than wait to be asked. Attach and detach, not
+    /// create and delete: your cursor and your watches live on either way, so
+    /// `claude --resume` picks up the net change since you left.
+    Subscribe {
+        /// The session id to attach to. Defaults to the one Claude Code
+        /// exports.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Stop pushing to this session. Its watches and its place in the stream
+    /// stay until their own expiry, so nothing is lost by ending a session.
+    Unsubscribe {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Claude Code's side of the wiring: reads a hook payload on stdin.
+    ///
+    /// Three one-line commands in settings.json instead of shell that picks
+    /// the session id out of JSON. A hook never fails a session — whatever
+    /// goes wrong, this logs it and exits 0 saying nothing.
+    Hook {
+        /// Which hook is calling.
+        #[arg(value_enum)]
+        event: HookEvent,
+    },
+    /// The resident server. Started when it is needed and gone when it
+    /// isn't; nothing runs this by hand.
+    #[command(hide = true)]
+    Serve,
     /// Show the search window, tracked records, and credential status.
     Status,
     /// Inspect or create the config file.
@@ -194,6 +227,27 @@ enum Command {
         #[arg(long)]
         path: bool,
     },
+}
+
+/// The hooks inkling answers, named as Claude Code names them.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum HookEvent {
+    /// SessionStart — attach this session's inbox.
+    SessionStart,
+    /// SessionEnd — detach it.
+    SessionEnd,
+    /// UserPromptSubmit — print anything the push didn't deliver.
+    Prompt,
+}
+
+impl HookEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            HookEvent::SessionStart => "session-start",
+            HookEvent::SessionEnd => "session-end",
+            HookEvent::Prompt => "prompt",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -450,6 +504,68 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             Ok(0)
         }
+        Command::Subscribe { session } => {
+            let id = session_id(session.as_deref())?;
+            let replaced = subscribe(&id, &config, &cli.common)?;
+            println!(
+                "{} {}",
+                match replaced {
+                    true => "re-attached",
+                    false => "subscribed",
+                },
+                short(&id)
+            );
+            Ok(0)
+        }
+        Command::Unsubscribe { session } => {
+            let id = session_id(session.as_deref())?;
+            match unsubscribe(&id, &cli.common)? {
+                true => println!("unsubscribed {}", short(&id)),
+                false => println!("{}: not subscribed", short(&id)),
+            }
+            Ok(0)
+        }
+        Command::Hook { event } => {
+            // A hook runs inside somebody's session, on a short timeout, and
+            // its failure is their failure. So: whatever went wrong, it goes
+            // to the log and this exits 0 having said nothing.
+            if let Err(error) = hook(*event, &config, &cli.common) {
+                tracing::warn!(event = event.as_str(), error, "hook failed");
+            }
+            Ok(0)
+        }
+        Command::Serve => {
+            let token = Secret::resolve(
+                config.github.token_env.as_deref(),
+                config.github.token_command.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            let watches = watch_store(&cli.common);
+            let github = GitHubProvider::new(&config.github.api_url, token);
+            let jira = inkling::adapters::jira_acli::JiraProvider::new();
+            let clock = SystemClock;
+            let work = inkling::push::Tick {
+                poller: inkling::watch::Poller {
+                    store: &watches,
+                    github: &github,
+                    jira: &jira,
+                    clock: &clock,
+                },
+                sessions: &inkling::push::RealSessions,
+                // Its own interval: the server exists because a 60s refresh
+                // window is a minute of a session not knowing.
+                refresh: TimeDelta::from_std(config.serve.interval).unwrap_or(TimeDelta::zero()),
+                clock: &clock,
+            };
+
+            match inkling::serve::run(serve_config(&config, &cli.common), &work)
+                .map_err(|e| e.to_string())?
+            {
+                inkling::serve::Outcome::AlreadyRunning => Ok(0),
+                inkling::serve::Outcome::Served(_) => Ok(0),
+            }
+        }
         Command::Status => {
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let now = Utc::now();
@@ -500,6 +616,15 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!();
             println!("watching    {live}");
             println!("  events    {} in the last day", watched.events.len());
+
+            println!();
+            serve_out(&inkling::serve::read_status(&serve_config(
+                &config,
+                &cli.common,
+            )));
+
+            println!();
+            subscribers_out(&watched, now);
 
             println!();
             println!("github      {}", credentials(&config));
@@ -1122,6 +1247,193 @@ fn reader(explicit: Option<&str>, watches: &inkling::adapters::watches_json::Wat
     std::env::var(SESSION_ENV).unwrap_or_else(|_| TERMINAL.to_string())
 }
 
+const TOKEN_ENV: &str = "CLAUDE_CODE_MESSAGING_TOKEN";
+
+/// Which session this is — for attaching and detaching, where the answer has
+/// to be the session itself rather than whichever reader happens to be
+/// nearest.
+fn session_id(explicit: Option<&str>) -> Result<String, String> {
+    explicit
+        .map(str::to_string)
+        .or_else(|| std::env::var(SESSION_ENV).ok())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("no session id — pass --session, or run where {SESSION_ENV} is set"))
+}
+
+/// Enough of a session id to tell two apart on a line, which is all a status
+/// table needs. Never a token.
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Where the server keeps its lock and its status file.
+///
+/// Beside the watch store rather than at a fixed path, so pointing
+/// `--watches` at a scratch directory moves the whole server with it instead
+/// of leaving a test talking to the real one's lock.
+fn serve_config(config: &Config, common: &Common) -> inkling::serve::Config {
+    let dir = watch_store(common)
+        .path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(inkling::serve::Config::default_dir);
+    inkling::serve::Config {
+        interval: config.serve.interval,
+        idle_after: config.serve.idle_after,
+        max_lifetime: config.serve.max_lifetime,
+        ..inkling::serve::Config::in_dir(dir)
+    }
+}
+
+/// Start a server if there is now a reason for one.
+///
+/// The reason is the same predicate a running server uses to decide whether
+/// to stay, so one is never spawned only to stand straight back down, and
+/// never missing while there is something to deliver. Failing to start one
+/// is a log line: the pull feed still works.
+fn ensure_serving(config: &Config, common: &Common, why: &str) {
+    let store = watch_store(common);
+    if !inkling::push::should_serve(&store.read(), Utc::now()) {
+        return;
+    }
+    // The child re-enters through the same flags, so a scratch state
+    // directory survives the spawn.
+    let mut args = vec!["serve".to_string()];
+    for (flag, value) in [
+        (
+            "--config",
+            common.config.as_ref().map(|p| p.display().to_string()),
+        ),
+        (
+            "--state",
+            common.state.as_ref().map(|p| p.display().to_string()),
+        ),
+        (
+            "--watches",
+            common.watches.as_ref().map(|p| p.display().to_string()),
+        ),
+        ("--log-dir", common.log_dir.clone()),
+    ] {
+        if let Some(value) = value {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Err(error) =
+        inkling::serve::ensure_running(&serve_config(config, common), &borrowed, why)
+    {
+        tracing::warn!(%error, "could not start a server");
+    }
+}
+
+/// Claude Code's hook payload. Only the field inkling needs — the rest of it
+/// is somebody else's business and may change without notice.
+#[derive(serde::Deserialize)]
+struct HookInput {
+    #[serde(default)]
+    session_id: String,
+}
+
+/// Do what a hook asks, or say why not. The caller swallows the error.
+fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String> {
+    use std::io::Read;
+
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_to_string(&mut raw)
+        .map_err(|e| e.to_string())?;
+    let input: HookInput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    if input.session_id.is_empty() {
+        return Err("the hook payload carried no session_id".to_string());
+    }
+
+    let clock = SystemClock;
+    let watches = watch_store(common);
+    match event {
+        HookEvent::SessionStart => {
+            subscribe(&input.session_id, config, common)?;
+            Ok(())
+        }
+        HookEvent::SessionEnd => {
+            unsubscribe(&input.session_id, common)?;
+            Ok(())
+        }
+        HookEvent::Prompt => {
+            // The pull leg, and the reason push is allowed to be lossy: if a
+            // message was held or refused, this is where it turns up.
+            let refresh = TimeDelta::seconds(60);
+            if watches.read().due(clock.now(), refresh)
+                && let Err(error) = poll(config, &watches, &clock, Some(refresh), "prompt")
+            {
+                tracing::warn!(%error, "could not refresh watches");
+            }
+            let due = watches
+                .update(clock.now(), |file| {
+                    file.take(&input.session_id, clock.now())
+                })
+                .map_err(|e| e.to_string())?;
+            // Nothing to say means nothing printed: this runs on every
+            // prompt, and the common case must add nothing to it. The same
+            // wording a push uses, so news reads the same whichever way it
+            // arrived.
+            for event in &due {
+                println!("{}", inkling::push::message(event));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Attach a session's inbox. Reports whether it replaced an address that was
+/// already there — a resumed session, with a new process and a new socket.
+///
+/// One local write under the lock, plus a spawn when there is something to
+/// serve. A SessionEnd hook runs on a short timeout in a session that is
+/// closing, and its sibling here has to be the same shape.
+fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String> {
+    let socket = std::env::var_os(SOCKET_ENV).ok_or_else(|| {
+        format!("{SOCKET_ENV} is not set — subscribe runs inside a Claude Code session")
+    })?;
+    let socket = PathBuf::from(socket);
+
+    // Captured now, while the session that asked is known to be the one at
+    // the path. Socket paths are per-pid and outlive their session, so
+    // without this a stored address can later point at a stranger's inbox.
+    let identity = inkling::adapters::session_socket::SocketIdentity::capture(&socket)
+        .map_err(|e| format!("{}: {e}", socket.display()))?;
+    let address = inkling::adapters::session_socket::SessionAddress::new(
+        &socket,
+        std::env::var(TOKEN_ENV).ok().map(Secret::new),
+    )
+    .expecting(identity);
+
+    let clock = SystemClock;
+    let replaced = watch_store(common)
+        .update(clock.now(), |file| file.attach(id, address, clock.now()))
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        subscriber = id,
+        socket = %socket.display(),
+        reattached = replaced,
+        "subscribed"
+    );
+    ensure_serving(config, common, "subscribe");
+    Ok(replaced)
+}
+
+/// Detach the address, and only the address. Whatever this session is still
+/// owed stays owed, so ending one loses nothing.
+fn unsubscribe(id: &str, common: &Common) -> Result<bool, String> {
+    let clock = SystemClock;
+    let detached = watch_store(common)
+        .update(clock.now(), |file| file.detach(id))
+        .map_err(|e| e.to_string())?;
+    tracing::info!(subscriber = id, detached, "unsubscribed");
+    Ok(detached)
+}
+
 /// clap wants an owned error; `Cursor`'s own is already one.
 fn parse_cursor(arg: &str) -> Result<inkling::domain::watch::Cursor, String> {
     arg.parse()
@@ -1476,6 +1788,64 @@ fn events_out(
         );
     }
     Ok(())
+}
+
+/// What the resident server is doing, if anything.
+///
+/// "Running" comes from the lock, because that is the only claim the kernel
+/// stands behind; the record beside it is what the last server wrote about
+/// itself, and may be a corpse's.
+fn serve_out(status: &inkling::serve::Status) {
+    let local = |t: DateTime<Utc>| {
+        t.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M %Z")
+            .to_string()
+    };
+    match (status.running, &status.record) {
+        (true, Some(record)) => {
+            println!("serving     yes (pid {})", record.pid);
+            println!("  uptime    {}", humanize(Utc::now() - record.started_at));
+            println!("  ticks     {} ({} failed)", record.ticks, record.failures);
+            println!(
+                "  last tick {}",
+                record.last_tick_at.map_or("never".into(), local)
+            );
+            if let Some(error) = &record.last_error {
+                println!("  last error {error}");
+            }
+        }
+        (true, None) => println!("serving     yes (no record yet)"),
+        (false, Some(record)) => println!(
+            "serving     no (last one ran {} ticks, until {})",
+            record.ticks,
+            record.last_tick_at.map_or("never".into(), local)
+        ),
+        (false, None) => println!("serving     no"),
+    }
+}
+
+/// Who is reading, where each one has got to, and whether it can be pushed
+/// to. Never the token, and never the socket path — neither is anybody's
+/// business at a glance.
+fn subscribers_out(watches: &inkling::adapters::watches_json::Watches, now: DateTime<Utc>) {
+    println!("subscribers {}", watches.subscribers.len());
+    for (id, subscriber) in &watches.subscribers {
+        let watching = watches
+            .watches
+            .values()
+            .filter(|watch| watch.deadline > now && watch.owners.contains(id))
+            .count();
+        println!(
+            "  {:<8}  {:<8}  cursor {:<5}  watching {watching:<3}  last seen {}",
+            short(id),
+            match subscriber.address.is_some() {
+                true => "attached",
+                false => "detached",
+            },
+            subscriber.cursor,
+            humanize(now - subscriber.seen_at),
+        );
+    }
 }
 
 fn credentials(config: &Config) -> String {
