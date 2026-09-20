@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- **New: `inkling subscribe` / `inkling unsubscribe`.** A Claude Code session attaches its inbox,
+  and a resident Inkling pushes each transition of something that session is watching into it the
+  moment a poll finds it — one line starting `inkling:`, built only from the reference, what moved,
+  and which check went red. Push and pull share one cursor, so a transition arrives once either
+  way. Subscribing *attaches*: `unsubscribe` detaches the address and leaves your watches and your
+  place alone, so `claude --resume` picks up the net change since you left.
+- **New: `inkling hook post-tool`** (optional, a `PostToolUse` hook on `Bash`) watches the pull
+  request or issue a command was about, so you never run `inkling watch` yourself. Deliberately
+  narrow: `gh pr create|view|checks|ready|merge|edit|comment` and `git push`, references taken only
+  from URLs, and a Jira key only where it was an argument to `acli jira workitem` — never a
+  key-shaped word in output, where `UTF-8` and `CVE-2024` qualify. It makes no network call, so a
+  push whose output carries no URL watches nothing rather than going to look; the first reading is
+  left to the server's next tick. Measured at 0.2ms over the process itself for a command that
+  isn't a candidate and 3ms when it is.
+- **New: `inkling hook <session-start|session-end|prompt>`**, which reads Claude Code's hook payload
+  on stdin. Three one-line commands in `settings.json` and no shell that picks a session id out of
+  JSON — see the README. A hook never fails a session: on any error it logs and exits 0 saying
+  nothing.
+- **A resident server**, started by `subscribe` and `watch` when there is something to serve and
+  gone about five minutes after there isn't. Nothing to install or restart. It polls on its own
+  interval rather than the 60s prompt-refresh window, which is the staleness it exists to remove.
+  `[serve]` configures `interval`, `idle_after` and `max_lifetime`.
+- **`inkling status` shows the server and the readers** — whether one is running (from the lock,
+  so a `kill -9` doesn't read as healthy), its pid, uptime, ticks and failures, and for each reader
+  whether it is attached, where it has got to, and how many watches it owns. Never the token.
+- **You must do something: every watch now has an owner, and every read names one.** With several
+  sessions running, one session's CI result arriving in another's turn is noise it can't act on.
+  A watch registered from a session's Bash belongs to that session; from a terminal it belongs to
+  `cli`. You are told about your own things and nothing else — two sessions watching one pull
+  request still cost one poll and both hear about it. **`events --since 12` no longer works**: a
+  cursor now names the stream as well as the position, and looks like `abc-123:12`. Pass the token
+  `--json` prints on every row, or use `--subscriber <id>`. A bare number is refused rather than
+  read as a position in whoever's stream happens to be asking. Bare `inkling events` now means
+  "what's new for me" rather than the whole log, and `unwatch` withdraws your interest rather than
+  removing a watch somebody else also has.
+- **`watches.json` is written `0600`**, because it now holds session tokens. An existing file keeps
+  its old permissions until the next write.
+- **`inkling watch owner/repo#N` works without the host.** It names a pull request completely once
+  the host defaults; the fill-in-from-tracked rule is `run`'s, where a short form selects among
+  tracked records. Shorter forms still need a tracked match.
+- **One unresolvable reference no longer stops the rest.** `watch` and `unwatch` report what they
+  couldn't resolve, act on what they could, and exit 1. `wait` deliberately keeps its all-or-nothing
+  rule.
+- **`inkling logs` sorts by timestamp** rather than assuming file order is time order, which stopped
+  being true once a resident server appended to the same daily file. A watch deadline is also
+  rounded to whole seconds where it is built, instead of claiming microseconds a 24h TTL never had.
+
 - **New: `inkling watch` and `inkling events`.** `watch <ref>...` registers interest and returns;
   `events` prints what has moved since it last looked, and nothing at all when nothing has. An
   event is a transition — which reference, from what to what, when — never a snapshot, and the

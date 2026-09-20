@@ -33,10 +33,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Where a session listens, and the token that makes a message its own.
-#[derive(Debug, Clone)]
+///
+/// Stored as well as used: a subscription outlives the process that made it,
+/// so this is what `watches.json` keeps. One type rather than a live one and
+/// a persisted one — there is nothing in an address that doesn't survive a
+/// write. `Debug` stays redacted through `Secret`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAddress {
     path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<Secret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     identity: Option<SocketIdentity>,
 }
 
@@ -149,6 +156,17 @@ impl SessionAddress {
             .map_err(|source| self.classify(source))?;
         stream.flush().map_err(|source| self.classify(source))?;
         Ok(Written)
+    }
+
+    /// Ask whether anybody is still listening, without saying anything.
+    ///
+    /// Connect and close — the same vetting and the same classification as
+    /// `deliver`, minus a payload. A connection that sends no line starts no
+    /// turn in the target session, which is what makes this usable on a
+    /// timer: a stale address is found before there is news to lose on it.
+    pub fn probe(&self) -> Result<(), DeliverError> {
+        self.vet_path()?;
+        self.connect().map(drop)
     }
 
     /// Connect, with a deadline.
@@ -498,6 +516,49 @@ mod tests {
         assert!(
             second.recv_timeout(Duration::from_millis(200)).is_err(),
             "the new session heard nothing"
+        );
+    }
+
+    #[test]
+    fn a_probe_reaches_a_live_session_without_sending_it_anything() {
+        let dir = Dir::new("probe");
+        let rx = serve(&dir.sock());
+
+        SessionAddress::new(dir.sock(), Some(Secret::new("tok")))
+            .probe()
+            .expect("somebody is listening");
+
+        assert!(
+            received(rx).is_empty(),
+            "a probe that said something would start a turn"
+        );
+    }
+
+    #[test]
+    fn a_probe_finds_a_departed_session_before_there_is_news_for_it() {
+        let dir = Dir::new("probe-gone");
+        drop(UnixListener::bind(dir.sock()).unwrap());
+
+        let error = SessionAddress::new(dir.sock(), None).probe().unwrap_err();
+        assert!(matches!(error, DeliverError::Gone { .. }), "{error}");
+        assert!(error.drop_address());
+    }
+
+    #[test]
+    fn a_probe_refuses_a_rebound_socket_the_same_way_a_message_would() {
+        let dir = Dir::new("probe-rebound");
+        let _first = serve(&dir.sock());
+        let identity = SocketIdentity::capture(&dir.sock()).unwrap();
+        let address = SessionAddress::new(dir.sock(), None).expecting(identity);
+
+        fs::remove_file(dir.sock()).unwrap();
+        let second = serve(&dir.sock());
+
+        let error = address.probe().unwrap_err();
+        assert!(matches!(error, DeliverError::Gone { .. }), "{error}");
+        assert!(
+            second.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the new session was not even connected to"
         );
     }
 

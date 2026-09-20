@@ -323,7 +323,7 @@ mod tests {
             let deadline = self.clock.now() + TimeDelta::hours(24);
             self.store
                 .update(self.clock.now(), |w| {
-                    w.watch(reference, deadline, self.clock.now())
+                    w.watch(reference, "test", deadline, self.clock.now())
                 })
                 .unwrap();
         }

@@ -16,6 +16,7 @@ use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// Jira's `statusCategory.key`. The only ordering Jira guarantees across
@@ -136,6 +137,14 @@ pub struct Event {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Who was watching this reference when it moved.
+    ///
+    /// Snapshotted rather than looked up later: a finished watch is removed,
+    /// and a reader that stops caring stops from then on rather than
+    /// retrospectively. Empty only happens for an event written before
+    /// watches had owners, and reaches nobody.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub audience: BTreeSet<String>,
 }
 
 /// What changed between the last standing and this sighting.
@@ -211,6 +220,72 @@ fn checks_label(checks: Option<CheckState>) -> &'static str {
 pub fn since(events: &[Event], cursor: u64) -> &[Event] {
     let start = events.partition_point(|event| event.seq <= cursor);
     &events[start..]
+}
+
+/// Everything after `cursor` that this subscriber is the audience for.
+///
+/// Watches record who asked for them, so a transition reaches the sessions
+/// that were watching it and no others — one poll still serves all of them.
+pub fn addressed<'a>(events: &'a [Event], cursor: u64, subscriber: &str) -> Vec<&'a Event> {
+    since(events, cursor)
+        .iter()
+        .filter(|event| event.audience.contains(subscriber))
+        .collect()
+}
+
+/// Where a reader has got to: which stream, and how far into it.
+///
+/// One token rather than a bare number, because a position means nothing
+/// apart from the stream it belongs to. A number alone can be presented
+/// against anybody's stream, which in a machine with several sessions running
+/// is how one session ends up reading another's news.
+///
+/// Opaque by contract. The `<owner>:<seq>` spelling is what it happens to be
+/// today; callers round-trip the token `inkling events` printed rather than
+/// building one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor {
+    pub owner: String,
+    pub seq: u64,
+}
+
+impl Cursor {
+    pub fn new(owner: impl Into<String>, seq: u64) -> Self {
+        Self {
+            owner: owner.into(),
+            seq,
+        }
+    }
+}
+
+impl fmt::Display for Cursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.owner, self.seq)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{0}: a cursor now names the stream it belongs to, not just a position in \
+     one — pass the token `inkling events --json` printed, or name the reader \
+     with --subscriber <id>"
+)]
+pub struct UnknownCursor(String);
+
+impl std::str::FromStr for Cursor {
+    type Err = UnknownCursor;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        // From the right, so an owner that contains a colon still parses.
+        let (owner, seq) = text
+            .rsplit_once(':')
+            .ok_or_else(|| UnknownCursor(text.to_string()))?;
+        let seq = seq.parse().map_err(|_| UnknownCursor(text.to_string()))?;
+        match owner.is_empty() {
+            true => Err(UnknownCursor(text.to_string())),
+            false => Ok(Self::new(owner, seq)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -392,8 +467,61 @@ mod tests {
                 to: "Done".into(),
                 title: String::new(),
                 detail: None,
+                audience: BTreeSet::new(),
             })
             .collect()
+    }
+
+    fn addressed_to(seq: u64, who: &[&str]) -> Event {
+        Event {
+            audience: who.iter().map(|w| w.to_string()).collect(),
+            ..log(&[seq]).remove(0)
+        }
+    }
+
+    #[test]
+    fn a_transition_reaches_the_sessions_that_were_watching_it() {
+        // The reason watches carry owners at all: with several sessions
+        // running at once, session A's CI result landing in session B's turn
+        // is noise that B cannot act on.
+        let events = vec![addressed_to(1, &["a"]), addressed_to(2, &["a", "b"])];
+
+        let seqs =
+            |who: &str| -> Vec<u64> { addressed(&events, 0, who).iter().map(|e| e.seq).collect() };
+        assert_eq!(seqs("a"), vec![1, 2]);
+        assert_eq!(seqs("b"), vec![2], "b started watching after the first");
+        assert!(seqs("c").is_empty());
+    }
+
+    #[test]
+    fn a_cursor_round_trips_through_the_form_it_is_printed_in() {
+        let cursor: Cursor = "session-a:7".parse().unwrap();
+        assert_eq!(cursor, Cursor::new("session-a", 7));
+        assert_eq!(cursor.to_string(), "session-a:7");
+    }
+
+    #[test]
+    fn a_bare_number_is_refused_rather_than_read_as_somebody_s_stream() {
+        // What a caller written against the first release would pass. Reading
+        // it as "position 5 of whoever is asking" is how one session ends up
+        // with another session's news.
+        let error = "5".parse::<Cursor>().unwrap_err();
+        assert!(error.to_string().contains("names the stream"), "{error}");
+        assert!(":5".parse::<Cursor>().is_err(), "nor an empty owner");
+    }
+
+    #[test]
+    fn an_audience_does_not_change_where_a_cursor_starts() {
+        // Filtering happens after the suffix, so a subscriber never sees
+        // anything from before its cursor however it was addressed.
+        let events = vec![addressed_to(1, &["a"]), addressed_to(2, &["a"])];
+        assert_eq!(
+            addressed(&events, 1, "a")
+                .iter()
+                .map(|e| e.seq)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
