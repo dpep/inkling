@@ -1,6 +1,6 @@
 //! `inkling` — annotate Slack messages with the state of what they link to.
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
@@ -181,7 +181,9 @@ enum Command {
         /// How many lines to show.
         #[arg(long, short = 'n', default_value_t = 40)]
         lines: usize,
-        /// Only lines containing this, case-insensitively.
+        /// Only lines containing this text, case-insensitively. A substring,
+        /// not a regular expression — alternation and character classes are
+        /// matched literally.
         #[arg(long, short = 'g')]
         grep: Option<String>,
         /// Keep printing as new lines arrive.
@@ -514,14 +516,18 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 for problem in &refused {
                     println!("{problem}");
                 }
-                let deadline = clock.now()
-                    + TimeDelta::from_std(*ttl).map_err(|_| "--ttl is too long".to_string())?;
+                // Whole seconds, where the value is built: a deadline a day
+                // out has no microseconds' worth of meaning, and printing
+                // them anywhere downstream would invent some.
+                let deadline = (clock.now()
+                    + TimeDelta::from_std(*ttl).map_err(|_| "--ttl is too long".to_string())?)
+                .trunc_subsecs(0);
 
                 watches
                     .update(clock.now(), |file| {
                         for reference in &references {
                             file.watch(reference, deadline, clock.now());
-                            tracing::info!(%reference, %deadline, "watch registered");
+                            tracing::info!(%reference, deadline = stamp(deadline), "watch registered");
                         }
                     })
                     .map_err(|e| e.to_string())?;
@@ -1048,6 +1054,12 @@ fn classify(
         }
     }
     Ok((channels, force))
+}
+
+/// A timestamp for a log line: RFC 3339, whole seconds. Nothing inkling
+/// schedules is meaningful below one.
+fn stamp(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// A duration at the resolution someone waiting actually cares about.

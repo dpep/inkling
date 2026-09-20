@@ -185,7 +185,7 @@ pub fn tail(directory: &Path, lines: usize, needle: Option<&str>) -> Vec<String>
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
-        let mut found: Vec<String> = text.lines().map(str::to_string).filter(matches).collect();
+        let mut found: Vec<String> = chronological(&text).into_iter().filter(matches).collect();
         found.append(&mut collected);
         collected = found;
         if collected.len() >= lines {
@@ -194,6 +194,41 @@ pub fn tail(directory: &Path, lines: usize, needle: Option<&str>) -> Vec<String>
     }
     let start = collected.len().saturating_sub(lines);
     collected.split_off(start)
+}
+
+/// One file's lines in the order they happened, rather than the order they
+/// were appended.
+///
+/// A resident server writes to the same daily file as whatever the terminal
+/// is running, so append order stopped being time order. Each line already
+/// carries the answer; a line without one is a continuation and stays under
+/// the line above it.
+fn chronological(text: &str) -> Vec<String> {
+    let mut keyed: Vec<(&str, &str)> = Vec::new();
+    for line in text.lines() {
+        let key = stamp(line).unwrap_or_else(|| keyed.last().map_or("", |(key, _)| *key));
+        keyed.push((key, line));
+    }
+    // Stable, so lines sharing a timestamp keep the order they were written
+    // in — which for one process is the order they happened in.
+    keyed.sort_by_key(|(key, _)| *key);
+    keyed
+        .into_iter()
+        .map(|(_, line)| line.to_string())
+        .collect()
+}
+
+/// The RFC 3339 stamp `tracing` writes at the head of a text-format line.
+///
+/// A shape check rather than a parse: sorting only needs the field to be
+/// comparable, and RFC 3339 in UTC compares correctly as text. JSON-format
+/// lines carry theirs inside the object and so have none here, which leaves
+/// them in file order.
+fn stamp(line: &str) -> Option<&str> {
+    let candidate = line.split_whitespace().next()?;
+    let bytes = candidate.as_bytes();
+    (bytes.len() >= 20 && bytes[4] == b'-' && bytes[10] == b'T' && bytes[bytes.len() - 1] == b'Z')
+        .then_some(candidate)
 }
 
 pub fn default_log_directory() -> PathBuf {
@@ -287,6 +322,45 @@ mod tests {
 
         assert_eq!(tail(&dir.0, 10, Some("error")), ["ERROR could not react"]);
         assert!(tail(&dir.0, 10, Some("nothing here")).is_empty());
+    }
+
+    #[test]
+    fn interleaved_writers_are_read_back_in_time_order() {
+        // Two processes appending to one daily file: the daemon's line landed
+        // after the CLI's but happened before it.
+        let dir = TempDir::new("interleaved");
+        std::fs::write(
+            dir.0.join("inkling.2026-09-20.log"),
+            "2026-09-20T12:00:02.000100Z  INFO second\n\
+             2026-09-20T12:00:01.000200Z  INFO first\n",
+        )
+        .unwrap();
+
+        let lines = tail(&dir.0, 10, None);
+        assert!(lines[0].ends_with("first"), "{lines:?}");
+        assert!(lines[1].ends_with("second"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_line_without_a_timestamp_stays_under_the_one_above_it() {
+        // Multi-line events, and anything else that isn't a log line: moving
+        // them to the front would detach them from what they belong to.
+        let dir = TempDir::new("continuation");
+        std::fs::write(
+            dir.0.join("inkling.2026-09-20.log"),
+            "2026-09-20T12:00:02.000000Z  WARN boom\n\
+             \t at the second line of a backtrace\n\
+             2026-09-20T12:00:01.000000Z  INFO earlier\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            tail(&dir.0, 10, None)
+                .iter()
+                .map(|l| l.split_whitespace().last().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            ["earlier", "boom", "backtrace"]
+        );
     }
 
     #[test]
