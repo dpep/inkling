@@ -6,6 +6,34 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- `inkling subscribe` on its own never started the server. A session
+  subscribes at SessionStart, before it has watched anything, so there was
+  nothing to serve and nothing was spawned — and the first `watch` didn't
+  spawn one either. Found by running the whole path with the real binary, not
+  by reading it. `watch` now starts one too. Fixed in this PR.
+- The README's hook snippet used `$CLAUDE_SESSION_ID`, which Claude Code
+  does not set. The variable is `CLAUDE_CODE_SESSION_ID` (2.1.278). Anyone
+  who copied that snippet has been subscribing an empty id since #4. Fixed in
+  this PR, and `inkling hook` now takes the id from the payload rather than
+  from the environment at all.
+- `wait --until checks` on #5 and #6 exited 0 at 47s, and `events` right
+  after said nothing: the watch baseline was 43s old, inside the 60s refresh
+  window, so a process that already knew CI was green and the feed disagreed
+  for a minute. `wait`'s readings deliberately don't feed the watch store.
+  The resident poller is the fix; until then, a pull right after a wait is
+  misleading.
+- `inkling logs -g 'a|b'` matched nothing — `-g` isn't a regex, or isn't
+  documented as one. Expected alternation to work, or the help to say it's a
+  substring. Now the help says it.
+- Log lines carry microsecond timestamps and a microsecond deadline for a 24h
+  TTL. Precision the values don't have. The deadline is fixed; the line
+  prefix was left alone deliberately, because with several processes
+  appending to one file it is what puts them back in order.
+- A probe costs nothing worth measuring: connect-and-close against a live
+  listener logged `elapsed_ms=0` every tick, and the listener confirmed no
+  line arrived. Cheap enough to do to every attached session on every tick,
+  which is what makes a departed session get found before there is news to
+  lose on it.
 - First PR watched by inkling (#4). The background `wait --until checks` woke
   the session at 1m 33s with exit 0; `events` reported `checks pending →
   success` once and then nothing; `gh pr checks` agreed. Good: three sources,

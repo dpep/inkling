@@ -22,6 +22,13 @@ Three properties define it:
 The MVP: find GitHub PR links in Slack messages, track each PR along its lifecycle, and keep the
 message's reactions reflecting where it is.
 
+One thing has since been added deliberately, and it is the furthest this goes: **Inkling may
+deliver news into a session that asked for it.** A Claude Code session subscribes, and a resident
+poller pushes each transition of something that session is watching into its inbox
+([docs/watching.md](docs/watching.md)). That is still observation — inkling says what changed and
+stops. It runs no command, has no rules and no filters, and there is no `--then`. The line is: it
+may tell someone who asked what happened; it may never do anything about it.
+
 Non-goals: no web UI, no hosted service yet, no Calendar/CI adapters, no generic automation
 platform, no LLM-driven business logic. (Jira became a reference type for `inkling watch` — see
 [docs/watching.md](docs/watching.md). It is watchable on request, never detected in a Slack

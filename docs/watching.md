@@ -18,6 +18,17 @@ are two sinks; this is a third. The one new idea:
 
 Everything else falls out of that sentence.
 
+Two more have since joined it, each one sentence long:
+
+> Every watch belongs to a **reader**, and every transition is addressed to
+> the readers watching when it happened; a reader is told what is addressed
+> to it and nothing else. A **cursor** names both — `<owner>:<seq>` — so a
+> position is never separable from the stream it belongs to.
+
+> A reader may also carry an **address**, and then a resident poller pushes
+> to it instead of waiting to be asked. Push and pull move the same cursor,
+> so each transition is delivered once by whichever got there first.
+
 - **A baseline is not an event.** The first reading of a watch records the
   standing and says nothing. Otherwise every new watch would announce a state
   its owner had just looked up. Same rule one level up: a subscriber met for
@@ -116,11 +127,24 @@ on without it.
 - **`--json` emits an array, not `{cursor, events}`.** The cursor is the last
   event's `seq`, so a wrapper would be a second copy of a number already in
   the rows. Nothing changed means nothing printed, in every format.
-- **Events are global, not per-subscriber.** A watch records no owner, so
-  every subscriber sees every transition. Ownership is a second axis to thread
-  through registration, listing and filtering, for a noise problem nobody has
-  observed and that a 24h TTL already bounds. Listed below as the first thing
-  to revisit.
+- **Events were global, not per-subscriber.** ~~A watch records no owner, so
+  every subscriber sees every transition.~~ Reversed. It was listed as the
+  first thing to revisit, and push is what made it wrong: a transition
+  arriving in a prompt is ignorable, and one arriving *inside a turn* in a
+  session that can't act on it is not. Watches now carry owners.
+- **Bare `inkling events` reads your own stream, not the whole log.** It used
+  to mean `--since 0`. With every read naming a reader, the reader you get
+  when you don't say is the session you are in, or `cli` at a terminal — so
+  the bare command is now "what's new for me", which is what it was always
+  being used as.
+- **`inkling watch --ttl` can only lengthen a deadline.** Two readers
+  watching one reference share a watch and a poll, and the shorter interest
+  must not truncate the longer one.
+- **The server is started by `subscribe` and by `watch`**, each time there is
+  a reason for one — the same predicate it uses to decide whether to stay.
+  Starting it only from `subscribe` left a machine with a live watch, an
+  attached session and nothing running, because a session subscribes before
+  it has watched anything. Found by running it, not by reading it.
 - **The failing check's name rides along.** Measured 2026-09-20: a
   three-reference batch costs **one** rate-limit point with the rollup's
   contexts or without them, so it is free — same request, same point. Only the
@@ -133,26 +157,71 @@ on without it.
   authenticated, and the alternative is a token this tool would own and have
   to protect for a read it gets for free. See the gap below.
 
+## Push delivery, and who pays for it
+
+Built. The three things the first version of this document said had to be
+settled first, and what each one settled as:
+
+- **A socket path outlives the session that exported it**, so a stored
+  address needs a liveness answer. It gets two. The address is pinned to the
+  socket that was there when it was captured (dev + inode + ctime), so a pid
+  reused by a later session reads as gone rather than as a stranger's inbox.
+  And every tick, a subscriber that is owed nothing is *probed* — connect and
+  close, no line sent, which starts no turn in the target session — so a
+  departed one is found before there is news to lose on it.
+- **Exactly-once across push and pull.** One cursor per reader, moved
+  forwards by whichever got there first. A successful push advances it, so
+  the next prompt doesn't repeat what the session was already told.
+- **Whether this crosses DESIGN §1.** The argument, made rather than assumed:
+  inkling says what changed and stops. It runs nothing, decides nothing, and
+  filters nothing. DESIGN §1 now names delivering news into a session that
+  asked as the furthest this goes.
+
+**What advancing on a successful push costs, stated plainly.** The socket
+sends no ack, so `Written` means the bytes reached a live socket and nothing
+more. A session that *held* or *refused* the message — `crossSessionInbound`
+off, a bypass-permissions session — has its cursor advanced anyway, and that
+transition never appears at its next prompt. It is not lost: it is in the log
+for 24 hours, addressed to that reader, and `events --since <owner>:<seq>`
+returns it.
+
+The alternative was argued by the socket adapter's author: success must not
+advance, and pull stays the only thing that moves a cursor. That spends the
+feed's one promise — each transition once — on every transition, to cover a
+case that only arises in some session configurations. A separate
+pushed-through mark, so pull could still show but label what was pushed, was
+considered and dropped: it makes the rule two sentences instead of one, and
+the rule is the thing this feature is.
+
+**The audience is decided on write, not on read.** An event carries the set
+of readers watching when it moved. Looking it up at read time would have to
+consult a watch that may since have finished and been removed, or whose
+owners have changed — so a reader would be told about something it stopped
+caring about, or not told about something it did.
+
+**Per-reader streams were considered and rejected.** Appending a copy of each
+transition to each reader's own log makes exactly-once per reader trivial and
+GCs a stream with its subscriber. Both are already true: retention is
+age-based precisely so no reader can pin the log, and one cursor plus an
+address filter is the same number of moving parts. It would have bought a
+second copy of the log concept — per-stream sequences, per-stream pruning,
+and a merge to get the debugging view back — and made two readers' tokens
+look interchangeable when they are not. A gap in your sequence numbers is
+honest: something happened that wasn't yours.
+
 ## Not built, and what would change that
 
-- **Push delivery.** A Claude Code session exports
-  `CLAUDE_CODE_MESSAGING_SOCKET`: a local socket an external process can post
-  newline-delimited JSON to (`{"type":"auth",…}` then
-  `{"type":"user","message":{…}}`, no ack, verified on 2.1.278 and visible
-  only in the CLI's debug log, so treat it as unstable). A watch registered
-  from inside a session could record that address and have the poller push to
-  it rather than wait to be asked. The model here does not preclude it — a
-  subscriber is a named cursor that could also carry a delivery address, and
-  transition detection is already separate from delivery. Three things to
-  settle first: a socket path outlives the session that exported it, so stale
-  addresses need a liveness answer; exactly-once has to hold across push *and*
-  pull, which means one cursor advanced by whichever got there first, not two;
-  and pushing a transition into a session unasked is close to the `--then`
-  line that DESIGN §1 rules out. It is still observation — inkling would be
-  delivering news, not running a command — but that is the argument that has
-  to be made rather than assumed.
-- **Per-subscriber scoping.** If events from unrelated work start showing up
-  in sessions, give a watch an owner and deliver to owners plus unowned.
+- **A global view of every reader's events.** There is deliberately no
+  `events --all`. Every read names a reader, which is the property that keeps
+  sessions out of each other's news, and a flag that suspends it would be the
+  first thing reached for. The debugging view already exists in the log:
+  `inkling logs -g transition` records every one with its reference, its
+  sequence number and the size of its audience. If that turns out not to be
+  enough when something goes wrong, the flag is one line.
+- **An ack.** Everything push gives up follows from the socket not having
+  one. If Claude Code ever reports that a message was accepted, a cursor
+  could advance on *that* rather than on the write, and the cost above
+  disappears rather than being traded.
 - **An event for a reference that stopped being readable.** A watch on a typo
   or a deleted PR polls quietly until its TTL. `watch` reports the failure at
   registration, which is where a typo is actually caught.
@@ -186,11 +255,28 @@ and cursor move writes its own. Read them with `inkling logs -g polled` or
 `-g transition`.
 
 ```
-polled watches why="events" watched=5 read=5 events=1 failures=0 elapsed_ms=412
-transition reference="github.com/dpep/inkling#3" axis="checks" from="pending" to="failure" seq=7
-watch baselined reference="AI-123"
+polled watches why="serve" watched=5 read=5 events=1 failures=0 elapsed_ms=412
+transition reference="github.com/dpep/inkling#3" axis="checks" from="pending" to="failure" seq=7 audience=1
+watch registered reference="github.com/dpep/inkling#3" owner="abc-123" deadline="2026-09-21T20:44:00Z"
+subscribed subscriber="abc-123" socket="/tmp/cc-socks/9317.sock" reattached=false
+pushed subscriber="abc-123" seq=7 outcome="written" elapsed_ms=1 advanced=true
+address dropped subscriber="abc-123" error=no session at /tmp/cc-socks/9317.sock: ...
 events read subscriber="abc-123" cursor_before=6 cursor_after=7 returned=1
+serve tick polled=true watched=5 transitions=1 attached=2 probed=1 written=1 detached=0 elapsed_ms=418 pulse="busy"
 ```
+
+**The triangle.** When somebody says "I never got notified", three counts
+answer it and they are all at info: how many transitions were *detected*
+(`transition`), how many were *written* to a session (`pushed …
+outcome="written"`), and how many were later *pulled* (`events read`). Which
+pair disagrees says where it went:
+
+| | means |
+| --- | --- |
+| no `transition` | nothing moved, or the watch had expired |
+| `transition` but no `pushed` | nobody was attached, or it wasn't addressed to them — check `audience` |
+| `pushed … written` and the session never mentioned it | the session held or refused it; this is the cost of advancing on a write |
+| `pushed … gone` then `address dropped` | the session had exited; the event is still pullable |
 
 - **`events` is always 0.** If watches expire without ever producing one, the
   watched things move slower than a 24h TTL and the feature is answering a
@@ -209,5 +295,18 @@ events read subscriber="abc-123" cursor_before=6 cursor_after=7 returned=1
   watched moves — argues for a shorter default, or for push.
 - **`read < watched` persistently for Jira.** N subprocesses per poll is
   failing some of the time, and batching stops being optional.
-- **Events from unrelated work in a session.** The scoping decision above was
-  wrong; give watches an owner.
+- **`pushed … outcome="written"` is high and `events read` is always 0.**
+  Push is working and the pull leg is never catching anything — which is
+  either good news or the loss case above happening silently. The way to tell
+  them apart is a session that says it wasn't told about something the log
+  says was written to it. That is the one failure mode this design chose, and
+  it is the line in docs/dogfood.md to watch for.
+- **`detached` is non-zero on most ticks.** Addresses are going stale faster
+  than sessions are subscribing — probably `SessionEnd` not firing, or socket
+  paths being reused faster than `SocketIdentity` expects.
+- **`probed` is large and `written` is always 0.** Sessions are subscribing
+  and watching nothing, so the server is running for nobody. `should_serve`
+  should have stood it down; if it didn't, the predicate is wrong.
+- **Events from unrelated work still arriving in a session.** Ownership
+  didn't cover a path — most likely a watch registered where the owner
+  couldn't be resolved. `watch registered` carries the `owner` it chose.

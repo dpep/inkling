@@ -20,8 +20,8 @@ inkling run --dry-run       # report only, changes nothing
 inkling run                 # do it
 inkling run '#eng' '#design'  # only these channels, ignoring configured scope
 inkling run inkling#2       # check this PR now, ignoring backoff
-inkling status              # window, tracked records
-inkling logs -f             # -n, -g, --path
+inkling status              # window, tracked records, the server, who's subscribed
+inkling logs -f             # -n, -g (a substring, not a regex), --path
 ```
 
 `-v` lists the tracked records and why each decision was made.
@@ -89,44 +89,90 @@ where it already sits is not news. Watches expire at their TTL, and that
 expiry is the only cleanup there is; something that merges, closes, or
 reaches Done stops being watched after its last event.
 
-Events carry a monotonic `seq`, so the cursor for next time is the last one
-printed:
+### Everyone in their own lane
+
+Every watch belongs to a **reader** — the session you registered it from, or
+`cli` if you were at a terminal — and every transition is addressed to the
+readers watching when it happened. You are told about your own things and
+nobody else's, which matters once several sessions are running at once. Two
+sessions watching one pull request still cost one poll, and both hear about
+it.
+
+A cursor names the stream as well as the position, so it can't be pointed at
+somebody else's:
 
 ```sh
-inkling events --since 12 --json      # an array; nothing at all if nothing moved
-inkling events --ndjson               # one object per line
+inkling events                          # what's new for me
+inkling events --subscriber abc-123     # ...for that session; Inkling keeps the place
+inkling events --since abc-123:12       # ...from a place you kept
+inkling events --json                   # every row carries the cursor it leaves you at
+inkling events --ndjson                 # one object per line
 ```
 
-For a caller with nowhere to keep a cursor, Inkling keeps one:
-`--subscriber <id>` delivers each transition to that subscriber exactly once.
-A subscriber seen for the first time starts from now rather than inheriting
-somebody else's backlog.
+Nothing changed means nothing printed and exit 0, in every format.
 
-### From a Claude Code hook
+## Being told, rather than asking
 
-This is what it was built for — an agent learns its PR went red without
-having to go and look. In `settings.json`:
+`inkling events` is a pull: something has to run it. That leaves two gaps —
+readings can be up to a refresh window old when you ask, and a session that
+is *waiting* rather than working never asks at all. Subscribing closes both:
+
+```sh
+inkling subscribe      # from inside a Claude Code session
+inkling unsubscribe
+```
+
+A subscribed session has each transition pushed into it the moment a poll
+finds it, as one line starting `inkling:`:
+
+```
+inkling: github.com/dpep/inkling#7 checks pending → failure: test / build (gh pr checks 7 --repo github.com/dpep/inkling)
+```
+
+Built only from what Inkling itself decided — the reference, what moved, and
+which check went red. Never the pull request's title or the Jira summary:
+that is prose somebody else wrote, and this arrives inside an agent's turn.
+
+Push and pull share one cursor, so a transition arrives once either way.
+Subscribing **attaches**, it doesn't create: `unsubscribe` detaches the
+address and leaves your watches and your place alone, so `claude --resume`
+picks up the net change since you left rather than a replay or a silence.
+
+Behind it is one resident `inkling` per machine, started by `subscribe` or
+`watch` when there is something to serve and gone about five minutes after
+there isn't. Nothing to install, start, or restart — `inkling status` says
+whether one is up.
+
+Two things worth knowing. The session socket sends no acknowledgement, so a
+successful push means the message reached a live session and no more; if a
+session's configuration drops it, that transition won't reappear at the next
+prompt — `inkling events --since <cursor>` is where it stays recoverable for
+24 hours. And the wire format is read off Claude Code's debug log rather than
+a published contract, so it may change; the pull feed is the guarantee.
+
+### From Claude Code's hooks
+
+Three one-line commands, and no shell that picks a session id out of JSON.
+In `settings.json`:
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "inkling events --subscriber \"$CLAUDE_SESSION_ID\""
-          }
-        ]
-      }
-    ]
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "inkling hook session-start" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "inkling hook session-end" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "inkling hook prompt" }] }]
   }
 }
 ```
 
-Nothing changed means no output and exit 0, so the common case adds nothing
-to the prompt. It is also cheap: a local file read, with no network unless
-the last reading is older than `--refresh` (60s). When it is, one process
+Each reads the hook payload on stdin and takes the session id from it.
+`session-start` subscribes, `session-end` unsubscribes, and `prompt` prints
+anything the push didn't deliver — which is the safety net, not the main
+path. A hook never fails a session: whatever goes wrong, it writes a line to
+the log and exits 0 saying nothing.
+
+The prompt hook is cheap in the common case: a local file read, with no
+network unless the last reading is older than 60s. When it is, one process
 looks upstream and the rest read what it wrote.
 
 Jira goes through `acli`, which must be on `PATH` and authenticated. Issues
@@ -177,6 +223,11 @@ aliases   = ["lgtm", "approved"]
 [status.merged]
 canonical = "rocket"
 aliases   = ["merged", "shipit", "ship", "done"]
+
+[serve]
+interval     = "15s"   # how often the resident server looks and delivers
+idle_after   = "5m"    # how long with nothing to do before it stands down
+max_lifetime = "24h"   # so a rebuilt binary eventually gets picked up
 ```
 
 `canonical` is what Inkling adds; `aliases` are what count as someone having
@@ -218,8 +269,11 @@ failed and the window wasn't covered.
 
 State is at `~/.local/state/inkling/state.json`. Deleting it makes Inkling
 forget and rediscover; it also drops the record of which reactions were its
-own, so it stops claiming them. Watches and their events live beside it in
-`watches.json`; deleting that one forgets every watch and every cursor.
+own, so it stops claiming them. Watches, events, readers and their cursors
+live beside it in `watches.json`, written `0600` because it holds session
+tokens; deleting it forgets every watch and every place. The resident
+server's lock and status file sit in the same directory, so `--watches`
+moves the whole lot somewhere else.
 
 ## slackmcp
 
