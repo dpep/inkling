@@ -1125,9 +1125,9 @@ fn poll(
 }
 
 /// One line's worth of where a watched thing stands.
-fn standing(seen: Option<&inkling::adapters::watches_json::Seen>) -> String {
+fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
     use inkling::domain::watch::Standing;
-    match seen.map(|seen| &seen.standing) {
+    match standing {
         None => "unread".to_string(),
         Some(Standing::PullRequest { state, checks }) => match checks {
             Some(checks) => format!("{state}, checks {checks}"),
@@ -1150,12 +1150,10 @@ fn finished_already(
         if watches.watches.contains_key(&reference.to_string()) {
             continue;
         }
-        let standing = standing(Some(&inkling::adapters::watches_json::Seen {
-            at: Utc::now(),
-            standing: sighting.standing.clone(),
-            title: sighting.title.clone(),
-        }));
-        println!("{reference}: already {standing} — nothing left to watch");
+        println!(
+            "{reference}: already {} — nothing left to watch",
+            standing(Some(&sighting.standing))
+        );
     }
 }
 
@@ -1177,7 +1175,7 @@ fn watch_out(
             .map(|watch| {
                 serde_json::json!({
                     "reference": watch.reference.to_string(),
-                    "standing": standing(watch.seen.as_ref()),
+                    "standing": standing(watch.seen.as_ref().map(|seen| &seen.standing)),
                     "since": watch.since,
                     "deadline": watch.deadline,
                     "title": watch.seen.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
@@ -1201,7 +1199,7 @@ fn watch_out(
         .map(|watch| {
             (
                 watch.reference.to_string(),
-                standing(watch.seen.as_ref()),
+                standing(watch.seen.as_ref().map(|seen| &seen.standing)),
                 humanize(watch.deadline - now),
                 watch
                     .seen
