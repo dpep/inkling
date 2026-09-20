@@ -18,6 +18,7 @@
 //! named pipe and is not supported.
 
 use crate::secret::Secret;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -36,6 +37,47 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct SessionAddress {
     path: PathBuf,
     token: Option<Secret>,
+    identity: Option<SocketIdentity>,
+}
+
+/// Which socket was at the path when the subscription was made.
+///
+/// Paths are `<dir>/<pid>.sock` and the token is not a gate — a message sent
+/// with the wrong token is still delivered. So a pid reused by a later Claude
+/// Code session makes a stored address point at a stranger's inbox, and
+/// ownership cannot tell them apart: same user, same path, different session.
+/// This is the only thing that can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketIdentity {
+    dev: u64,
+    ino: u64,
+    /// Inode change time, and the reason dev+ino alone won't do: inode
+    /// numbers get handed back out, and a rebound path is a new file rather
+    /// than a mutation of the old one. Nanosecond-resolution on APFS and
+    /// ext4, so two sockets at one path differ here even if `ino` repeats.
+    ///
+    /// It is change time, not birth time — `st_birthtime` isn't portable to
+    /// Linux — so a chmod on a live socket would read as a different session
+    /// and cost that session its push. Nothing does that to a bound socket.
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl SocketIdentity {
+    /// Capture at subscribe time, while the session is known to be the one
+    /// that asked.
+    pub fn capture(path: &Path) -> io::Result<Self> {
+        Ok(Self::of(&std::fs::symlink_metadata(path)?))
+    }
+
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
 }
 
 /// The payload reached a live socket. Deliberately not `()`: there is no ack
@@ -46,13 +88,10 @@ pub struct Written;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeliverError {
-    /// Nothing is listening. The session exited; drop the address.
-    #[error("no session listening at {path}: {source}")]
-    Gone {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    /// The session this address named is not there — it exited, or something
+    /// else now holds the path. Drop the address.
+    #[error("no session at {path}: {reason}")]
+    Gone { path: PathBuf, reason: String },
     /// The path is not something we will write a token to. Permanent in the
     /// same way `Gone` is — a socket does not become ours later.
     #[error("refusing to use {path}: {reason}")]
@@ -80,7 +119,15 @@ impl SessionAddress {
         Self {
             path: path.into(),
             token,
+            identity: None,
         }
+    }
+
+    /// Pin the address to the socket that was there when it was captured.
+    /// Without this, delivery is to whoever holds the path now.
+    pub fn expecting(mut self, identity: SocketIdentity) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -202,7 +249,8 @@ impl SessionAddress {
     }
 
     /// The path arrives from a state file, so it is treated as input: a real
-    /// socket, ours, and not reached through a symlink.
+    /// socket, ours, not reached through a symlink, and — when the address was
+    /// pinned — still the same socket it was pinned to.
     ///
     /// It is a check, not a guarantee — nothing binds the stat to the connect
     /// that follows. Closing that race means asking the kernel who is on the
@@ -218,6 +266,15 @@ impl SessionAddress {
         if metadata.uid() != unsafe { libc::getuid() } {
             return Err(self.refuse("owned by another user"));
         }
+        // Same stat, so the identity is the thing just vetted.
+        if let Some(expected) = self.identity
+            && SocketIdentity::of(&metadata) != expected
+        {
+            return Err(DeliverError::Gone {
+                path: self.path.clone(),
+                reason: "a different socket is bound there now".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -229,7 +286,7 @@ impl SessionAddress {
         match source.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => DeliverError::Gone {
                 path: self.path.clone(),
-                source,
+                reason: source.to_string(),
             },
             _ => DeliverError::Transient {
                 path: self.path.clone(),
@@ -405,6 +462,42 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_socket_rebound_by_a_later_session_is_not_delivered_to() {
+        // The pid-reuse case: /tmp/cc-socks/<pid>.sock outlives its session,
+        // and the token is no gate — a wrong one is still delivered. Without
+        // the identity, this message lands in a stranger's session.
+        let dir = Dir::new("rebound");
+        let first = serve(&dir.sock());
+        let identity = SocketIdentity::capture(&dir.sock()).unwrap();
+        let address = SessionAddress::new(dir.sock(), Some(Secret::new("tok"))).expecting(identity);
+
+        address.deliver("for the first session").unwrap();
+        assert_eq!(
+            received(first).len(),
+            2,
+            "the pinned socket still takes auth plus message"
+        );
+
+        // The first listener is gone once its thread finished; a new session
+        // unlinks the stale path and binds its own.
+        fs::remove_file(dir.sock()).unwrap();
+        let second = serve(&dir.sock());
+        assert_ne!(
+            SocketIdentity::capture(&dir.sock()).unwrap(),
+            identity,
+            "a rebound path is a new file, which is what makes this detectable"
+        );
+
+        let error = address.deliver("not for you").unwrap_err();
+        assert!(matches!(error, DeliverError::Gone { .. }), "{error}");
+        assert!(error.drop_address());
+        assert!(
+            second.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the new session heard nothing"
         );
     }
 
