@@ -11,6 +11,7 @@ pub mod domain;
 pub mod obs;
 pub mod ports;
 pub mod secret;
+pub mod serve;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod wait;
