@@ -153,7 +153,7 @@ fn interpret(raw: &str) -> Result<IssueStatus, RefError> {
             .map_err(describe)?
             .into_iter()
             .next()
-            .ok_or_else(|| RefError::NotFound)?,
+            .ok_or(RefError::NotFound)?,
         false => serde_json::from_str::<Issue>(raw).map_err(describe)?,
     };
 

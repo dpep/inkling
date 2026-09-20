@@ -118,6 +118,9 @@ pub struct RefStatus {
     /// tracked snapshot: a finished suite can go back to pending on a push,
     /// and the snapshot's terminality means "stop polling forever".
     pub checks: Option<CheckState>,
+    /// The name of a check that is red, when one is. "Checks went red" is
+    /// most of a page of investigation; "checks went red: tidy" is a command.
+    pub failing: Option<String>,
 }
 
 impl RefStatus {
@@ -127,6 +130,7 @@ impl RefStatus {
             author: String::new(),
             title: String::new(),
             checks: None,
+            failing: None,
         }
     }
 }
