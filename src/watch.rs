@@ -30,6 +30,11 @@ pub struct Poller<'a> {
 #[derive(Debug, Default)]
 pub struct Polled {
     pub events: Vec<Event>,
+    /// What was read, in full. The store keeps the live ones, but a reference
+    /// that was already finished has its watch dropped on the way in, so this
+    /// is the only place its standing survives — which is what lets `watch`
+    /// say "already merged" rather than "watching nothing".
+    pub sightings: Vec<(Reference, Sighting)>,
     /// References asked about.
     pub watched: usize,
     /// References that couldn't be read, with why. Not fatal: this runs on
@@ -79,6 +84,7 @@ impl Poller<'_> {
         );
         Ok(Polled {
             events,
+            sightings,
             watched: references.len(),
             failures,
             skipped: false,
