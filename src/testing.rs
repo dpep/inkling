@@ -122,6 +122,18 @@ impl ScriptedStatusProvider {
         );
     }
 
+    /// For watches on CI, where naming the red job is the point.
+    pub fn fail_check(&self, reference: &Reference, state: State, failing: &str) {
+        self.states.borrow_mut().insert(
+            reference.clone(),
+            Ok(RefStatus {
+                checks: Some(CheckState::Failure),
+                failing: Some(failing.to_string()),
+                ..RefStatus::new(state)
+            }),
+        );
+    }
+
     /// How many times the provider was actually asked — the measurement
     /// deduplicated polling exists to keep down.
     pub fn calls(&self) -> usize {

@@ -74,6 +74,21 @@ pub struct Seen {
     pub title: String,
 }
 
+/// What one pass of garbage collection dropped, so the log can say why the
+/// file shrank rather than leaving it to be noticed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Pruned {
+    pub watches: usize,
+    pub events: usize,
+    pub subscribers: usize,
+}
+
+impl Pruned {
+    pub fn any(self) -> bool {
+        self.watches + self.events + self.subscribers > 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscriber {
     pub cursor: u64,
@@ -134,10 +149,16 @@ impl Watches {
     ///
     /// The one place events are created. A finished reference drops its watch
     /// after its last event is recorded — nothing follows merged, or Done.
+    ///
+    /// `observed_at` is when the readings were taken, not when they are being
+    /// written. Two pollers overlapping would otherwise let the slower one's
+    /// older reading land last and report a pull request moving backwards;
+    /// stamping each reading with its own time makes that impossible rather
+    /// than rare.
     pub fn record(
         &mut self,
         sightings: &[(Reference, Sighting)],
-        now: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
     ) -> Vec<Event> {
         let mut fresh = Vec::new();
         for (reference, sighting) in sightings {
@@ -146,11 +167,32 @@ impl Watches {
                 // Expired while the poll was in flight.
                 continue;
             };
+            if watch
+                .seen
+                .as_ref()
+                .is_some_and(|seen| seen.at > observed_at)
+            {
+                continue;
+            }
+            // Logged where it happens, so `inkling logs` explains both an
+            // event and the silence that precedes the first one. Titles and
+            // summaries stay out: they're free text from elsewhere.
+            if watch.seen.is_none() {
+                tracing::info!(reference = %reference, "watch baselined");
+            }
             for moved in transitions(watch.seen.as_ref().map(|s| &s.standing), sighting) {
                 self.last_seq += 1;
+                tracing::info!(
+                    reference = %reference,
+                    axis = moved.axis.as_str(),
+                    from = moved.from,
+                    to = moved.to,
+                    seq = self.last_seq,
+                    "transition"
+                );
                 fresh.push(Event {
                     seq: self.last_seq,
-                    at: now,
+                    at: observed_at,
                     reference: reference.clone(),
                     axis: moved.axis,
                     from: moved.from,
@@ -160,12 +202,13 @@ impl Watches {
                 });
             }
             watch.seen = Some(Seen {
-                at: now,
+                at: observed_at,
                 standing: sighting.standing.clone(),
                 title: sighting.title.clone(),
             });
             if sighting.standing.is_finished() {
                 self.watches.remove(&key);
+                tracing::info!(reference = %reference, "watch finished");
             }
         }
         self.events.extend(fresh.iter().cloned());
@@ -196,19 +239,42 @@ impl Watches {
             .cursor;
 
         let due = crate::domain::watch::since(&self.events, cursor).to_vec();
-        if let Some(subscriber) = self.subscribers.get_mut(subscriber) {
-            subscriber.cursor = head;
+        if let Some(entry) = self.subscribers.get_mut(subscriber) {
+            entry.cursor = head;
         }
+        tracing::debug!(
+            subscriber,
+            cursor_before = cursor,
+            cursor_after = head,
+            returned = due.len(),
+            "events read"
+        );
         due
     }
 
     /// Drop what has aged out: expired watches, events past retention, and
     /// the cursors of subscribers that stopped asking.
-    pub fn collect_garbage(&mut self, now: DateTime<Utc>, retention: TimeDelta) {
-        self.watches.retain(|_, watch| watch.deadline > now);
+    pub fn collect_garbage(&mut self, now: DateTime<Utc>, retention: TimeDelta) -> Pruned {
+        let before = (
+            self.watches.len(),
+            self.events.len(),
+            self.subscribers.len(),
+        );
+        self.watches.retain(|_, watch| {
+            let live = watch.deadline > now;
+            if !live {
+                tracing::info!(reference = %watch.reference, "watch expired");
+            }
+            live
+        });
         self.events.retain(|event| now - event.at < retention);
         self.subscribers
             .retain(|_, subscriber| now - subscriber.seen_at < retention);
+        Pruned {
+            watches: before.0 - self.watches.len(),
+            events: before.1 - self.events.len(),
+            subscribers: before.2 - self.subscribers.len(),
+        }
     }
 }
 
@@ -263,7 +329,16 @@ impl WatchStore {
         let _lock = FileLock::acquire(&lock_path).map_err(|e| StoreError::Write(e.to_string()))?;
 
         let mut watches = self.load()?;
-        watches.collect_garbage(now, RETENTION);
+        let pruned = watches.collect_garbage(now, RETENTION);
+        if pruned.any() {
+            tracing::debug!(
+                watches = pruned.watches,
+                events = pruned.events,
+                subscribers = pruned.subscribers,
+                retention_hours = RETENTION.num_hours(),
+                "pruned"
+            );
+        }
         let outcome = change(&mut watches);
         watches.version = VERSION;
         self.save(&watches)?;
@@ -454,6 +529,20 @@ mod tests {
 
         watches.collect_garbage(now(), RETENTION);
         assert!(watches.watches.is_empty());
+    }
+
+    #[test]
+    fn a_reading_older_than_the_one_on_file_is_ignored() {
+        // Two pollers overlapping: the slower one started first and lands
+        // last. Without this its stale answer reports the pull request
+        // moving backwards, and the subscriber acts on a retraction that
+        // never happened.
+        let mut watches = watching(State::Open);
+        let later = now() + TimeDelta::seconds(30);
+        watches.record(&[(pr(3), seen_pull(State::Merged, None))], later);
+
+        let stale = watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+        assert!(stale.is_empty(), "no merged → open");
     }
 
     #[test]
