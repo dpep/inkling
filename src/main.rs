@@ -2203,10 +2203,7 @@ mod tests {
                 "watch",
                 watch_target(target, &hosts(), &snapshot).map(|r| r.to_string()),
             ),
-            (
-                "wait",
-                wait_targets(&one, &hosts(), &snapshot).map(names),
-            ),
+            ("wait", wait_targets(&one, &hosts(), &snapshot).map(names)),
             (
                 "run",
                 classify(&one, &hosts(), &snapshot).map(|(_, references)| names(references)),
