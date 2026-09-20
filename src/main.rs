@@ -1097,12 +1097,52 @@ fn watch_targets(
     hosts: &[String],
     snapshot: &inkling::adapters::store_json::Snapshot,
 ) -> Result<Vec<inkling::domain::model::Reference>, String> {
-    let (channels, references) = classify(targets, hosts, snapshot)?;
-    match channels.first() {
-        Some(channel) => Err(format!(
+    targets
+        .iter()
+        .map(|target| watch_target(target, hosts, snapshot))
+        .collect()
+}
+
+/// Resolve one target to watch.
+///
+/// Its own loop rather than `classify`, because the completion rule differs:
+/// `owner/repo#N` names a pull request completely once the host defaults, and
+/// only the shorter forms need a tracked record. `run` fills every short form
+/// in from what's tracked because a short form there *selects* among tracked
+/// records; a watch has nothing to select among.
+fn watch_target(
+    target: &str,
+    hosts: &[String],
+    snapshot: &inkling::adapters::store_json::Snapshot,
+) -> Result<inkling::domain::model::Reference, String> {
+    use inkling::domain::detect::{Target, parse_target};
+    use inkling::domain::model::Reference;
+
+    match parse_target(target, hosts)? {
+        Target::Channel(channel) => Err(format!(
             "{channel}: watch takes pull requests and Jira issues, not channels"
         )),
-        None => Ok(references),
+        Target::Reference(reference) => Ok(reference),
+        Target::Partial {
+            owner: Some(owner),
+            repo: Some(repo),
+            number,
+        } => match hosts.first() {
+            Some(host) => Ok(Reference::GitHubPullRequest {
+                host: host.clone(),
+                owner,
+                repo,
+                number,
+            }),
+            None => Err(format!(
+                "{target}: no github host is configured — give the full reference"
+            )),
+        },
+        Target::Partial {
+            owner,
+            repo,
+            number,
+        } => resolve(&owner, &repo, number, snapshot),
     }
 }
 
@@ -1514,7 +1554,37 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::ellipsize;
+    use super::{ellipsize, watch_target};
+    use inkling::adapters::store_json::Snapshot;
+
+    fn hosts() -> Vec<String> {
+        vec!["github.com".to_string()]
+    }
+
+    #[test]
+    fn owner_and_repo_name_a_pull_request_completely() {
+        // Found by dogfooding: refusing this sent you to look up a host you
+        // already knew. The fill-in-from-tracked rule is `run`'s, and `run`
+        // needs it because a short form there selects among tracked records.
+        let reference = watch_target("dpep/inkling#3", &hosts(), &Snapshot::default()).unwrap();
+        assert_eq!(reference.to_string(), "github.com/dpep/inkling#3");
+    }
+
+    #[test]
+    fn a_shorter_form_still_needs_something_tracked_to_match() {
+        // `inkling#3` leaves out the owner, and guessing one would watch
+        // somebody else's pull request.
+        for target in ["inkling#3", "3"] {
+            let error = watch_target(target, &hosts(), &Snapshot::default()).unwrap_err();
+            assert!(error.contains("nothing tracked"), "{target}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_channel_is_refused_rather_than_watched() {
+        let error = watch_target("#eng", &hosts(), &Snapshot::default()).unwrap_err();
+        assert!(error.contains("not channels"), "{error}");
+    }
 
     #[test]
     fn long_titles_are_cut_rather_than_wrapped() {
