@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn a_push_costs_a_session_two_events_rather_than_four() {
+    fn a_push_costs_a_session_two_events_rather_than_three() {
         // The dogfood finding, at the level a session felt it: pushing a commit
         // put `checks success → none` and `none → pending` in the turn before
         // the `pending → success` that was the news. What is left is what a
