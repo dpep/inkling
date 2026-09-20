@@ -80,9 +80,7 @@ pub enum Reference {
     },
     /// No site: `acli` is authenticated to exactly one, and carrying a field
     /// nothing reads would imply a multi-site story that doesn't exist.
-    JiraIssue {
-        key: String,
-    },
+    JiraIssue { key: String },
 }
 
 impl fmt::Display for Reference {

@@ -5,3 +5,4 @@ pub mod lock;
 pub mod slack_claude;
 pub mod store_json;
 pub mod waits_json;
+pub mod watches_json;
