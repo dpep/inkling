@@ -673,7 +673,11 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 // caller just asked not to happen.
                 if !references.is_empty() {
                     match poll(&config, &watches, &clock, None, "watch") {
-                        Ok(polled) => finished_already(&polled, &watches.read()),
+                        Ok(polled) => {
+                            for line in finished_already(&references, &polled, &watches.read()) {
+                                println!("{line}");
+                            }
+                        }
                         Err(error) => {
                             println!("could not read them just now: {error}");
                             println!("  the next `inkling events` will pick them up");
@@ -1720,24 +1724,34 @@ fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
     }
 }
 
-/// Say so when something was over before the watch began.
+/// Say so when something the caller just asked for was over before the watch
+/// began.
 ///
 /// A finished reference has its watch dropped by the first reading, so it
 /// never appears in the list — and "watching nothing" is a poor answer to
 /// "watch this pull request".
+///
+/// Only what was asked for. One poll reads every live watch, so it finishes
+/// other readers' as well, and their housekeeping is the log's business rather
+/// than this command's output.
 fn finished_already(
+    asked: &[inkling::domain::model::Reference],
     polled: &inkling::watch::Polled,
     watches: &inkling::adapters::watches_json::Watches,
-) {
-    for (reference, sighting) in &polled.sightings {
-        if watches.watches.contains_key(&reference.to_string()) {
-            continue;
-        }
-        println!(
-            "{reference}: already {} — nothing left to watch",
-            standing(Some(&sighting.standing))
-        );
-    }
+) -> Vec<String> {
+    polled
+        .sightings
+        .iter()
+        .filter(|(reference, _)| {
+            asked.contains(reference) && !watches.watches.contains_key(&reference.to_string())
+        })
+        .map(|(reference, sighting)| {
+            format!(
+                "{reference}: already {} — nothing left to watch",
+                standing(Some(&sighting.standing))
+            )
+        })
+        .collect()
 }
 
 fn watch_out(
@@ -2159,8 +2173,11 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, ellipsize, wait_targets, watch_target, watch_targets};
+    use super::{classify, ellipsize, finished_already, wait_targets, watch_target, watch_targets};
     use inkling::adapters::store_json::Snapshot;
+    use inkling::adapters::watches_json::Watches;
+    use inkling::domain::watch::{Sighting, Standing};
+    use inkling::watch::Polled;
 
     fn hosts() -> Vec<String> {
         vec!["github.com".to_string()]
@@ -2244,6 +2261,46 @@ mod tests {
         assert_eq!(references[0].to_string(), "github.com/dpep/inkling#3");
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("#42"), "{refused:?}");
+    }
+
+    fn pr(number: u64) -> inkling::domain::model::Reference {
+        inkling::domain::model::Reference::GitHubPullRequest {
+            host: "github.com".into(),
+            owner: "dpep".into(),
+            repo: "inkling".into(),
+            number,
+        }
+    }
+
+    /// A reading of a merged pull request — one whose watch the poll dropped.
+    fn merged(number: u64) -> (inkling::domain::model::Reference, Sighting) {
+        (
+            pr(number),
+            Sighting {
+                standing: Standing::PullRequest {
+                    state: inkling::domain::model::State::Merged,
+                    checks: None,
+                },
+                title: "Add the serve lifecycle".into(),
+                failing: None,
+            },
+        )
+    }
+
+    #[test]
+    fn watching_one_thing_reports_only_on_that_thing() {
+        // Found by dogfooding: watching a new pull request printed "already
+        // merged — nothing left to watch" for two older ones the same poll
+        // happened to finish. One poll reads every live watch, so it does
+        // somebody else's housekeeping too; the log already says so.
+        let polled = Polled {
+            sightings: vec![merged(3), merged(5), merged(7)],
+            ..Polled::default()
+        };
+        let said = finished_already(&[pr(7)], &polled, &Watches::default());
+
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("github.com/dpep/inkling#7: already merged"));
     }
 
     #[test]

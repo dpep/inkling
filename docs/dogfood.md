@@ -32,7 +32,8 @@ fixed, say where and leave the line.
 - `inkling watch <new pr>` also printed "already merged — nothing left to
   watch" for two older PRs it happened to clean up on the same poll. Expected
   output about what I asked for; someone else's housekeeping belongs in the
-  log. Open.
+  log. Fixed in this PR: `finished_already` reports only the references the
+  command was given.
 - `inkling status` straight after the `watch` that spawned the server said
   `serving no`; a second later it said yes. The spawn returns before the child
   takes the lock. Harmless, but it's the first thing you look at. Open.
