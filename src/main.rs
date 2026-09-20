@@ -238,6 +238,8 @@ enum HookEvent {
     SessionEnd,
     /// UserPromptSubmit — print anything the push didn't deliver.
     Prompt,
+    /// PostToolUse — watch what the session just touched.
+    PostTool,
 }
 
 impl HookEvent {
@@ -246,6 +248,7 @@ impl HookEvent {
             HookEvent::SessionStart => "session-start",
             HookEvent::SessionEnd => "session-end",
             HookEvent::Prompt => "prompt",
+            HookEvent::PostTool => "post-tool",
         }
     }
 }
@@ -634,7 +637,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let watches = watch_store(&cli.common);
             let clock = SystemClock;
             let mut refused = Vec::new();
-            let owner = reader(None, &watches.read());
+            let owner = reader(None, TERMINAL, &watches.read());
 
             if !targets.is_empty() {
                 let snapshot = store.load().map_err(|e| e.to_string())?;
@@ -699,7 +702,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             let watches = watch_store(&cli.common);
             let clock = SystemClock;
-            let owner = reader(None, &watches.read());
+            let owner = reader(None, TERMINAL, &watches.read());
 
             if *all {
                 let dropped = watches
@@ -787,7 +790,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                     (cursor.owner.clone(), due)
                 }
                 None => {
-                    let owner = reader(subscriber.as_deref(), &watches.read());
+                    let owner = reader(subscriber.as_deref(), TERMINAL, &watches.read());
                     let due = watches
                         .update(clock.now(), |file| file.take(&owner, clock.now()))
                         .map_err(|e| e.to_string())?;
@@ -1241,7 +1244,11 @@ const TERMINAL: &str = "cli";
 /// the calling process holds. (A subagent's Bash has its own session id and
 /// its parent's socket.) Failing that, the session id Claude Code exports.
 /// Failing that, the person at the terminal.
-fn reader(explicit: Option<&str>, watches: &inkling::adapters::watches_json::Watches) -> String {
+fn reader(
+    explicit: Option<&str>,
+    fallback: &str,
+    watches: &inkling::adapters::watches_json::Watches,
+) -> String {
     if let Some(id) = explicit {
         return id.to_string();
     }
@@ -1250,7 +1257,10 @@ fn reader(explicit: Option<&str>, watches: &inkling::adapters::watches_json::Wat
     {
         return subscriber.to_string();
     }
-    std::env::var(SESSION_ENV).unwrap_or_else(|_| TERMINAL.to_string())
+    std::env::var(SESSION_ENV)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 const TOKEN_ENV: &str = "CLAUDE_CODE_MESSAGING_TOKEN";
@@ -1333,12 +1343,26 @@ fn ensure_serving(config: &Config, common: &Common, why: &str) {
     }
 }
 
-/// Claude Code's hook payload. Only the field inkling needs — the rest of it
-/// is somebody else's business and may change without notice.
+/// Claude Code's hook payload. Only the fields inkling needs — the rest is
+/// somebody else's business and may change without notice, which is why the
+/// tool's own input and result stay untyped.
 #[derive(serde::Deserialize)]
 struct HookInput {
     #[serde(default)]
     session_id: String,
+    #[serde(default)]
+    tool_name: String,
+    #[serde(default)]
+    tool_input: serde_json::Value,
+    #[serde(default)]
+    tool_response: serde_json::Value,
+}
+
+fn field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
 }
 
 /// Do what a hook asks, or say why not. The caller swallows the error.
@@ -1363,6 +1387,71 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
         }
         HookEvent::SessionEnd => {
             unsubscribe(&input.session_id, common)?;
+            Ok(())
+        }
+        HookEvent::PostTool => {
+            // Cheapest checks first, and in this order: this runs after every
+            // tool call, and the overwhelming majority of them have nothing
+            // to do with a pull request. Nothing below the gate is reached
+            // unless the command is plainly about one.
+            if input.tool_name != "Bash" {
+                return Ok(());
+            }
+            let command = field(&input.tool_input, "command");
+            if !inkling::domain::detect::worth_reading(command) {
+                return Ok(());
+            }
+            let output = format!(
+                "{}\n{}",
+                field(&input.tool_response, "stdout"),
+                field(&input.tool_response, "stderr")
+            );
+            let touched = inkling::domain::detect::touched(command, &output, &config.github.hosts);
+            if touched.is_empty() {
+                return Ok(());
+            }
+
+            // The session that will actually be pushed to, falling back to
+            // the one the payload names — never `cli`, since a watch made by
+            // a session belongs to it even if nothing is attached yet.
+            let owner = reader(None, &input.session_id, &watches.read());
+            let deadline = (clock.now() + TimeDelta::hours(24)).trunc_subsecs(0);
+            let fresh = watches
+                .update(clock.now(), |file| {
+                    let mut fresh = Vec::new();
+                    for (reference, why) in &touched {
+                        let known = file
+                            .watches
+                            .get(&reference.to_string())
+                            .is_some_and(|watch| watch.owners.contains(&owner));
+                        file.watch(reference, &owner, deadline, clock.now());
+                        if !known {
+                            fresh.push((reference.clone(), *why));
+                        }
+                    }
+                    fresh
+                })
+                .map_err(|e| e.to_string())?;
+
+            // Only what is new. The same command run in a loop refreshes a
+            // deadline and says nothing, or the log becomes the loop.
+            for (reference, why) in &fresh {
+                tracing::info!(
+                    %reference,
+                    owner,
+                    tool = "Bash",
+                    matched = why,
+                    deadline = stamp(deadline),
+                    "watch registered automatically"
+                );
+            }
+            // Deliberately no baseline read here: that is a GitHub round trip,
+            // and a hook that runs on every tool call may not make one. The
+            // server's next tick reads it — a watch that has never been read
+            // is due immediately — and if the reference turns out to be
+            // already merged, that first reading drops the watch without
+            // emitting anything.
+            ensure_serving(config, common, "post-tool");
             Ok(())
         }
         HookEvent::Prompt => {

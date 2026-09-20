@@ -170,6 +170,99 @@ pub fn detect(text: &str, hosts: &[String]) -> Vec<Reference> {
     found
 }
 
+/// Commands whose text or output names a pull request the caller is working
+/// on. Not `gh pr list` or `gh pr status`: those name everybody's.
+const PULL_COMMANDS: [&str; 7] = [
+    "gh pr create",
+    "gh pr view",
+    "gh pr checks",
+    "gh pr ready",
+    "gh pr merge",
+    "gh pr edit",
+    "gh pr comment",
+];
+
+const ISSUE_COMMAND: &str = "acli jira workitem";
+const BROWSE: &str = "atlassian.net/browse/";
+
+/// Enough output to find a reference in, and no more.
+///
+/// A command that prints a pull request's URL prints it early — `gh pr
+/// create` prints it alone, `git push` in its remote block. Reading a whole
+/// megabyte of somebody's test output to find that out would put the cost of
+/// a rare case on every tool call.
+const OUTPUT_LIMIT: usize = 64 * 1024;
+
+/// Whether a command is worth reading at all.
+///
+/// The gate, and the reason a hook on every tool call is affordable: a few
+/// substring scans over the command itself. Anything that isn't plainly about
+/// a pull request or an issue stops here, before any parsing and before the
+/// store is opened.
+pub fn worth_reading(command: &str) -> bool {
+    command.contains("git push")
+        || command.contains(BROWSE)
+        || command.contains(ISSUE_COMMAND)
+        || PULL_COMMANDS.iter().any(|verb| command.contains(verb))
+}
+
+/// What a shell command was about, and what makes us think so.
+///
+/// Narrow on purpose, because the cost of being wrong is a session told about
+/// something it never asked for. A reference is taken from a URL, which is
+/// unambiguous, or from a Jira key that was an *argument* to `acli`. Never
+/// from a key-shaped word in arbitrary output: `UTF-8`, `SHA-256` and
+/// `CVE-2024` are all issue keys as far as the shape goes.
+pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference, &'static str)> {
+    // On a character boundary, so a cap in the middle of a multi-byte glyph
+    // shortens the slice rather than panicking.
+    let limit = (0..=OUTPUT_LIMIT.min(output.len()))
+        .rev()
+        .find(|n| output.is_char_boundary(*n))
+        .unwrap_or(0);
+    let output = &output[..limit];
+    let mut found: Vec<(Reference, &'static str)> = Vec::new();
+    let mut add = |reference: Reference, why: &'static str| {
+        if !found.iter().any(|(seen, _)| *seen == reference) {
+            found.push((reference, why));
+        }
+    };
+
+    if let Some(verb) = PULL_COMMANDS.iter().find(|verb| command.contains(**verb)) {
+        for reference in detect(command, hosts)
+            .into_iter()
+            .chain(detect(output, hosts))
+        {
+            add(reference, verb);
+        }
+    }
+    if command.contains("git push") {
+        // Only the output: a push command never carries the pull request's
+        // URL, and some remotes print it. When none does there is nothing to
+        // watch, and nothing here goes and looks one up — a hook runs on
+        // every tool call, and a network round trip is not something to spend
+        // there.
+        for reference in detect(output, hosts) {
+            add(reference, "git push");
+        }
+    }
+    if let Some((_, arguments)) = command.split_once(ISSUE_COMMAND) {
+        for word in arguments.split(|c: char| c.is_whitespace() || c == '=') {
+            if let Some(reference) = parse_jira(word) {
+                add(reference, ISSUE_COMMAND);
+            }
+        }
+    }
+    for word in command.split_whitespace() {
+        if word.contains(BROWSE)
+            && let Some(reference) = parse_jira(word)
+        {
+            add(reference, "browse url");
+        }
+    }
+    found
+}
+
 fn as_pull_request(iri: &iriq::Identifier, hosts: &[String]) -> Option<Reference> {
     let host = iri.host.to_lowercase();
     if !hosts.iter().any(|h| h.to_lowercase() == host) {
@@ -474,5 +567,152 @@ mod tests {
     fn finds_nothing_in_text_without_links() {
         assert!(detected("just a normal message about a pull request").is_empty());
         assert!(detected("").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod touched_tests {
+    use super::*;
+
+    fn hosts() -> Vec<String> {
+        vec!["github.com".to_string()]
+    }
+
+    fn names(command: &str, output: &str) -> Vec<String> {
+        touched(command, output, &hosts())
+            .into_iter()
+            .map(|(reference, _)| reference.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_gate_turns_away_everything_that_is_not_plainly_about_one() {
+        // The property that makes a hook on every tool call affordable.
+        for command in [
+            "cargo test",
+            "rg -n 'pull' src/",
+            "gh pr list --limit 5",
+            "git status",
+            "echo https://github.com/dpep/inkling/pull/7",
+        ] {
+            assert!(!worth_reading(command), "{command}");
+        }
+        for command in [
+            "gh pr create --draft",
+            "git push -u origin HEAD",
+            "acli jira workitem view --key AI-1",
+            "open https://x.atlassian.net/browse/AI-1",
+        ] {
+            assert!(worth_reading(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_pull_request_command_is_read_from_its_arguments_and_its_output() {
+        assert_eq!(
+            names("gh pr checks https://github.com/dpep/inkling/pull/7", ""),
+            ["github.com/dpep/inkling#7"]
+        );
+        assert_eq!(
+            names(
+                "gh pr create --fill",
+                "https://github.com/dpep/inkling/pull/8\n"
+            ),
+            ["github.com/dpep/inkling#8"]
+        );
+    }
+
+    #[test]
+    fn a_push_is_read_from_its_output_only() {
+        // The command never carries the URL; some remotes print it.
+        assert_eq!(
+            names(
+                "git push -u origin HEAD",
+                "remote: Create a pull request by visiting:\n\
+                 remote:   https://github.com/dpep/inkling/pull/9\n"
+            ),
+            ["github.com/dpep/inkling#9"]
+        );
+        assert!(
+            names("git push -u origin HEAD", "").is_empty(),
+            "and nothing goes looking for one"
+        );
+    }
+
+    #[test]
+    fn the_branch_link_a_push_usually_prints_is_not_a_pull_request() {
+        // `/pull/new/<branch>` is an invitation to open one, not one that
+        // exists. Watching it would watch a number that never was.
+        assert!(
+            names(
+                "git push -u origin HEAD",
+                "remote:   https://github.com/dpep/inkling/pull/new/subscribe-push\n"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_jira_key_counts_only_where_it_was_an_argument() {
+        assert_eq!(
+            names("acli jira workitem view --key AI-123", ""),
+            ["AI-123"]
+        );
+        assert_eq!(names("acli jira workitem view AI-7", ""), ["AI-7"]);
+    }
+
+    #[test]
+    fn key_shaped_words_in_output_are_not_issues() {
+        // The reason output is never scanned for bare keys: plenty of things
+        // are shaped like one.
+        let noise = "UTF-8 SHA-256 CVE-2024 HTTP-2 AI-1";
+        assert!(names("acli jira workitem view --key AI-9", noise).contains(&"AI-9".to_string()));
+        assert_eq!(
+            names("acli jira workitem view --key AI-9", noise).len(),
+            1,
+            "and only the argument"
+        );
+    }
+
+    #[test]
+    fn a_browse_url_is_unambiguous_wherever_it_sits() {
+        assert_eq!(
+            names("open https://dpep.atlassian.net/browse/AI-42", ""),
+            ["AI-42"]
+        );
+    }
+
+    #[test]
+    fn what_matched_is_reported_so_the_log_can_say_why() {
+        let why: Vec<&str> = touched(
+            "gh pr checks 7 https://github.com/dpep/inkling/pull/7",
+            "",
+            &hosts(),
+        )
+        .into_iter()
+        .map(|(_, why)| why)
+        .collect();
+        assert_eq!(why, ["gh pr checks"]);
+    }
+
+    #[test]
+    fn one_reference_named_twice_is_watched_once() {
+        assert_eq!(
+            names(
+                "gh pr view https://github.com/dpep/inkling/pull/7",
+                "url:\thttps://github.com/dpep/inkling/pull/7\n"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_huge_output_is_not_read_to_the_end() {
+        // A megabyte of somebody's test output must not be the cost of every
+        // `git push`.
+        let mut output = "x".repeat(OUTPUT_LIMIT + 10);
+        output.push_str("https://github.com/dpep/inkling/pull/7");
+        assert!(names("git push", &output).is_empty());
     }
 }

@@ -160,7 +160,8 @@ In `settings.json`:
   "hooks": {
     "SessionStart":     [{ "hooks": [{ "type": "command", "command": "inkling hook session-start" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "inkling hook session-end" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "inkling hook prompt" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "inkling hook prompt" }] }],
+    "PostToolUse":      [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "inkling hook post-tool" }] }]
   }
 }
 ```
@@ -170,6 +171,31 @@ Each reads the hook payload on stdin and takes the session id from it.
 anything the push didn't deliver — which is the safety net, not the main
 path. A hook never fails a session: whatever goes wrong, it writes a line to
 the log and exits 0 saying nothing.
+
+### Watching what you just touched
+
+The fourth is optional, and it is the one that makes this disappear into the
+background: `post-tool` watches the pull request or issue a command was
+about, so you never run `inkling watch` at all.
+
+It is deliberately narrow, because the cost of being wrong is a session told
+about something nobody asked for. It reads `gh pr create|view|checks|ready|
+merge|edit|comment` and `git push`, takes references only from URLs — in the
+command or in its output — and takes a Jira key only where it was an
+argument to `acli jira workitem`. Never a key-shaped word in output, where
+`UTF-8`, `SHA-256` and `CVE-2024` all qualify. `gh pr list` is not read at
+all: it names everybody's.
+
+Cost, measured over 50 runs each: **0.2ms** over the process itself for a
+command that isn't a candidate, and **3ms** when it is and the store has to
+be written. The process itself is 5.5ms, which is what any command hook
+costs. Nothing here makes a network call — the first reading is left to the
+resident server's next tick — so a `git push` whose output carries no pull
+request URL watches nothing rather than going to look one up.
+
+Running the same command again refreshes the deadline and says nothing.
+Something already merged, closed or Done is dropped at that first reading
+without a word.
 
 The prompt hook is cheap in the common case: a local file read, with no
 network unless the last reading is older than 60s. When it is, one process

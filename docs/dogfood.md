@@ -6,6 +6,13 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- The auto-watch hook costs 0.2ms over the process on a command that isn't a
+  candidate, and 3ms when it is — against 5.5ms just to start the binary, 50
+  runs each. The process is the cost of a command hook; what inkling does
+  inside it isn't. Worth rechecking if the gate ever grows.
+- `gh pr merge` auto-watches a pull request that vanishes a tick later, when
+  the first reading finds it merged. Right, and it needed no code: a baseline
+  emits nothing and a finished standing drops its own watch.
 - `inkling subscribe` on its own never started the server. A session
   subscribes at SessionStart, before it has watched anything, so there was
   nothing to serve and nothing was spawned — and the first `watch` didn't

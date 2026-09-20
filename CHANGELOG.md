@@ -8,6 +8,14 @@
   and which check went red. Push and pull share one cursor, so a transition arrives once either
   way. Subscribing *attaches*: `unsubscribe` detaches the address and leaves your watches and your
   place alone, so `claude --resume` picks up the net change since you left.
+- **New: `inkling hook post-tool`** (optional, a `PostToolUse` hook on `Bash`) watches the pull
+  request or issue a command was about, so you never run `inkling watch` yourself. Deliberately
+  narrow: `gh pr create|view|checks|ready|merge|edit|comment` and `git push`, references taken only
+  from URLs, and a Jira key only where it was an argument to `acli jira workitem` — never a
+  key-shaped word in output, where `UTF-8` and `CVE-2024` qualify. It makes no network call, so a
+  push whose output carries no URL watches nothing rather than going to look; the first reading is
+  left to the server's next tick. Measured at 0.2ms over the process itself for a command that
+  isn't a candidate and 3ms when it is.
 - **New: `inkling hook <session-start|session-end|prompt>`**, which reads Claude Code's hook payload
   on stdin. Three one-line commands in `settings.json` and no shell that picks a session id out of
   JSON — see the README. A hook never fails a session: on any error it logs and exits 0 saying

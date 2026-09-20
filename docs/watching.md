@@ -44,10 +44,10 @@ Two more have since joined it, each one sentence long:
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
   deadline (`--ttl`, 24h), and a finished reference — merged, closed, Done —
   drops its watch after its last event. There is no reaper.
-- **The cursor is a sequence number.** `events --since <n>` returns everything
-  after `n`; the new cursor is the last `seq` printed, so there is no separate
-  field to keep in sync with the rows. `--subscriber <id>` keeps that number
-  here instead.
+- **The cursor is a stream and a place in it.** `events --since <owner>:<n>`
+  returns everything after `n` that is addressed to `<owner>`; `--json` puts
+  the token it leaves you at on every row, so there is nothing to keep in
+  sync. `--subscriber <id>` keeps that place here instead.
 
 ## Where the state lives
 
@@ -209,6 +209,41 @@ and a merge to get the debugging view back — and made two readers' tokens
 look interchangeable when they are not. A gap in your sequence numbers is
 honest: something happened that wasn't yours.
 
+## Watching what a session touched
+
+`inkling hook post-tool` registers a watch for the pull request or issue a
+Bash command was about, owned by that session. It is what makes ownership
+load-bearing rather than a precaution: with watches created automatically
+across several concurrent sessions, a global feed would put one session's CI
+result into another's turn every day.
+
+Three constraints shaped it, and all three are about running after *every*
+tool call:
+
+- **A cheap gate, before anything else.** A few substring scans over the
+  command. Measured over 50 runs: **0.2ms** above the process itself for a
+  command that isn't a candidate, **3ms** when it is and the store is
+  written, against a **5.5ms** floor for starting the binary at all. The
+  process is the cost; the hook is not.
+- **No network, ever.** The first reading is a GitHub round trip — ~0.5s —
+  which is not something to spend per tool call. Registration writes the
+  watch and stops; the server's next tick baselines it, since a watch never
+  read is due immediately. The visible consequence: a `git push` whose output
+  carries no pull request URL watches nothing rather than going to find one.
+  A gap, and the fix is a `--repo`-aware lookup somewhere that is allowed to
+  be slow.
+- **Narrow rather than clever.** References come from URLs, which are
+  unambiguous, and from Jira keys only where they were arguments to `acli`.
+  Bare `KEY-123` in output is not read: `UTF-8`, `SHA-256` and `CVE-2024` are
+  all issue keys by shape. `gh pr list` is excluded because it names
+  everybody's pull requests, not the caller's.
+
+An already-terminal reference is only discovered to be terminal at that first
+reading — and that path was already right: the baseline emits nothing, and a
+finished standing drops its own watch. So `gh pr merge` auto-watches
+something that quietly disappears a tick later, which is the correct amount
+of noise.
+
 ## Not built, and what would change that
 
 - **A global view of every reader's events.** There is deliberately no
@@ -218,6 +253,16 @@ honest: something happened that wasn't yours.
   `inkling logs -g transition` records every one with its reference, its
   sequence number and the size of its audience. If that turns out not to be
   enough when something goes wrong, the flag is one line.
+- **A pull request found by looking it up.** `git push` on a remote that
+  prints no URL, and `gh pr view 7 --repo owner/repo` with no URL anywhere,
+  both leave the hook with a number and a repo but no reference it is willing
+  to build. It could — `--repo owner/repo` plus a number is complete — but
+  `gh pr checks 7` in a repository with a tracked upstream is not, and
+  resolving it means asking. What would change this: the number of `git push`
+  lines in the log with no `watch registered automatically` beside them.
+- **Tools other than Bash.** An Edit that writes a PR number, an MCP call to
+  GitHub. Bash is where references appear today; the gate is one string
+  comparison, so a second tool is a small change when one earns it.
 - **An ack.** Everything push gives up follows from the socket not having
   one. If Claude Code ever reports that a message was accepted, a cursor
   could advance on *that* rather than on the write, and the cost above
