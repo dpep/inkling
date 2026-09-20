@@ -13,7 +13,9 @@ fixed, say where and leave the line.
   and was dropped at its first reading without a message. Good.
 - Pushing a commit to #7 produced `checks success → none` and `none → pending`
   in the session before the `pending → success` that mattered. Three turns of
-  attention for one fact. Open.
+  attention for one fact. Fixed in this PR: a reading with no rollup keeps the
+  rollup it had, so the push reads `success → pending` then `pending →
+  success`. The reasoning and what it costs are in docs/watching.md.
 - First push into a real session (#7). The session subscribed by hand, watched
   its own PR, and went idle; `inkling: github.com/dpep/inkling#7 checks pending
   → success` woke it. The log said `pushed seq=7 outcome="written"

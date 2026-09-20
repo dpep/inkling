@@ -41,6 +41,10 @@ Two more have since joined it, each one sentence long:
 - **Two axes move independently.** `open → approved` and
   `pending → failure` are two events from one poll, not one compound, so a
   consumer branching on "checks went red" doesn't have to parse a summary.
+- **A missing rollup is a gap in observation, not a standing.** A commit
+  pushed a second ago has no check suite yet, and neither does a repository
+  that runs no checks; one reading cannot tell them apart. So once a rollup
+  has been seen, a reading without one keeps the rollup it had. See below.
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
   deadline (`--ttl`, 24h), and a finished reference — merged, closed, Done —
   drops its watch after its last event. There is no reaper.
@@ -48,6 +52,45 @@ Two more have since joined it, each one sentence long:
   returns everything after `n` that is addressed to `<owner>`; `--json` puts
   the token it leaves you at on every row, so there is nothing to keep in
   sync. `--subscriber <id>` keeps that place here instead.
+
+## The no-rollup gap, and what carrying it over costs
+
+Dogfooded 2026-09-20: pushing a commit to #7 put `checks success → none` and
+then `checks none → pending` into a live session before the `pending →
+success` that was the news. Three turns of attention, two of which a reader
+can do nothing with.
+
+`checks: None` means two different things — this repository runs no checks,
+and this commit has no suite *yet* — and one reading cannot tell them apart.
+Reporting it made what arrived depend on whether a poll happened to land in
+the gap: catch it and you got three events, miss it and you got one. So a
+reading with no rollup, on a watch that has seen one, **keeps the rollup it
+had** (`domain::watch::carried_over`). The push above now reads `success →
+pending`, `pending → success`: exactly what a poller that never saw the gap
+would have said, which is the property worth having.
+
+What it costs, plainly:
+
+- **A rollup that disappears for good is never reported.** Deleting a
+  repository's last workflow while a watch is live leaves the feed saying
+  `success` forever. Nobody is waiting for that news and the watch expires
+  within a day.
+- **`success → pending` after a push is still a message.** A push *is* a
+  re-run, and the brief for `wait --until checks` is that a re-run is
+  legitimate news, so it stays. Telling a push-triggered run apart from a
+  manual one needs the head commit in `Standing`, which is a third axis to
+  keep and diff for one line of output.
+- **The asymmetry is deliberate.** `none → pending` and `none → failure` *are*
+  reported, because a watch registered before a pull request's first check
+  existed — the `post-tool` hook's common case — would otherwise be silent
+  about a suite that goes straight to red. A first rollup is a first
+  observation; a missing one is not an observation at all.
+
+`wait --until checks` is untouched: it judges the reading in front of it, and
+a repository with genuinely no checks still resolves `Precluded` rather than
+spinning for the whole timeout. Nothing lies either — `inkling watch` shows
+the rollup the feed is diffing against, which is the one the reader was last
+told about.
 
 ## Where the state lives
 

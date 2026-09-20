@@ -18,7 +18,7 @@
 use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
 use crate::domain::model::Reference;
-use crate::domain::watch::{Event, Sighting, Standing, transitions};
+use crate::domain::watch::{Event, Sighting, Standing, reading};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -303,7 +303,8 @@ impl Watches {
             // it moved — not looked up at read time, by when the watch may be
             // finished and its owners gone.
             let audience = watch.owners.clone();
-            for moved in transitions(watch.seen.as_ref().map(|s| &s.standing), sighting) {
+            let read = reading(watch.seen.as_ref().map(|s| &s.standing), sighting);
+            for moved in read.moved {
                 self.last_seq += 1;
                 tracing::info!(
                     reference = %reference,
@@ -326,12 +327,13 @@ impl Watches {
                     audience: audience.clone(),
                 });
             }
+            let finished = read.standing.is_finished();
             watch.seen = Some(Seen {
                 at: observed_at,
-                standing: sighting.standing.clone(),
+                standing: read.standing,
                 title: sighting.title.clone(),
             });
-            if sighting.standing.is_finished() {
+            if finished {
                 self.watches.remove(&key);
                 tracing::info!(reference = %reference, "watch finished");
             }
@@ -725,6 +727,36 @@ mod tests {
         assert_eq!(
             (events[0].from.as_str(), events[0].to.as_str()),
             ("failure", "success")
+        );
+    }
+
+    #[test]
+    fn a_push_costs_a_session_two_events_rather_than_four() {
+        // The dogfood finding, at the level a session felt it: pushing a commit
+        // put `checks success → none` and `none → pending` in the turn before
+        // the `pending → success` that was the news. What is left is what a
+        // poll that never saw the gap would have reported.
+        let mut watches = watching(State::Open);
+        watches.record(
+            &[(pr(3), seen_pull(State::Open, Some(CheckState::Success)))],
+            now(),
+        );
+
+        let moves: Vec<(String, String)> =
+            [None, Some(CheckState::Pending), Some(CheckState::Success)]
+                .into_iter()
+                .flat_map(|checks| {
+                    watches.record(&[(pr(3), seen_pull(State::Open, checks))], now())
+                })
+                .map(|event| (event.from, event.to))
+                .collect();
+
+        assert_eq!(
+            moves,
+            [
+                ("success".to_string(), "pending".to_string()),
+                ("pending".to_string(), "success".to_string())
+            ]
         );
     }
 

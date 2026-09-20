@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A push no longer costs you two useless events.** The head commit briefly has no check rollup,
+  and a reading without one now keeps the rollup it had instead of reporting `checks success → none`
+  and `none → pending` ahead of the `pending → success` that was the news. A first rollup is still
+  reported, so a pull request watched before its first check existed can't go red silently, and
+  `wait --until checks` still answers straight away in a repository that runs no checks.
 - **New: `inkling subscribe` / `inkling unsubscribe`.** A Claude Code session attaches its inbox,
   and a resident Inkling pushes each transition of something that session is watching into it the
   moment a poll finds it — one line starting `inkling:`, built only from the reference, what moved,
