@@ -9,8 +9,8 @@
 //! cursor that may also carry an address, and push and pull drain the same
 //! cursor:
 //!
-//! > Each transition is delivered to each subscriber once, by whichever of
-//! > push and pull reaches it first.
+//! > Each transition is delivered to each subscriber that was watching it
+//! > once, by whichever of push and pull reaches it first.
 //!
 //! What that costs is stated rather than hidden. The session socket sends no
 //! ack, so a write that succeeds means the bytes reached a live socket and
@@ -28,7 +28,7 @@ use crate::adapters::session_socket::{DeliverError, SessionAddress, Written};
 use crate::adapters::watches_json::Watches;
 use crate::domain::model::Reference;
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Axis, Event, since};
+use crate::domain::watch::{Axis, Event, addressed};
 use crate::ports::Clock;
 use crate::serve::{Pulse, Ticked, Work};
 use crate::watch::Poller;
@@ -135,10 +135,13 @@ pub fn round(sessions: &dyn Sessions, watches: &Watches, clock: &dyn Clock) -> V
         .attached()
         .into_iter()
         .map(|(subscriber, address, cursor)| {
-            let due = since(&watches.events, cursor);
+            // Addressed, not merely newer: a session hears about the things
+            // it is watching and nothing else, however many others are
+            // running on this machine.
+            let due = addressed(&watches.events, cursor, subscriber);
             match due.is_empty() {
                 true => probe(sessions, subscriber, address),
-                false => push(sessions, subscriber, address, due, clock),
+                false => push(sessions, subscriber, address, &due, clock),
             }
         })
         .collect()
@@ -148,7 +151,7 @@ fn push(
     sessions: &dyn Sessions,
     subscriber: &str,
     address: &SessionAddress,
-    due: &[Event],
+    due: &[&Event],
     clock: &dyn Clock,
 ) -> Outcome {
     let mut outcome = Outcome::for_subscriber(subscriber);
@@ -214,7 +217,10 @@ fn probe(sessions: &dyn Sessions, subscriber: &str, address: &SessionAddress) ->
 /// running should stay, so the two can never disagree — and neither answer
 /// needs a flag or a timer of its own.
 pub fn should_serve(watches: &Watches, now: DateTime<Utc>) -> bool {
-    !watches.attached().is_empty() && !watches.active(now).is_empty()
+    watches
+        .attached()
+        .into_iter()
+        .any(|(subscriber, _, _)| watches.has_live_watch(subscriber, now))
 }
 
 /// What inkling's resident server does each time round: look upstream, tell
@@ -371,13 +377,23 @@ mod tests {
         SessionAddress::new(path, Some(Secret::new("tok")))
     }
 
-    /// One watch, baselined open, with nothing yet to tell anyone.
-    fn watching() -> Watches {
+    fn forever() -> DateTime<Utc> {
+        "2099-01-01T00:00:00Z".parse().unwrap()
+    }
+
+    /// One watch, asked for by `owners` and baselined open, with nothing yet
+    /// to tell anyone.
+    fn watched_by(owners: &[&str]) -> Watches {
         let mut watches = Watches::default();
-        let forever: DateTime<Utc> = "2099-01-01T00:00:00Z".parse().unwrap();
-        watches.watch(&pr(3), forever, now());
+        for owner in owners {
+            watches.watch(&pr(3), owner, forever(), now());
+        }
         watches.record(&[(pr(3), sighting(State::Open, None))], now());
         watches
+    }
+
+    fn watching() -> Watches {
+        watched_by(&["s"])
     }
 
     fn moved(watches: &mut Watches, state: State) {
@@ -396,11 +412,12 @@ mod tests {
 
     #[test]
     fn each_attached_session_is_told_what_it_alone_has_not_been_told() {
-        let mut watches = watching();
+        let mut watches = watched_by(&["early"]);
         watches.attach("early", address("/tmp/a"), now());
         moved(&mut watches, State::Approved);
         // The second session arrives after the approval, so it starts at the
         // head and the merge is the only thing it is owed.
+        watches.watch(&pr(3), "late", forever(), now());
         watches.attach("late", address("/tmp/b"), now());
         moved(&mut watches, State::Merged);
 
@@ -547,7 +564,7 @@ mod tests {
     #[test]
     fn an_expired_watch_is_not_a_reason_to_keep_serving() {
         let mut watches = Watches::default();
-        watches.watch(&pr(3), now() - TimeDelta::minutes(1), now());
+        watches.watch(&pr(3), "s", now() - TimeDelta::minutes(1), now());
         watches.attach("s", address("/tmp/a"), now());
 
         assert!(!should_serve(&watches, now()));
@@ -618,8 +635,7 @@ mod tests {
     fn an_issue_reads_the_same_way_without_a_command() {
         let mut watches = Watches::default();
         let key = Reference::JiraIssue { key: "AI-1".into() };
-        let forever: DateTime<Utc> = "2099-01-01T00:00:00Z".parse().unwrap();
-        watches.watch(&key, forever, now());
+        watches.watch(&key, "s", forever(), now());
         let issue = |status: &str| Sighting {
             standing: Standing::Issue {
                 status: status.into(),

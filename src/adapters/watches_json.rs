@@ -22,7 +22,7 @@ use crate::domain::watch::{Event, Sighting, Standing, transitions};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -79,6 +79,13 @@ pub struct Watch {
     /// makes that reading silent.
     #[serde(default)]
     pub seen: Option<Seen>,
+    /// Which readers asked for this. Never empty in practice: every watch is
+    /// registered by somebody, a session or the terminal.
+    ///
+    /// Two sessions watching the same pull request is one watch and one poll,
+    /// and its transitions reach both.
+    #[serde(default)]
+    pub owners: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +112,19 @@ impl Pruned {
     }
 }
 
+/// What unwatching found, so the CLI can say it rather than guess.
+///
+/// Three answers because there are three truths: an owner withdrawing from
+/// something another session also watches is neither a removal nor a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unwatched {
+    Absent,
+    /// This owner stopped caring; another session still does, so one poll
+    /// still serves it.
+    StillWatched,
+    Removed,
+}
+
 /// A named cursor, which may also carry somewhere to push to.
 ///
 /// That sentence is the whole of push delivery. A subscriber is told each
@@ -124,27 +144,100 @@ pub struct Subscriber {
 }
 
 impl Watches {
-    /// Start watching, or extend a watch already running.
+    /// Start watching on `owner`'s behalf, or extend a watch already running.
     ///
     /// Re-watching keeps the baseline: resetting it would swallow every
     /// transition since the original subscription, which is exactly what the
     /// caller was asking not to miss.
-    pub fn watch(&mut self, reference: &Reference, deadline: DateTime<Utc>, now: DateTime<Utc>) {
-        let entry = self.watches.entry(reference.to_string());
-        entry
-            .and_modify(|watch| watch.deadline = deadline)
+    ///
+    /// The furthest deadline wins, so one session's two-hour interest can't
+    /// cut another session's day short. Registering interest also makes the
+    /// owner a reader, which is what gives it a stream to be told about.
+    pub fn watch(
+        &mut self,
+        reference: &Reference,
+        owner: &str,
+        deadline: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) {
+        self.meet(owner, now);
+        let entry = self
+            .watches
+            .entry(reference.to_string())
             .or_insert_with(|| Watch {
                 reference: reference.clone(),
                 since: now,
                 deadline,
                 seen: None,
+                owners: BTreeSet::new(),
             });
+        entry.deadline = entry.deadline.max(deadline);
+        entry.owners.insert(owner.to_string());
     }
 
-    /// Stop watching. Reports whether there was anything to stop, so the CLI
-    /// can say "not watching that" rather than claim a removal.
-    pub fn unwatch(&mut self, reference: &Reference) -> bool {
-        self.watches.remove(&reference.to_string()).is_some()
+    /// Withdraw `owner`'s interest, and remove the watch once nobody is left.
+    pub fn unwatch(&mut self, reference: &Reference, owner: &str) -> Unwatched {
+        let key = reference.to_string();
+        let Some(watch) = self.watches.get_mut(&key) else {
+            return Unwatched::Absent;
+        };
+        if !watch.owners.remove(owner) {
+            return Unwatched::Absent;
+        }
+        match watch.owners.is_empty() {
+            true => {
+                self.watches.remove(&key);
+                Unwatched::Removed
+            }
+            false => Unwatched::StillWatched,
+        }
+    }
+
+    /// Stop watching everything of `owner`'s. Reports how many watches the
+    /// caller stopped watching, not how many were removed.
+    pub fn unwatch_all(&mut self, owner: &str) -> usize {
+        let references: Vec<Reference> = self
+            .watches
+            .values()
+            .filter(|watch| watch.owners.contains(owner))
+            .map(|watch| watch.reference.clone())
+            .collect();
+        for reference in &references {
+            self.unwatch(reference, owner);
+        }
+        references.len()
+    }
+
+    /// Whether this reader exists at all.
+    ///
+    /// `--subscriber` creates one that doesn't — "keep my place" starting now
+    /// is the right answer for a session nobody has met. A `--since` token is
+    /// the opposite claim: it names a place in a stream, and a stream that has
+    /// been collected is an error rather than a fresh start.
+    pub fn knows(&self, owner: &str) -> bool {
+        self.subscribers.contains_key(owner)
+    }
+
+    /// Whether anything could still be pushed to this subscriber: a live
+    /// watch of its own.
+    pub fn has_live_watch(&self, subscriber: &str, now: DateTime<Utc>) -> bool {
+        self.watches
+            .values()
+            .any(|watch| watch.deadline > now && watch.owners.contains(subscriber))
+    }
+
+    /// The subscriber listening on this socket, if one is.
+    ///
+    /// How a watch registered from inside a session finds its owner without
+    /// being told: the session's Bash carries the socket in its environment,
+    /// and the subscriber attached to it is the session that will be pushed
+    /// to. That is the identity that matters, rather than whatever id the
+    /// caller's own process thinks it has.
+    pub fn subscriber_at(&self, socket: &Path) -> Option<&str> {
+        self.attached()
+            .into_iter()
+            .find(|(_, address, _)| address.path() == socket)
+            .map(|(subscriber, _, _)| subscriber)
     }
 
     /// What is still worth asking about.
@@ -206,6 +299,10 @@ impl Watches {
             if watch.seen.is_none() {
                 tracing::info!(reference = %reference, "watch baselined");
             }
+            // Who is told is decided here, once, from who was watching when
+            // it moved — not looked up at read time, by when the watch may be
+            // finished and its owners gone.
+            let audience = watch.owners.clone();
             for moved in transitions(watch.seen.as_ref().map(|s| &s.standing), sighting) {
                 self.last_seq += 1;
                 tracing::info!(
@@ -214,6 +311,7 @@ impl Watches {
                     from = moved.from,
                     to = moved.to,
                     seq = self.last_seq,
+                    audience = audience.len(),
                     "transition"
                 );
                 fresh.push(Event {
@@ -225,6 +323,7 @@ impl Watches {
                     to: moved.to,
                     title: sighting.title.clone(),
                     detail: moved.detail,
+                    audience: audience.clone(),
                 });
             }
             watch.seen = Some(Seen {
@@ -257,7 +356,10 @@ impl Watches {
         let head = self.last_seq;
         let cursor = self.meet(subscriber, now).cursor;
 
-        let due = crate::domain::watch::since(&self.events, cursor).to_vec();
+        let due: Vec<Event> = crate::domain::watch::addressed(&self.events, cursor, subscriber)
+            .into_iter()
+            .cloned()
+            .collect();
         if let Some(entry) = self.subscribers.get_mut(subscriber) {
             entry.cursor = head;
         }
@@ -547,18 +649,24 @@ mod tests {
         }
     }
 
-    /// A store with one watch already baselined at `state`.
-    fn watching(state: State) -> Watches {
+    /// A store with one watch, asked for by `owners`, baselined at `state`.
+    fn watched_by(owners: &[&str], state: State) -> Watches {
         let mut watches = Watches::default();
-        watches.watch(&pr(3), forever(), now());
+        for owner in owners {
+            watches.watch(&pr(3), owner, forever(), now());
+        }
         watches.record(&[(pr(3), seen_pull(state, None))], now());
         watches
+    }
+
+    fn watching(state: State) -> Watches {
+        watched_by(&["s-1"], state)
     }
 
     #[test]
     fn the_first_reading_baselines_without_an_event() {
         let mut watches = Watches::default();
-        watches.watch(&pr(3), forever(), now());
+        watches.watch(&pr(3), "s-1", forever(), now());
 
         let events = watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
         assert!(events.is_empty(), "a baseline is not news");
@@ -613,25 +721,29 @@ mod tests {
     }
 
     #[test]
-    fn re_watching_keeps_the_baseline_and_moves_the_deadline() {
+    fn re_watching_keeps_the_baseline_and_never_shortens_the_deadline() {
         // Otherwise "make sure I'm still watching this" would quietly swallow
-        // every transition since the original subscription.
-        let mut watches = watching(State::Open);
-        let later = at("2026-09-21T12:00:00Z");
-        watches.watch(&pr(3), later, now());
+        // every transition since the original subscription — and a second
+        // reader's shorter interest would cut the first reader's day short.
+        let long = at("2026-09-21T12:00:00Z");
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "a", long, now());
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
 
+        watches.watch(&pr(3), "b", at("2026-09-20T13:00:00Z"), now());
         let watch = &watches.watches["github.com/dpep/inkling#3"];
-        assert_eq!(watch.deadline, later);
+        assert_eq!(watch.deadline, long, "the furthest deadline wins");
         assert!(watch.seen.is_some(), "still baselined at open");
 
         let events = watches.record(&[(pr(3), seen_pull(State::Merged, None))], now());
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 1, "one poll, one event");
+        assert_eq!(events[0].audience.len(), 2, "addressed to both readers");
     }
 
     #[test]
     fn an_expired_watch_stops_being_polled_and_is_collected() {
         let mut watches = Watches::default();
-        watches.watch(&pr(3), at("2026-09-20T11:59:00Z"), now());
+        watches.watch(&pr(3), "s-1", at("2026-09-20T11:59:00Z"), now());
         assert!(watches.active(now()).is_empty(), "past its deadline");
 
         watches.collect_garbage(now(), RETENTION);
@@ -663,7 +775,7 @@ mod tests {
     fn a_subscriber_is_told_each_transition_exactly_once() {
         // The contract the hook rests on: every prompt runs this, and a
         // transition must show up in exactly one of them.
-        let mut watches = watching(State::Open);
+        let mut watches = watched_by(&["session-a"], State::Open);
         watches.take("session-a", now());
         watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
 
@@ -673,28 +785,60 @@ mod tests {
     }
 
     #[test]
-    fn a_new_subscriber_starts_at_the_head_rather_than_the_beginning() {
-        // A fresh session must not inherit transitions another session has
-        // already acted on. Same rule as a watch's baseline, one level up.
-        let mut watches = watching(State::Open);
+    fn a_reader_hears_nothing_from_before_it_asked() {
+        // Two rules doing one job: a reader meets the log at its head, and is
+        // only ever the audience for what it asked about. Neither on its own
+        // would keep one session's news out of another's.
+        let mut watches = watched_by(&["session-a"], State::Open);
         watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
 
         assert!(
             watches.take("session-b", now()).is_empty(),
             "history belongs to whoever was there for it"
         );
-        watches.watch(&pr(3), forever(), now());
+        watches.watch(&pr(3), "session-b", forever(), now());
         watches.record(&[(pr(3), seen_pull(State::Merged, None))], now());
+
         assert_eq!(
             watches.take("session-b", now()).len(),
             1,
             "but the next one is its own"
         );
+        assert_eq!(
+            watches.take("session-a", now()).len(),
+            2,
+            "and reading b's stream never consumed a's"
+        );
     }
 
     #[test]
-    fn two_subscribers_each_get_their_own_copy() {
-        let mut watches = watching(State::Open);
+    fn unwatching_stops_one_reader_and_leaves_the_other() {
+        let mut watches = watched_by(&["a", "b"], State::Open);
+        assert_eq!(watches.unwatch(&pr(3), "a"), Unwatched::StillWatched);
+        assert_eq!(
+            watches.active(now()).len(),
+            1,
+            "one poll still serves whoever is left"
+        );
+
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
+        assert!(watches.take("a", now()).is_empty(), "a stopped asking");
+        assert_eq!(watches.take("b", now()).len(), 1);
+
+        assert_eq!(watches.unwatch(&pr(3), "b"), Unwatched::Removed);
+        assert!(watches.active(now()).is_empty());
+        assert_eq!(
+            watches.unwatch(&pr(3), "b"),
+            Unwatched::Absent,
+            "and again says so"
+        );
+    }
+
+    #[test]
+    fn two_readers_watching_one_reference_each_hear_it_once() {
+        // One watch, one poll, two streams: the reason a watch keeps a set of
+        // owners rather than one.
+        let mut watches = watched_by(&["a", "b"], State::Open);
         watches.take("a", now());
         watches.take("b", now());
         watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
@@ -727,7 +871,7 @@ mod tests {
     #[test]
     fn a_watch_is_due_until_it_has_been_read_and_again_once_the_reading_ages() {
         let mut watches = Watches::default();
-        watches.watch(&pr(3), forever(), now());
+        watches.watch(&pr(3), "s-1", forever(), now());
         assert!(watches.due(now(), TimeDelta::seconds(60)), "never read");
 
         watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
@@ -743,6 +887,7 @@ mod tests {
         let mut watches = Watches::default();
         watches.watch(
             &pr(3),
+            "s-1",
             at("2026-09-20T11:00:00Z"),
             at("2026-09-19T11:00:00Z"),
         );
@@ -751,7 +896,7 @@ mod tests {
 
     #[test]
     fn old_events_age_out_without_taking_their_readers_with_them() {
-        let mut watches = watching(State::Open);
+        let mut watches = watched_by(&["quiet"], State::Open);
         watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
         watches.take("quiet", now());
 
@@ -895,7 +1040,7 @@ mod tests {
     #[test]
     fn an_issue_reports_its_status_moving() {
         let mut watches = Watches::default();
-        watches.watch(&issue("AI-1"), forever(), now());
+        watches.watch(&issue("AI-1"), "s-1", forever(), now());
         watches.record(
             &[(issue("AI-1"), seen_issue("To Do", Category::New))],
             now(),
@@ -936,7 +1081,7 @@ mod tests {
         let store = WatchStore::new(scratch("round-trip"));
         store
             .update(now(), |watches| {
-                watches.watch(&pr(3), forever(), now());
+                watches.watch(&pr(3), "s-1", forever(), now());
                 watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
                 watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
             })
@@ -964,7 +1109,7 @@ mod tests {
         let store = WatchStore::new(scratch("exactly-once"));
         store
             .update(now(), |watches| {
-                watches.watch(&pr(3), forever(), now());
+                watches.watch(&pr(3), "hook", forever(), now());
                 watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
                 watches.take("hook", now());
                 watches.record(&[(pr(3), seen_pull(State::Merged, None))], now());
@@ -984,7 +1129,7 @@ mod tests {
         let store = WatchStore::new(&path);
 
         store
-            .update(now(), |w| w.watch(&pr(3), forever(), now()))
+            .update(now(), |w| w.watch(&pr(3), "s-1", forever(), now()))
             .unwrap();
 
         assert_eq!(store.read().watches.len(), 1, "it carried on");

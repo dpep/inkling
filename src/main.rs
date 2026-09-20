@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
 use inkling::adapters::store_json::{JsonStore, Store};
+use inkling::adapters::watches_json::Unwatched;
 use inkling::app::{Report, Run};
 use inkling::config::Config;
 use inkling::config_edit;
@@ -142,19 +143,19 @@ enum Command {
     /// Print what has changed since last time, and nothing when nothing has.
     ///
     /// Each event is a transition — which reference, from what to what, and
-    /// when — never a snapshot. Events carry a monotonic `seq`, so the cursor
-    /// to pass to `--since` next time is the last one printed.
+    /// when — never a snapshot.
     ///
-    /// Built for a UserPromptSubmit hook: `--subscriber <id>` keeps the
-    /// cursor here, for a caller with nowhere to put one, and delivers each
-    /// transition to each subscriber once. A subscriber seen for the first
-    /// time starts from now rather than inheriting somebody else's history.
+    /// Every reader has its own stream: you are told about the things you are
+    /// watching, and nothing else. `--subscriber <id>` keeps your place here,
+    /// for a caller with nowhere to put one; `--since <cursor>` resumes from
+    /// a cursor you kept, which `--json` prints on every row. With neither,
+    /// the reader is the session you are in, or the terminal you are at.
     ///
     /// Exits 0 whether or not anything had changed.
     Events {
-        /// Only what is newer than this cursor.
-        #[arg(long, conflicts_with = "subscriber")]
-        since: Option<u64>,
+        /// Resume from a cursor a previous run printed, e.g. `cli:7`.
+        #[arg(long, conflicts_with = "subscriber", value_parser = parse_cursor)]
+        since: Option<inkling::domain::watch::Cursor>,
         /// A named cursor Inkling keeps, e.g. a session id.
         #[arg(long)]
         subscriber: Option<String>,
@@ -508,6 +509,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let watches = watch_store(&cli.common);
             let clock = SystemClock;
             let mut refused = Vec::new();
+            let owner = reader(None, &watches.read());
 
             if !targets.is_empty() {
                 let snapshot = store.load().map_err(|e| e.to_string())?;
@@ -526,8 +528,13 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 watches
                     .update(clock.now(), |file| {
                         for reference in &references {
-                            file.watch(reference, deadline, clock.now());
-                            tracing::info!(%reference, deadline = stamp(deadline), "watch registered");
+                            file.watch(reference, &owner, deadline, clock.now());
+                            tracing::info!(
+                                %reference,
+                                owner,
+                                deadline = stamp(deadline),
+                                "watch registered"
+                            );
                         }
                     })
                     .map_err(|e| e.to_string())?;
@@ -547,7 +554,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 }
             }
 
-            watch_out(&watches.read(), clock.now(), *json)?;
+            watch_out(&watches.read(), &owner, clock.now(), *json)?;
             // The good references are watched either way; the exit code is
             // where a script learns that one of its arguments was not.
             Ok(match refused.is_empty() {
@@ -561,10 +568,11 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             let watches = watch_store(&cli.common);
             let clock = SystemClock;
+            let owner = reader(None, &watches.read());
 
             if *all {
                 let dropped = watches
-                    .update(clock.now(), |file| std::mem::take(&mut file.watches).len())
+                    .update(clock.now(), |file| file.unwatch_all(&owner))
                     .map_err(|e| e.to_string())?;
                 println!("stopped watching {dropped}");
                 return Ok(0);
@@ -579,18 +587,25 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 .update(clock.now(), |file| {
                     references
                         .iter()
-                        .map(|reference| (reference.clone(), file.unwatch(reference)))
+                        .map(|reference| (reference.clone(), file.unwatch(reference, &owner)))
                         .collect::<Vec<_>>()
                 })
                 .map_err(|e| e.to_string())?;
 
-            for (reference, was_watched) in removed {
-                match was_watched {
-                    true => {
-                        tracing::info!(%reference, "watch removed");
+            for (reference, outcome) in removed {
+                match outcome {
+                    Unwatched::Removed => {
+                        tracing::info!(%reference, owner, "watch removed");
                         println!("stopped watching {reference}");
                     }
-                    false => println!("{reference}: not being watched"),
+                    // Somebody else asked for it too, and one poll serves
+                    // both — so saying "stopped watching" without the caveat
+                    // would misdescribe what is still on the list.
+                    Unwatched::StillWatched => {
+                        tracing::info!(%reference, owner, "watch released");
+                        println!("stopped watching {reference} (another reader still is)");
+                    }
+                    Unwatched::Absent => println!("{reference}: you aren't watching that"),
                 }
             }
             Ok(match refused.is_empty() {
@@ -619,17 +634,37 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 }
             }
 
-            let events = match subscriber {
-                Some(id) => watches
-                    .update(clock.now(), |file| file.take(id, clock.now()))
-                    .map_err(|e| e.to_string())?,
-                None => {
+            // Two ways to name a reader and a place in its stream: a cursor
+            // the caller kept, or one inkling keeps for it. Neither is a way
+            // to read somebody else's.
+            let (owner, events) = match since {
+                Some(cursor) => {
                     let file = watches.read();
-                    inkling::domain::watch::since(&file.events, since.unwrap_or(0)).to_vec()
+                    if !file.knows(&cursor.owner) {
+                        return Err(format!(
+                            "{}: no such reader — its cursor was collected after \
+                             {} days of silence, so start again with --subscriber",
+                            cursor.owner,
+                            inkling::adapters::watches_json::SUBSCRIBER_RETENTION.num_days(),
+                        ));
+                    }
+                    let due =
+                        inkling::domain::watch::addressed(&file.events, cursor.seq, &cursor.owner)
+                            .into_iter()
+                            .cloned()
+                            .collect();
+                    (cursor.owner.clone(), due)
+                }
+                None => {
+                    let owner = reader(subscriber.as_deref(), &watches.read());
+                    let due = watches
+                        .update(clock.now(), |file| file.take(&owner, clock.now()))
+                        .map_err(|e| e.to_string())?;
+                    (owner, due)
                 }
             };
 
-            events_out(&events, *json, *ndjson)?;
+            events_out(&owner, &events, *json, *ndjson)?;
             Ok(0)
         }
         Command::Wait {
@@ -1056,6 +1091,43 @@ fn classify(
     Ok((channels, force))
 }
 
+/// What Claude Code exports to a session's hooks and its Bash commands.
+/// Verified on 2.1.278; the messaging pair appears only in the CLI's debug
+/// log, so treat both as unstable.
+const SOCKET_ENV: &str = "CLAUDE_CODE_MESSAGING_SOCKET";
+const SESSION_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+
+/// The reader a person at a terminal is. Every watch has an owner and every
+/// read names one, so there is one rule rather than an owned path and an
+/// unowned one.
+const TERMINAL: &str = "cli";
+
+/// Which reader this invocation is.
+///
+/// A session's Bash carries the messaging socket in its environment, and the
+/// subscriber attached to that socket is the session that will actually be
+/// pushed to — which is the identity that matters, rather than whatever id
+/// the calling process holds. (A subagent's Bash has its own session id and
+/// its parent's socket.) Failing that, the session id Claude Code exports.
+/// Failing that, the person at the terminal.
+fn reader(explicit: Option<&str>, watches: &inkling::adapters::watches_json::Watches) -> String {
+    if let Some(id) = explicit {
+        return id.to_string();
+    }
+    if let Some(socket) = std::env::var_os(SOCKET_ENV)
+        && let Some(subscriber) = watches.subscriber_at(std::path::Path::new(&socket))
+    {
+        return subscriber.to_string();
+    }
+    std::env::var(SESSION_ENV).unwrap_or_else(|_| TERMINAL.to_string())
+}
+
+/// clap wants an owned error; `Cursor`'s own is already one.
+fn parse_cursor(arg: &str) -> Result<inkling::domain::watch::Cursor, String> {
+    arg.parse()
+        .map_err(|e: inkling::domain::watch::UnknownCursor| e.to_string())
+}
+
 /// A timestamp for a log line: RFC 3339, whole seconds. Nothing inkling
 /// schedules is meaningful below one.
 fn stamp(t: DateTime<Utc>) -> String {
@@ -1249,6 +1321,7 @@ fn finished_already(
 
 fn watch_out(
     watches: &inkling::adapters::watches_json::Watches,
+    owner: &str,
     now: DateTime<Utc>,
     json: bool,
 ) -> Result<(), String> {
@@ -1269,6 +1342,8 @@ fn watch_out(
                     "since": watch.since,
                     "deadline": watch.deadline,
                     "title": watch.seen.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
+                    "owners": watch.owners,
+                    "mine": watch.owners.contains(owner),
                 })
             })
             .collect();
@@ -1304,9 +1379,16 @@ fn watch_out(
         .saturating_sub(2 + name_width + 2 + standing_width + 2 + 8 + 2)
         .max(24);
 
-    for (name, state, left, title) in &rows {
+    // The list is everything inkling is watching, for everyone; a mark says
+    // which of them are yours. One character rather than a column, because
+    // the answer is a yes or a no.
+    for (watch, (name, state, left, title)) in live.iter().zip(&rows) {
+        let mine = match watch.owners.contains(owner) {
+            true => "*",
+            false => " ",
+        };
         let title = ellipsize(title, budget);
-        println!("  {name:<name_width$}  {state:<standing_width$}  {left:<8}  {title}");
+        println!("{mine} {name:<name_width$}  {state:<standing_width$}  {left:<8}  {title}");
     }
     Ok(())
 }
@@ -1322,6 +1404,7 @@ fn widths(rows: &[(String, String, String, String)]) -> (usize, usize) {
 /// Nothing changed, nothing printed — in every format. A hook injects this
 /// into a prompt, so silence has to be the cheap and literal default.
 fn events_out(
+    owner: &str,
     events: &[inkling::domain::watch::Event],
     json: bool,
     ndjson: bool,
@@ -1336,6 +1419,7 @@ fn events_out(
             .map(|event| {
                 serde_json::json!({
                     "seq": event.seq,
+                    "cursor": inkling::domain::watch::Cursor::new(owner, event.seq).to_string(),
                     "at": event.at,
                     "reference": event.reference.to_string(),
                     "axis": event.axis.as_str(),
@@ -1346,8 +1430,10 @@ fn events_out(
                 })
             })
             .collect();
-        // No cursor field: the last event's `seq` is the cursor, so there is
-        // nothing to keep in sync with the rows.
+        // Every row carries the cursor it leaves you at, so a self-managing
+        // caller resumes from the last one it handled without building a
+        // token itself — and a partly-processed batch resumes correctly.
+        // Text output doesn't: it goes into a prompt, where a token is noise.
         for line in match ndjson {
             true => rows
                 .iter()
