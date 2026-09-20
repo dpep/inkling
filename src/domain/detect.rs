@@ -42,6 +42,9 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
     if let Some(reference) = parse_short_ref(trimmed, hosts) {
         return Ok(Target::Reference(reference));
     }
+    if let Some(reference) = parse_jira(trimmed) {
+        return Ok(Target::Reference(reference));
+    }
 
     if let Some(partial) = parse_partial(trimmed) {
         return Ok(partial);
@@ -53,7 +56,42 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
              https://<host>/<owner>/<repo>/pull/<number>"
         ));
     }
+    if looks_like_a_jira_issue(trimmed) {
+        return Err(format!(
+            "{trimmed}: looks like a Jira issue but isn't one — expected a key \
+             like AI-123, or an .atlassian.net/browse/ URL"
+        ));
+    }
     Ok(Target::Channel(trimmed.to_string()))
+}
+
+/// `AI-123`, or the browse URL Jira puts in the address bar.
+///
+/// Uppercase only, which is how Jira itself writes keys — accepting `eng-1`
+/// would swallow channel handles of the same shape.
+fn parse_jira(arg: &str) -> Option<Reference> {
+    let key = match arg.split_once("/browse/") {
+        Some((site, tail)) if site.to_lowercase().contains("atlassian.net") => {
+            tail.split(['/', '?', '#']).next()?
+        }
+        Some(_) => return None,
+        None => arg,
+    };
+    is_issue_key(key).then(|| Reference::JiraIssue {
+        key: key.to_string(),
+    })
+}
+
+fn is_issue_key(key: &str) -> bool {
+    let Some((project, number)) = key.split_once('-') else {
+        return false;
+    };
+    project.starts_with(|c: char| c.is_ascii_uppercase())
+        && project
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
 }
 
 /// `github.com/owner/repo#12` — the form Inkling prints, accepted back.
@@ -108,6 +146,11 @@ fn parse_partial(arg: &str) -> Option<Target> {
 fn looks_like_a_pull_request(arg: &str) -> bool {
     let lower = arg.to_lowercase();
     lower.contains("/pull/") || lower.contains("github.")
+}
+
+fn looks_like_a_jira_issue(arg: &str) -> bool {
+    let lower = arg.to_lowercase();
+    lower.contains("/browse/") || lower.contains("atlassian.net")
 }
 
 /// Extract every distinct reference in `text`, in the order they appear.
@@ -363,6 +406,54 @@ mod tests {
             target("C012XYZ6789").unwrap(),
             Target::Channel("C012XYZ6789".into())
         );
+    }
+
+    fn issue(key: &str) -> Target {
+        Target::Reference(Reference::JiraIssue {
+            key: key.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_jira_key_is_a_reference() {
+        assert_eq!(target("AI-123").unwrap(), issue("AI-123"));
+        assert_eq!(target("ABC2-7").unwrap(), issue("ABC2-7"));
+    }
+
+    #[test]
+    fn a_browse_url_reduces_to_its_key() {
+        for url in [
+            "https://example.atlassian.net/browse/AI-1",
+            "example.atlassian.net/browse/AI-1",
+            "https://example.atlassian.net/browse/AI-1?focusedCommentId=9",
+            "https://example.atlassian.net/browse/AI-1#comment",
+        ] {
+            assert_eq!(target(url).unwrap(), issue("AI-1"), "{url}");
+        }
+    }
+
+    #[test]
+    fn lowercase_lookalikes_stay_channels() {
+        // Jira writes keys uppercase; accepting `eng-1` would swallow every
+        // channel handle of that shape.
+        assert_eq!(target("eng-1").unwrap(), Target::Channel("eng-1".into()));
+        assert_eq!(target("AI").unwrap(), Target::Channel("AI".into()));
+        assert_eq!(target("AI-").unwrap(), Target::Channel("AI-".into()));
+    }
+
+    #[test]
+    fn a_malformed_jira_url_errors_rather_than_becoming_a_channel() {
+        assert!(target("https://example.atlassian.net/browse/nonsense").is_err());
+        assert!(target("https://example.atlassian.net/jira/software").is_err());
+    }
+
+    #[test]
+    fn jira_keys_are_not_detected_in_slack_prose() {
+        // Watching a ticket is opt-in. Left in `detect`, every "AI-123" in a
+        // message would become a tracked record the reaction loop must map to
+        // an emoji — a product decision nobody made.
+        assert!(detected("AI-123 is next").is_empty());
+        assert!(detected("https://example.atlassian.net/browse/AI-1").is_empty());
     }
 
     #[test]

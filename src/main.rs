@@ -751,12 +751,17 @@ fn resolve(
         .values()
         .flat_map(|t| t.references.iter())
         .filter(|reference| {
+            // A partial reference is always a pull request; a Jira key can
+            // only be given in full, so there is nothing to fill in.
             let GitHubPullRequest {
                 owner: o,
                 repo: r,
                 number: n,
                 ..
-            } = reference;
+            } = reference
+            else {
+                return false;
+            };
             *n == number
                 && repo
                     .as_ref()
@@ -809,10 +814,21 @@ fn wait_targets(
     snapshot: &inkling::adapters::store_json::Snapshot,
 ) -> Result<Vec<inkling::domain::model::Reference>, String> {
     let (channels, references) = classify(targets, hosts, snapshot)?;
-    match channels.first() {
-        Some(channel) => Err(format!("{channel}: wait takes pull requests, not channels")),
-        None => Ok(references),
+    if let Some(channel) = channels.first() {
+        return Err(format!("{channel}: wait takes pull requests, not channels"));
     }
+    // A Jira issue has no merge ladder to threshold against, so `--until`
+    // could say nothing about one. Watching it is the answer that exists.
+    if let Some(issue) = references
+        .iter()
+        .find(|r| matches!(r, inkling::domain::model::Reference::JiraIssue { .. }))
+    {
+        return Err(format!(
+            "{issue}: wait takes pull requests — for a Jira issue use \
+             `inkling watch {issue}` and `inkling events`"
+        ));
+    }
+    Ok(references)
 }
 
 fn classify(

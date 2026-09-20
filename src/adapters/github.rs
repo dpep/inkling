@@ -55,11 +55,19 @@ impl GitHubProvider {
 
 impl StatusProvider for GitHubProvider {
     fn lookup(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError> {
-        if references.is_empty() {
+        // Answers only about pull requests. Dropping the rest rather than
+        // reporting them missing is the honest shape: this provider has no
+        // opinion on a Jira key, and the watch loop routes those elsewhere.
+        let pulls: Vec<Reference> = references
+            .iter()
+            .filter(|r| matches!(r, Reference::GitHubPullRequest { .. }))
+            .cloned()
+            .collect();
+        if pulls.is_empty() {
             return Ok(Vec::new());
         }
-        let response = self.post(&build_query(references))?;
-        Ok(interpret(references, &response))
+        let response = self.post(&build_query(&pulls))?;
+        Ok(interpret(&pulls, &response))
     }
 }
 
@@ -68,12 +76,16 @@ impl StatusProvider for GitHubProvider {
 fn build_query(references: &[Reference]) -> String {
     let mut query = String::from("query {");
     for (i, reference) in references.iter().enumerate() {
+        // The alias carries the index, so skipping one can't shift the rest.
         let Reference::GitHubPullRequest {
             owner,
             repo,
             number,
             ..
-        } = reference;
+        } = reference
+        else {
+            continue;
+        };
         query.push_str(&format!(
             r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}"#,
             quote(owner),
