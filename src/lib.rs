@@ -14,3 +14,4 @@ pub mod secret;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod wait;
+pub mod watch;

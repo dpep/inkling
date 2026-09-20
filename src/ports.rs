@@ -6,6 +6,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::wait::CheckState;
+use crate::domain::watch::Category;
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -117,6 +118,9 @@ pub struct RefStatus {
     /// tracked snapshot: a finished suite can go back to pending on a push,
     /// and the snapshot's terminality means "stop polling forever".
     pub checks: Option<CheckState>,
+    /// The name of a check that is red, when one is. "Checks went red" is
+    /// most of a page of investigation; "checks went red: tidy" is a command.
+    pub failing: Option<String>,
 }
 
 impl RefStatus {
@@ -126,6 +130,7 @@ impl RefStatus {
             author: String::new(),
             title: String::new(),
             checks: None,
+            failing: None,
         }
     }
 }
@@ -138,6 +143,31 @@ pub trait StatusProvider {
     /// Batched lookup.
     fn lookup(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError>;
 }
+
+/// What an issue tracker knows about one issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueStatus {
+    /// The status as the project spells it — "In Review", not a category.
+    /// This is what an event is about, so it isn't normalized away.
+    pub name: String,
+    pub category: Category,
+    /// Display only, so an event reads without a second lookup.
+    pub summary: String,
+}
+
+/// Issues, kept separate from `StatusProvider` rather than generalized with
+/// it. The two upstreams answer different questions and their shapes have
+/// nothing in common but the word "status" — one ordered ladder plus a CI
+/// rollup, one project-defined name plus a category. A common interface here
+/// would be a union with a discriminant, which is what `Standing` already is,
+/// one layer up where it earns itself. A third tracker is when this becomes a
+/// registry.
+pub trait IssueProvider {
+    fn read(&self, keys: &[String]) -> Result<Vec<IssueLookup>, ProviderError>;
+}
+
+/// One issue's outcome, in-band like `Lookup`.
+pub type IssueLookup = (String, Result<IssueStatus, RefError>);
 
 /// Where a wait gets its readings.
 ///

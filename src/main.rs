@@ -41,6 +41,9 @@ struct Common {
     /// Where waiters coordinate. Defaults to $XDG_STATE_HOME/inkling/waits.json
     #[arg(long, global = true)]
     waits: Option<PathBuf>,
+    /// Watches and their events. Defaults to $XDG_STATE_HOME/inkling/watches.json
+    #[arg(long, global = true)]
+    watches: Option<PathBuf>,
     /// More detail. -v adds per-message decisions, -vv adds message text.
     #[arg(long, short, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -107,6 +110,64 @@ enum Command {
         /// Emit the outcome as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Watch things, and learn later what changed.
+    ///
+    /// Registers interest and returns. Nothing blocks and nothing runs in the
+    /// background: `inkling events` reads what has moved since it last
+    /// looked, polling first if its readings have gone stale.
+    ///
+    /// With no arguments, lists what is being watched. Every watch expires at
+    /// its `--ttl`, and that expiry is the only cleanup there is.
+    Watch {
+        /// Pull requests — a URL, `github.com/owner/repo#12`, or a bare
+        /// number matching something tracked — and Jira issues, as a key like
+        /// `AI-123` or a browse URL.
+        targets: Vec<String>,
+        /// Stop watching after this long, e.g. 2h, 24h, 7d.
+        #[arg(long, default_value = "24h", value_parser = humantime::parse_duration)]
+        ttl: std::time::Duration,
+        /// Emit the watch list as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop watching.
+    Unwatch {
+        /// What to stop watching, in any form `watch` accepts.
+        targets: Vec<String>,
+        /// Stop watching everything.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print what has changed since last time, and nothing when nothing has.
+    ///
+    /// Each event is a transition — which reference, from what to what, and
+    /// when — never a snapshot. Events carry a monotonic `seq`, so the cursor
+    /// to pass to `--since` next time is the last one printed.
+    ///
+    /// Built for a UserPromptSubmit hook: `--subscriber <id>` keeps the
+    /// cursor here, for a caller with nowhere to put one, and delivers each
+    /// transition to each subscriber once. A subscriber seen for the first
+    /// time starts from now rather than inheriting somebody else's history.
+    ///
+    /// Exits 0 whether or not anything had changed.
+    Events {
+        /// Only what is newer than this cursor.
+        #[arg(long, conflicts_with = "subscriber")]
+        since: Option<u64>,
+        /// A named cursor Inkling keeps, e.g. a session id.
+        #[arg(long)]
+        subscriber: Option<String>,
+        /// Look upstream first when the last reading is older than this.
+        /// Fresh readings cost nothing but a local file read.
+        #[arg(long, default_value = "60s", value_parser = humantime::parse_duration)]
+        refresh: std::time::Duration,
+        /// Emit the events as a JSON array.
+        #[arg(long)]
+        json: bool,
+        /// Emit one JSON object per line.
+        #[arg(long, conflicts_with = "json")]
+        ndjson: bool,
     },
     /// Show the search window, tracked records, and credential status.
     Status,
@@ -427,8 +488,124 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("  live      {live}");
             println!("  done      {}", snapshot.tracked.len() - live);
 
+            let watched = watch_store(&cli.common).read();
+            let live = watched
+                .watches
+                .values()
+                .filter(|w| w.deadline > now)
+                .count();
+            println!();
+            println!("watching    {live}");
+            println!("  events    {} in the last day", watched.events.len());
+
             println!();
             println!("github      {}", credentials(&config));
+            Ok(0)
+        }
+        Command::Watch { targets, ttl, json } => {
+            let watches = watch_store(&cli.common);
+            let clock = SystemClock;
+
+            if !targets.is_empty() {
+                let snapshot = store.load().map_err(|e| e.to_string())?;
+                let references = watch_targets(targets, &config.github.hosts, &snapshot)?;
+                let deadline = clock.now()
+                    + TimeDelta::from_std(*ttl).map_err(|_| "--ttl is too long".to_string())?;
+
+                watches
+                    .update(clock.now(), |file| {
+                        for reference in &references {
+                            file.watch(reference, deadline, clock.now());
+                            tracing::info!(%reference, %deadline, "watch registered");
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+
+                // Read them now rather than leaving the baseline to whenever
+                // `events` next runs: a transition in that gap would be
+                // swallowed into the baseline, which is the one thing the
+                // caller just asked not to happen.
+                match poll(&config, &watches, &clock, None, "watch") {
+                    Ok(polled) => finished_already(&polled, &watches.read()),
+                    Err(error) => {
+                        println!("could not read them just now: {error}");
+                        println!("  the next `inkling events` will pick them up");
+                    }
+                }
+            }
+
+            watch_out(&watches.read(), clock.now(), *json)?;
+            Ok(0)
+        }
+        Command::Unwatch { targets, all } => {
+            if targets.is_empty() && !all {
+                return Err("unwatch needs something to stop watching, or --all".into());
+            }
+            let watches = watch_store(&cli.common);
+            let clock = SystemClock;
+
+            if *all {
+                let dropped = watches
+                    .update(clock.now(), |file| std::mem::take(&mut file.watches).len())
+                    .map_err(|e| e.to_string())?;
+                println!("stopped watching {dropped}");
+                return Ok(0);
+            }
+
+            let snapshot = store.load().map_err(|e| e.to_string())?;
+            let references = watch_targets(targets, &config.github.hosts, &snapshot)?;
+            let removed = watches
+                .update(clock.now(), |file| {
+                    references
+                        .iter()
+                        .map(|reference| (reference.clone(), file.unwatch(reference)))
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|e| e.to_string())?;
+
+            for (reference, was_watched) in removed {
+                match was_watched {
+                    true => {
+                        tracing::info!(%reference, "watch removed");
+                        println!("stopped watching {reference}");
+                    }
+                    false => println!("{reference}: not being watched"),
+                }
+            }
+            Ok(0)
+        }
+        Command::Events {
+            since,
+            subscriber,
+            refresh,
+            json,
+            ndjson,
+        } => {
+            let watches = watch_store(&cli.common);
+            let clock = SystemClock;
+
+            // Only when the readings have aged: resolving the GitHub token
+            // shells out, and this runs on every prompt.
+            let refresh = TimeDelta::from_std(*refresh).unwrap_or(TimeDelta::zero());
+            if watches.read().due(clock.now(), refresh) {
+                // A provider that can't be reached is a log line, not a
+                // failure — a blip must not cost an agent its turn.
+                if let Err(error) = poll(&config, &watches, &clock, Some(refresh), "events") {
+                    tracing::warn!(%error, "could not refresh watches");
+                }
+            }
+
+            let events = match subscriber {
+                Some(id) => watches
+                    .update(clock.now(), |file| file.take(id, clock.now()))
+                    .map_err(|e| e.to_string())?,
+                None => {
+                    let file = watches.read();
+                    inkling::domain::watch::since(&file.events, since.unwrap_or(0)).to_vec()
+                }
+            };
+
+            events_out(&events, *json, *ndjson)?;
             Ok(0)
         }
         Command::Wait {
@@ -751,12 +928,17 @@ fn resolve(
         .values()
         .flat_map(|t| t.references.iter())
         .filter(|reference| {
+            // A partial reference is always a pull request; a Jira key can
+            // only be given in full, so there is nothing to fill in.
             let GitHubPullRequest {
                 owner: o,
                 repo: r,
                 number: n,
                 ..
-            } = reference;
+            } = reference
+            else {
+                return false;
+            };
             *n == number
                 && repo
                     .as_ref()
@@ -809,10 +991,21 @@ fn wait_targets(
     snapshot: &inkling::adapters::store_json::Snapshot,
 ) -> Result<Vec<inkling::domain::model::Reference>, String> {
     let (channels, references) = classify(targets, hosts, snapshot)?;
-    match channels.first() {
-        Some(channel) => Err(format!("{channel}: wait takes pull requests, not channels")),
-        None => Ok(references),
+    if let Some(channel) = channels.first() {
+        return Err(format!("{channel}: wait takes pull requests, not channels"));
     }
+    // A Jira issue has no merge ladder to threshold against, so `--until`
+    // could say nothing about one. Watching it is the answer that exists.
+    if let Some(issue) = references
+        .iter()
+        .find(|r| matches!(r, inkling::domain::model::Reference::JiraIssue { .. }))
+    {
+        return Err(format!(
+            "{issue}: wait takes pull requests — for a Jira issue use \
+             `inkling watch {issue}` and `inkling events`"
+        ));
+    }
+    Ok(references)
 }
 
 fn classify(
@@ -886,6 +1079,237 @@ fn tildify(path: &std::path::Path) -> String {
         }
         _ => text,
     }
+}
+
+fn watch_store(common: &Common) -> inkling::adapters::watches_json::WatchStore {
+    inkling::adapters::watches_json::WatchStore::new(
+        common
+            .watches
+            .clone()
+            .unwrap_or_else(inkling::adapters::watches_json::WatchStore::default_path),
+    )
+}
+
+/// The same targets `wait` takes, plus Jira issues. Channels are refused for
+/// the same reason: there is no such thing as watching one.
+fn watch_targets(
+    targets: &[String],
+    hosts: &[String],
+    snapshot: &inkling::adapters::store_json::Snapshot,
+) -> Result<Vec<inkling::domain::model::Reference>, String> {
+    let (channels, references) = classify(targets, hosts, snapshot)?;
+    match channels.first() {
+        Some(channel) => Err(format!(
+            "{channel}: watch takes pull requests and Jira issues, not channels"
+        )),
+        None => Ok(references),
+    }
+}
+
+/// Bring the watches up to date. `refresh` polls only when the readings have
+/// aged past it; `None` polls regardless.
+fn poll(
+    config: &Config,
+    store: &inkling::adapters::watches_json::WatchStore,
+    clock: &SystemClock,
+    refresh: Option<TimeDelta>,
+    why: &str,
+) -> Result<inkling::watch::Polled, String> {
+    let token = Secret::resolve(
+        config.github.token_env.as_deref(),
+        config.github.token_command.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let poller = inkling::watch::Poller {
+        store,
+        github: &GitHubProvider::new(&config.github.api_url, token),
+        jira: &inkling::adapters::jira_acli::JiraProvider::new(),
+        clock,
+    };
+    match refresh {
+        Some(refresh) => poller.poll_if_stale(refresh, why),
+        None => poller.poll(why),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// One line's worth of where a watched thing stands.
+fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
+    use inkling::domain::watch::Standing;
+    match standing {
+        None => "unread".to_string(),
+        Some(Standing::PullRequest { state, checks }) => match checks {
+            Some(checks) => format!("{state}, checks {checks}"),
+            None => state.to_string(),
+        },
+        Some(Standing::Issue { status, .. }) => status.clone(),
+    }
+}
+
+/// Say so when something was over before the watch began.
+///
+/// A finished reference has its watch dropped by the first reading, so it
+/// never appears in the list — and "watching nothing" is a poor answer to
+/// "watch this pull request".
+fn finished_already(
+    polled: &inkling::watch::Polled,
+    watches: &inkling::adapters::watches_json::Watches,
+) {
+    for (reference, sighting) in &polled.sightings {
+        if watches.watches.contains_key(&reference.to_string()) {
+            continue;
+        }
+        println!(
+            "{reference}: already {} — nothing left to watch",
+            standing(Some(&sighting.standing))
+        );
+    }
+}
+
+fn watch_out(
+    watches: &inkling::adapters::watches_json::Watches,
+    now: DateTime<Utc>,
+    json: bool,
+) -> Result<(), String> {
+    let mut live: Vec<_> = watches
+        .watches
+        .values()
+        .filter(|watch| watch.deadline > now)
+        .collect();
+    live.sort_by_key(|watch| watch.reference.to_string());
+
+    if json {
+        let out: Vec<_> = live
+            .iter()
+            .map(|watch| {
+                serde_json::json!({
+                    "reference": watch.reference.to_string(),
+                    "standing": standing(watch.seen.as_ref().map(|seen| &seen.standing)),
+                    "since": watch.since,
+                    "deadline": watch.deadline,
+                    "title": watch.seen.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    if live.is_empty() {
+        println!("watching nothing");
+        return Ok(());
+    }
+
+    let rows: Vec<_> = live
+        .iter()
+        .map(|watch| {
+            (
+                watch.reference.to_string(),
+                standing(watch.seen.as_ref().map(|seen| &seen.standing)),
+                humanize(watch.deadline - now),
+                watch
+                    .seen
+                    .as_ref()
+                    .map(|s| s.title.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    let (name_width, standing_width) = widths(&rows);
+    let budget = terminal_width()
+        .saturating_sub(2 + name_width + 2 + standing_width + 2 + 8 + 2)
+        .max(24);
+
+    for (name, state, left, title) in &rows {
+        let title = ellipsize(title, budget);
+        println!("  {name:<name_width$}  {state:<standing_width$}  {left:<8}  {title}");
+    }
+    Ok(())
+}
+
+/// Column widths for a table whose first two columns are arbitrary-length.
+fn widths(rows: &[(String, String, String, String)]) -> (usize, usize) {
+    let width = |pick: fn(&(String, String, String, String)) -> &String| {
+        rows.iter().map(|row| pick(row).len()).max().unwrap_or(0)
+    };
+    (width(|row| &row.0), width(|row| &row.1))
+}
+
+/// Nothing changed, nothing printed — in every format. A hook injects this
+/// into a prompt, so silence has to be the cheap and literal default.
+fn events_out(
+    events: &[inkling::domain::watch::Event],
+    json: bool,
+    ndjson: bool,
+) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    if json || ndjson {
+        let rows: Vec<_> = events
+            .iter()
+            .map(|event| {
+                serde_json::json!({
+                    "seq": event.seq,
+                    "at": event.at,
+                    "reference": event.reference.to_string(),
+                    "axis": event.axis.as_str(),
+                    "from": event.from,
+                    "to": event.to,
+                    "title": event.title,
+                    "detail": event.detail,
+                })
+            })
+            .collect();
+        // No cursor field: the last event's `seq` is the cursor, so there is
+        // nothing to keep in sync with the rows.
+        for line in match ndjson {
+            true => rows
+                .iter()
+                .map(|row| serde_json::to_string(row).map_err(|e| e.to_string()))
+                .collect::<Result<Vec<_>, _>>()?,
+            false => vec![serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?],
+        } {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
+    let rows: Vec<_> = events
+        .iter()
+        .map(|event| {
+            (
+                event.reference.to_string(),
+                event.axis.to_string(),
+                format!("{} → {}", event.from, event.to),
+                event.detail.clone().unwrap_or_else(|| event.title.clone()),
+            )
+        })
+        .collect();
+    let (name_width, axis_width) = widths(&rows);
+    let move_width = rows
+        .iter()
+        .map(|row| row.2.chars().count())
+        .max()
+        .unwrap_or(0);
+    let budget = terminal_width()
+        .saturating_sub(name_width + 2 + axis_width + 2 + move_width + 2)
+        .max(24);
+
+    for (name, axis, moved, detail) in &rows {
+        // chars, not bytes: the arrow is three bytes wide and one column.
+        let pad = " ".repeat(move_width - moved.chars().count());
+        println!(
+            "{name:<name_width$}  {axis:<axis_width$}  {moved}{pad}  {}",
+            ellipsize(detail, budget)
+        );
+    }
+    Ok(())
 }
 
 fn credentials(config: &Config) -> String {

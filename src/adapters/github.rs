@@ -55,11 +55,19 @@ impl GitHubProvider {
 
 impl StatusProvider for GitHubProvider {
     fn lookup(&self, references: &[Reference]) -> Result<Vec<Lookup>, ProviderError> {
-        if references.is_empty() {
+        // Answers only about pull requests. Dropping the rest rather than
+        // reporting them missing is the honest shape: this provider has no
+        // opinion on a Jira key, and the watch loop routes those elsewhere.
+        let pulls: Vec<Reference> = references
+            .iter()
+            .filter(|r| matches!(r, Reference::GitHubPullRequest { .. }))
+            .cloned()
+            .collect();
+        if pulls.is_empty() {
             return Ok(Vec::new());
         }
-        let response = self.post(&build_query(references))?;
-        Ok(interpret(references, &response))
+        let response = self.post(&build_query(&pulls))?;
+        Ok(interpret(&pulls, &response))
     }
 }
 
@@ -68,14 +76,18 @@ impl StatusProvider for GitHubProvider {
 fn build_query(references: &[Reference]) -> String {
     let mut query = String::from("query {");
     for (i, reference) in references.iter().enumerate() {
+        // The alias carries the index, so skipping one can't shift the rest.
         let Reference::GitHubPullRequest {
             owner,
             repo,
             number,
             ..
-        } = reference;
+        } = reference
+        else {
+            continue;
+        };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 20) {{ nodes {{ __typename ... on CheckRun {{ name conclusion }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -113,6 +125,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                         author: pr.author.as_ref().map(Author::display).unwrap_or_default(),
                         title: pr.title.clone(),
                         checks: pr.checks(),
+                        failing: pr.failing(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -179,6 +192,28 @@ struct Commit {
 #[derive(Debug, Deserialize)]
 struct Rollup {
     state: String,
+    #[serde(default)]
+    contexts: Contexts,
+}
+
+/// The rollup's constituents. Measured 2026-09-20: a 3-reference batch costs
+/// one rate-limit point with this field or without it, so naming the failing
+/// check is free — same request, same point.
+#[derive(Debug, Deserialize, Default)]
+struct Contexts {
+    #[serde(default)]
+    nodes: Vec<Context>,
+}
+
+/// Only the `CheckRun` half of the union is selected. A repository still on
+/// legacy commit statuses reports a red rollup with no name attached, which
+/// is the old behavior rather than a new failure.
+#[derive(Debug, Deserialize)]
+struct Context {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,16 +243,37 @@ impl PullRequest {
     /// GitHub reports more rollup states than matter here. Anything not
     /// plainly finished reads as pending, so an unfamiliar one makes a wait
     /// keep waiting rather than declare a result it didn't get.
-    fn checks(&self) -> Option<CheckState> {
-        let state = self
-            .commits
+    fn rollup(&self) -> Option<&Rollup> {
+        self.commits
             .nodes
             .first()?
             .commit
             .status_check_rollup
-            .as_ref()?
-            .state
-            .as_str();
+            .as_ref()
+    }
+
+    /// The first check that actually failed.
+    ///
+    /// Not "the first one that isn't green": recorded from rust-lang/rust the
+    /// list runs successes, then a `SKIPPED`, then the failure — so anything
+    /// looser names a job that did nothing wrong.
+    fn failing(&self) -> Option<String> {
+        self.rollup()?
+            .contexts
+            .nodes
+            .iter()
+            .find(|context| {
+                matches!(
+                    context.conclusion.as_deref(),
+                    Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE")
+                )
+            })
+            .and_then(|context| context.name.clone())
+            .filter(|name| !name.trim().is_empty())
+    }
+
+    fn checks(&self) -> Option<CheckState> {
+        let state = self.rollup()?.state.as_str();
         Some(match state {
             "SUCCESS" => CheckState::Success,
             // ERROR is a check that failed to run; for someone waiting to
@@ -468,11 +524,74 @@ mod tests {
         assert_eq!(status.checks, Some(CheckState::Failure));
     }
 
+    /// Recorded 2026-09-20 from rust-lang/rust#161685, trimmed from 15
+    /// contexts to the shape that matters: successes, then a `SKIPPED`, then
+    /// the actual failure.
+    const RED_WITH_CONTEXTS: &str = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,
+        "state":"CLOSED","reviewDecision":"REVIEW_REQUIRED","title":"Rollup of 6 pull requests",
+        "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{"nodes":[
+        {"__typename":"CheckRun","name":"PR - tidy","conclusion":"SUCCESS"},
+        {"__typename":"CheckRun","name":"publish toolstate","conclusion":"SKIPPED"},
+        {"__typename":"CheckRun","name":"Bors auto build","conclusion":"FAILURE"},
+        {"__typename":"CheckRun","name":"Bors try build","conclusion":"FAILURE"}
+        ]}}}}]}}}}}"#;
+
     #[test]
-    fn the_query_asks_for_the_head_commits_rollup() {
+    fn a_red_rollup_names_the_check_that_failed() {
+        let status = interpret(&[pr("x", 1)], &parse(RED_WITH_CONTEXTS))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Failure));
+        assert_eq!(
+            status.failing.as_deref(),
+            Some("Bors auto build"),
+            "the first job that failed, not the first that isn't green — a \
+             SKIPPED job sits in between"
+        );
+    }
+
+    #[test]
+    fn a_green_rollup_names_nothing() {
+        let json = with_rollup(
+            r#"{"state":"SUCCESS","contexts":{"nodes":[
+            {"__typename":"CheckRun","name":"test","conclusion":"SUCCESS"}]}}"#,
+        );
+        assert_eq!(
+            interpret(&[pr("x", 1)], &parse(&json))[0]
+                .1
+                .clone()
+                .unwrap()
+                .failing,
+            None
+        );
+    }
+
+    #[test]
+    fn a_legacy_status_context_leaves_the_rollup_unnamed() {
+        // Only the CheckRun half of the union is selected, so a repository on
+        // old-style commit statuses reports red with nothing attached — which
+        // is the behavior before this field existed, not a new failure.
+        let json = with_rollup(
+            r#"{"state":"FAILURE","contexts":{"nodes":[
+            {"__typename":"StatusContext"}]}}"#,
+        );
+        let status = interpret(&[pr("x", 1)], &parse(&json))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Failure));
+        assert_eq!(status.failing, None);
+    }
+
+    #[test]
+    fn the_query_asks_for_the_head_commits_rollup_and_its_contexts() {
         let query = build_query(&[pr("gqls", 1)]);
         assert!(query.contains("commits(last: 1)"), "{query}");
         assert!(query.contains("statusCheckRollup"), "{query}");
+        // Measured: this costs nothing extra — a 3-reference batch is one
+        // rate-limit point with it or without it.
+        assert!(query.contains("contexts(first: 20)"), "{query}");
     }
 
     #[test]

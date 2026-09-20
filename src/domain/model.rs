@@ -78,6 +78,9 @@ pub enum Reference {
         repo: String,
         number: u64,
     },
+    /// No site: `acli` is authenticated to exactly one, and carrying a field
+    /// nothing reads would imply a multi-site story that doesn't exist.
+    JiraIssue { key: String },
 }
 
 impl fmt::Display for Reference {
@@ -89,6 +92,7 @@ impl fmt::Display for Reference {
                 repo,
                 number,
             } => write!(f, "{host}/{owner}/{repo}#{number}"),
+            Reference::JiraIssue { key } => f.write_str(key),
         }
     }
 }

@@ -9,6 +9,7 @@ It never posts; it only annotates messages that already exist.
 - [docs/slack-mcp-spike.md](docs/slack-mcp-spike.md) — what the Slack MCP server does, and what a bridge call costs.
 - [docs/deferred.md](docs/deferred.md) — what was decided against, and what would change the answer.
 - [docs/waiting.md](docs/waiting.md) — the design behind `inkling wait`.
+- [docs/watching.md](docs/watching.md) — the design behind `inkling watch` and `inkling events`.
 
 ## Running
 
@@ -59,6 +60,78 @@ Waits are deduplicated: several `inkling wait` processes watching overlapping
 pull requests share one poll, coordinated through `waits.json`. Nothing to
 start or manage — a killed waiter is taken over, and every watch expires at
 the deadline its `--timeout` already implies.
+
+## Watching
+
+`inkling wait` blocks. `inkling watch` doesn't: it registers interest and
+returns, and you find out later what changed.
+
+```sh
+inkling watch 42 AI-123        # a pull request and a Jira issue
+inkling watch 42 --ttl 2h      # default is 24h
+inkling watch                  # what's being watched
+inkling unwatch 42             # or --all
+inkling events                 # what's moved, and nothing when nothing has
+```
+
+Output is one line per transition — from what, to what, and which check went
+red:
+
+```
+github.com/dpep/inkling#3  checks  pending → failure  test / build
+github.com/dpep/inkling#3  state   open → merged      Add inkling wait
+AI-123                     status  To Do → In Progress
+```
+
+An *event* is a transition, never a snapshot. The first reading of a watch
+establishes a baseline and reports nothing — you just asked about it, so
+where it already sits is not news. Watches expire at their TTL, and that
+expiry is the only cleanup there is; something that merges, closes, or
+reaches Done stops being watched after its last event.
+
+Events carry a monotonic `seq`, so the cursor for next time is the last one
+printed:
+
+```sh
+inkling events --since 12 --json      # an array; nothing at all if nothing moved
+inkling events --ndjson               # one object per line
+```
+
+For a caller with nowhere to keep a cursor, Inkling keeps one:
+`--subscriber <id>` delivers each transition to that subscriber exactly once.
+A subscriber seen for the first time starts from now rather than inheriting
+somebody else's backlog.
+
+### From a Claude Code hook
+
+This is what it was built for — an agent learns its PR went red without
+having to go and look. In `settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "inkling events --subscriber \"$CLAUDE_SESSION_ID\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Nothing changed means no output and exit 0, so the common case adds nothing
+to the prompt. It is also cheap: a local file read, with no network unless
+the last reading is older than `--refresh` (60s). When it is, one process
+looks upstream and the rest read what it wrote.
+
+Jira goes through `acli`, which must be on `PATH` and authenticated. Issues
+are recognized as a key (`AI-123`) or an `.atlassian.net/browse/` URL — only
+on the command line, never from Slack messages.
 
 `run` arguments are either channels or pull requests, told apart by shape — a
 URL, `github.com/owner/repo#12`, `owner/repo#12`, `repo#12`, or a bare `12`.
@@ -145,7 +218,8 @@ failed and the window wasn't covered.
 
 State is at `~/.local/state/inkling/state.json`. Deleting it makes Inkling
 forget and rediscover; it also drops the record of which reactions were its
-own, so it stops claiming them.
+own, so it stops claiming them. Watches and their events live beside it in
+`watches.json`; deleting that one forgets every watch and every cursor.
 
 ## slackmcp
 

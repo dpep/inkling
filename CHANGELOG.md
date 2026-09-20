@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **New: `inkling watch` and `inkling events`.** `watch <ref>...` registers interest and returns;
+  `events` prints what has moved since it last looked, and nothing at all when nothing has. An
+  event is a transition — which reference, from what to what, when — never a snapshot, and the
+  first reading of a watch is a baseline that reports nothing. Bare `inkling watch` lists what is
+  being watched, `unwatch` stops. Every watch expires at its `--ttl` (24h), and anything that
+  merges, closes, or reaches Done stops being watched after its last event.
+- **`events --subscriber <id>`** keeps the cursor for you, for a caller with nowhere to put one,
+  and delivers each transition to each subscriber exactly once. A subscriber seen for the first
+  time starts from now rather than inheriting another session's backlog. Without it,
+  `--since <cursor>` works from a cursor you keep — the last `seq` printed. `--json` emits an
+  array, `--ndjson` one object per line; an empty result prints nothing in every format.
+  Intended for a Claude Code `UserPromptSubmit` hook — see the README.
+- **Jira issues are a second kind of reference**, watchable as a key (`AI-123`) or an
+  `.atlassian.net/browse/` URL. Status comes from `acli`, which must be on `PATH` and
+  authenticated; there is no token to configure. Jira keys are recognized on the command line
+  only, never in Slack messages, so nothing new enters the reaction loop.
+- **A red checks event names the job that failed.** It rides on the query already being made —
+  measured, a three-reference batch costs one rate-limit point either way.
+- **Watches live in `watches.json`**, beside `state.json`; `--watches` overrides the path.
+  Deleting it forgets every watch and every cursor. Events are kept for 24 hours.
 - **New: `inkling wait`.** Blocks until pull requests reach a state, then exits with a code saying
   how it resolved — 0 met, 3 precluded (closed while you waited for a merge), 4 timed out, 5 no
   such reference. `--until merged|approved|open|draft|done`, `--timeout`, `--interval`, `--json`.
