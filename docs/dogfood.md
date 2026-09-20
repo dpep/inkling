@@ -6,6 +6,14 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- All four hooks installed globally; pushes arrive mid-turn as well as when
+  idle, and both read naturally.
+- The PostToolUse hook fired live: `gh pr view 3` auto-watched #3 with the
+  right owner, and the log said which command matched. #3 was already merged
+  and was dropped at its first reading without a message. Good.
+- Pushing a commit to #7 produced `checks success → none` and `none → pending`
+  in the session before the `pending → success` that mattered. Three turns of
+  attention for one fact. Open.
 - First push into a real session (#7). The session subscribed by hand, watched
   its own PR, and went idle; `inkling: github.com/dpep/inkling#7 checks pending
   → success` woke it. The log said `pushed seq=7 outcome="written"
