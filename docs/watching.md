@@ -45,6 +45,13 @@ Two more have since joined it, each one sentence long:
   pushed a second ago has no check suite yet, and neither does a repository
   that runs no checks; one reading cannot tell them apart. So once a rollup
   has been seen, a reading without one keeps the rollup it had. See below.
+- **A transition is news even to the reader that caused it.** A session that
+  merges a pull request is told `draft → merged` seconds later, and that is
+  kept on purpose: `gh pr merge` returns before GitHub has finished, so the
+  event is the confirmation that it landed. Inkling knows what changed, not
+  who changed it, and working that out means modelling the caller — which is
+  the opposite of DESIGN §1. It costs one line, once: the finished watch then
+  removes itself.
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
   deadline (`--ttl`, 24h), and a finished reference — merged, closed, Done —
   drops its watch after its last event. There is no reaper.
