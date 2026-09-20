@@ -39,9 +39,10 @@
   removing a watch somebody else also has.
 - **`watches.json` is written `0600`**, because it now holds session tokens. An existing file keeps
   its old permissions until the next write.
-- **`inkling watch owner/repo#N` works without the host.** It names a pull request completely once
-  the host defaults; the fill-in-from-tracked rule is `run`'s, where a short form selects among
-  tracked records. Shorter forms still need a tracked match.
+- **`owner/repo#N` works without the host, in every command that takes a reference.** It names a
+  pull request completely once the host defaults, so `watch`, `unwatch`, `wait` and `run` all accept
+  it. Only the shorter forms — `repo#N`, `#N`, `N` — still need a tracked record to select among,
+  which is the one thing a short form is for.
 - **One unresolvable reference no longer stops the rest.** `watch` and `unwatch` report what they
   couldn't resolve, act on what they could, and exit 1. `wait` deliberately keeps its all-or-nothing
   rule.

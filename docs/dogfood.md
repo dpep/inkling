@@ -27,7 +27,8 @@ fixed, say where and leave the line.
 - `inkling wait dpep/inkling#7` was refused with "nothing tracked references
   it" seconds after `inkling watch dpep/inkling#7` accepted the same words. The
   owner/repo#N fix went into `watch` only. Expected one rule for every command
-  that takes a reference. Open.
+  that takes a reference. Fixed in this PR: `complete` in `main.rs` is that
+  rule, and one test puts the same words through every command.
 - `inkling watch <new pr>` also printed "already merged — nothing left to
   watch" for two older PRs it happened to clean up on the same poll. Expected
   output about what I asked for; someone else's housekeeping belongs in the

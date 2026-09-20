@@ -207,10 +207,11 @@ on the command line, never from Slack messages.
 
 `run` arguments are either channels or pull requests, told apart by shape — a
 URL, `github.com/owner/repo#12`, `owner/repo#12`, `repo#12`, or a bare `12`.
-The shorter forms are filled in from what's already tracked, and must match
-exactly one record; ambiguity is an error rather than a guess. A named pull
-request is checked immediately instead of waiting for its next scheduled
-check.
+One rule for every command that takes a reference: the first three name a pull
+request completely, and the shorter two are filled in from what's already
+tracked and must match exactly one record — ambiguity is an error rather than
+a guess. A named pull request is checked immediately instead of waiting for
+its next scheduled check.
 
 ## Config
 

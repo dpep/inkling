@@ -67,9 +67,9 @@ enum Command {
         /// Channels to search, or pull requests to check now.
         ///
         /// A channel handle or ID narrows the run to it, turning off personal
-        /// mode. A pull request — full URL, `github.com/owner/repo#12`, or a
-        /// bare number matching something tracked — is checked immediately,
-        /// ignoring the backoff schedule.
+        /// mode. A pull request — a URL, `owner/repo#12`, or a shorter form
+        /// matching something tracked — is checked immediately, ignoring the
+        /// backoff schedule.
         targets: Vec<String>,
         /// Report what would happen, changing nothing in Slack or on disk.
         #[arg(long, short = 'n')]
@@ -93,9 +93,9 @@ enum Command {
     /// change), 4 on timeout, and 5 when a reference can't be read. Composes
     /// with the shell: `inkling wait --until merged 42 && deploy`.
     Wait {
-        /// Pull requests to wait on — a URL, `github.com/owner/repo#12`, or a
-        /// bare number matching something already tracked. Several means all
-        /// of them must satisfy the condition.
+        /// Pull requests to wait on — a URL, `owner/repo#12`, or a shorter
+        /// form matching something already tracked. Several means all of them
+        /// must satisfy the condition.
         targets: Vec<String>,
         /// What to wait for. The default, `changed`, returns on the next
         /// move in any direction. `done` is either terminal state, merged or
@@ -121,9 +121,9 @@ enum Command {
     /// With no arguments, lists what is being watched. Every watch expires at
     /// its `--ttl`, and that expiry is the only cleanup there is.
     Watch {
-        /// Pull requests — a URL, `github.com/owner/repo#12`, or a bare
-        /// number matching something tracked — and Jira issues, as a key like
-        /// `AI-123` or a browse URL.
+        /// Pull requests — a URL, `owner/repo#12`, or a shorter form matching
+        /// something tracked — and Jira issues, as a key like `AI-123` or a
+        /// browse URL.
         targets: Vec<String>,
         /// Stop watching after this long, e.g. 2h, 24h, 7d.
         #[arg(long, default_value = "24h", value_parser = humantime::parse_duration)]
@@ -1105,9 +1105,41 @@ fn tracking(records: &[inkling::app::Tracked]) {
     println!();
 }
 
-/// Fill in the parts of a reference the caller left out, from what's already
-/// tracked. Exactly one match or nothing: reacting to the wrong pull request
-/// is worse than being asked for a fuller reference.
+/// Fill in the parts of a reference the caller left out.
+///
+/// The one rule, for every command that takes a reference: `owner/repo#N`
+/// names a pull request completely once the host defaults, and only the forms
+/// shorter than that — `repo#N`, `#N`, `N` — need a tracked record, where a
+/// short form genuinely selects among what is tracked.
+///
+/// A rule per command is what dogfooding caught: `watch` learned the first
+/// half and `wait` did not, and both suites stayed green.
+fn complete(
+    owner: Option<String>,
+    repo: Option<String>,
+    number: u64,
+    hosts: &[String],
+    snapshot: &inkling::adapters::store_json::Snapshot,
+) -> Result<inkling::domain::model::Reference, String> {
+    match (owner, repo) {
+        (Some(owner), Some(repo)) => match hosts.first() {
+            Some(host) => Ok(inkling::domain::model::Reference::GitHubPullRequest {
+                host: host.clone(),
+                owner,
+                repo,
+                number,
+            }),
+            None => Err(format!(
+                "{owner}/{repo}#{number}: no github host is configured — give the full reference"
+            )),
+        },
+        (owner, repo) => resolve(&owner, &repo, number, snapshot),
+    }
+}
+
+/// Find the one tracked record a short reference selects. Exactly one match or
+/// nothing: reacting to the wrong pull request is worse than being asked for a
+/// fuller reference.
 fn resolve(
     owner: &Option<String>,
     repo: &Option<String>,
@@ -1219,7 +1251,7 @@ fn classify(
                 owner,
                 repo,
                 number,
-            } => force.push(resolve(&owner, &repo, number, snapshot)?),
+            } => force.push(complete(owner, repo, number, hosts, snapshot)?),
         }
     }
     Ok((channels, force))
@@ -1624,18 +1656,15 @@ fn watch_targets(
 
 /// Resolve one target to watch.
 ///
-/// Its own loop rather than `classify`, because the completion rule differs:
-/// `owner/repo#N` names a pull request completely once the host defaults, and
-/// only the shorter forms need a tracked record. `run` fills every short form
-/// in from what's tracked because a short form there *selects* among tracked
-/// records; a watch has nothing to select among.
+/// Its own function rather than `classify` only because the answer is one
+/// reference and a channel is refused; the rule that completes a short
+/// reference is `complete`, shared with every other command.
 fn watch_target(
     target: &str,
     hosts: &[String],
     snapshot: &inkling::adapters::store_json::Snapshot,
 ) -> Result<inkling::domain::model::Reference, String> {
     use inkling::domain::detect::{Target, parse_target};
-    use inkling::domain::model::Reference;
 
     match parse_target(target, hosts)? {
         Target::Channel(channel) => Err(format!(
@@ -1643,25 +1672,10 @@ fn watch_target(
         )),
         Target::Reference(reference) => Ok(reference),
         Target::Partial {
-            owner: Some(owner),
-            repo: Some(repo),
-            number,
-        } => match hosts.first() {
-            Some(host) => Ok(Reference::GitHubPullRequest {
-                host: host.clone(),
-                owner,
-                repo,
-                number,
-            }),
-            None => Err(format!(
-                "{target}: no github host is configured — give the full reference"
-            )),
-        },
-        Target::Partial {
             owner,
             repo,
             number,
-        } => resolve(&owner, &repo, number, snapshot),
+        } => complete(owner, repo, number, hosts, snapshot),
     }
 }
 
@@ -2145,29 +2159,77 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{ellipsize, watch_target, watch_targets};
+    use super::{classify, ellipsize, wait_targets, watch_target, watch_targets};
     use inkling::adapters::store_json::Snapshot;
 
     fn hosts() -> Vec<String> {
         vec!["github.com".to_string()]
     }
 
+    /// One argument, put through every command that takes a reference.
+    ///
+    /// The level the dogfood finding was at: each command was tested against
+    /// its own idea of what a reference is, so `watch` learning a form and
+    /// `wait` not learning it looked green both times.
+    fn each_command(target: &str) -> Vec<(&'static str, Result<String, String>)> {
+        let snapshot = Snapshot::default();
+        let one = [target.to_string()];
+        let names = |references: Vec<inkling::domain::model::Reference>| {
+            references
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        vec![
+            (
+                "watch",
+                watch_target(target, &hosts(), &snapshot).map(|r| r.to_string()),
+            ),
+            (
+                "wait",
+                wait_targets(&one, &hosts(), &snapshot).map(names),
+            ),
+            (
+                "run",
+                classify(&one, &hosts(), &snapshot).map(|(_, references)| names(references)),
+            ),
+        ]
+    }
+
     #[test]
-    fn owner_and_repo_name_a_pull_request_completely() {
-        // Found by dogfooding: refusing this sent you to look up a host you
-        // already knew. The fill-in-from-tracked rule is `run`'s, and `run`
-        // needs it because a short form there selects among tracked records.
-        let reference = watch_target("dpep/inkling#3", &hosts(), &Snapshot::default()).unwrap();
-        assert_eq!(reference.to_string(), "github.com/dpep/inkling#3");
+    fn every_command_accepts_the_same_reference() {
+        // Found by dogfooding: `watch dpep/inkling#7` was accepted seconds
+        // before `wait dpep/inkling#7` was refused. `owner/repo#N` names a
+        // pull request completely once the host defaults, and which command
+        // you are running has nothing to do with it.
+        for target in [
+            "https://github.com/dpep/inkling/pull/3",
+            "github.com/dpep/inkling/pull/3",
+            "github.com/dpep/inkling#3",
+            "dpep/inkling#3",
+        ] {
+            for (command, resolved) in each_command(target) {
+                assert_eq!(
+                    resolved.as_deref(),
+                    Ok("github.com/dpep/inkling#3"),
+                    "{command} {target}"
+                );
+            }
+        }
     }
 
     #[test]
     fn a_shorter_form_still_needs_something_tracked_to_match() {
-        // `inkling#3` leaves out the owner, and guessing one would watch
-        // somebody else's pull request.
-        for target in ["inkling#3", "3"] {
-            let error = watch_target(target, &hosts(), &Snapshot::default()).unwrap_err();
-            assert!(error.contains("nothing tracked"), "{target}: {error}");
+        // The other half of the one rule, and the reason it isn't "accept
+        // everything": `inkling#3` leaves out the owner, and guessing one
+        // would watch somebody else's pull request. Only here does a short
+        // form select among tracked records.
+        for target in ["inkling#3", "#3", "3"] {
+            for (command, resolved) in each_command(target) {
+                let error = resolved.expect_err(target);
+                assert!(error.contains("nothing tracked"), "{command}: {error}");
+            }
         }
     }
 
