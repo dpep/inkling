@@ -73,6 +73,13 @@ every prompt: one small file read, no lock, no network, no output. The GitHub
 token is resolved only when a poll is actually going to happen — resolving it
 shells out to `gh auth token`, which is not something to do on every prompt.
 
+The poll itself is not free, and the numbers argue for the shared poller
+rather than against the design. Measured 2026-09-20 against live
+repositories: **~0.7s** for a 4–5 reference batch, **~1.65s** for 14. That is
+one round trip either way — the cost is GitHub's, not ours — but 1.65s on the
+prompt path is not something to pay per session, and at a 60s refresh most
+prompts don't. A poller outside the session pays it once for everyone.
+
 `poll` itself takes **no** lock. Correctness belongs to the store: `record`
 runs inside the data lock and compares against the baseline it finds there,
 so two pollers racing produce one set of events rather than two. Readings
@@ -182,7 +189,8 @@ events read subscriber="abc-123" cursor_before=6 cursor_after=7 returned=1
   question nobody has. Count events per watch registered.
 - **`why="events"` dominates and `elapsed_ms` is large.** The hook is paying
   for the poll on the prompt path. That is the case for the shared poller,
-  and `elapsed_ms` is the number that makes it.
+  and `elapsed_ms` is the number that makes it — already ~1.65s at 14
+  references.
 - **`failures` is routinely non-zero.** Either credentials are wrong or watches
   outlive what they point at. The `reference` on the warning says which.
 - **`cursor_before == cursor_after` every time**, across many sessions: nobody

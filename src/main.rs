@@ -488,6 +488,16 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("  live      {live}");
             println!("  done      {}", snapshot.tracked.len() - live);
 
+            let watched = watch_store(&cli.common).read();
+            let live = watched
+                .watches
+                .values()
+                .filter(|w| w.deadline > now)
+                .count();
+            println!();
+            println!("watching    {live}");
+            println!("  events    {} in the last day", watched.events.len());
+
             println!();
             println!("github      {}", credentials(&config));
             Ok(0)
