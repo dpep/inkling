@@ -6,11 +6,11 @@
 //! All the state is on disk and every change lands under the store's lock, so
 //! a poller that dies mid-flight costs its own query and nothing else.
 //!
-//! Concurrency is one non-blocking lock. Several sessions can find the
-//! readings stale in the same second; the first to take the poll lock does the
-//! work and the rest read what it wrote a moment later. No lease, no
-//! heartbeat, no takeover — unlike `waits.json`, the holder here is not
-//! long-lived, so there is nothing to take over from.
+//! The lock belongs to `poll_if_stale`, not to `poll`. Correctness is the
+//! store's — see `poll` — so the lock saves a redundant request and nothing
+//! more, which makes it the business of the caller that might be redundant.
+//! No lease, no heartbeat, no takeover: unlike `waits.json`, the holder here
+//! is not long-lived, so there is nothing to take over from.
 
 use crate::adapters::lock::FileLock;
 use crate::adapters::watches_json::WatchStore;
