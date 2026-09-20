@@ -11,6 +11,11 @@ fixed, say where and leave the line.
 - The PostToolUse hook fired live: `gh pr view 3` auto-watched #3 with the
   right owner, and the log said which command matched. #3 was already merged
   and was dropped at its first reading without a message. Good.
+- `inkling hook` read stdin to EOF with no timeout. Claude Code always closes
+  it, so nothing was observed going wrong — but the worst case of a hook that
+  waits forever is a hung session, which is the wrong worst case to leave
+  lying around. Fixed in this PR: 2s, then it logs and exits 0 as any other
+  hook failure does.
 - Pushing a commit to #7 produced `checks success → none` and `none → pending`
   in the session before the `pending → success` that mattered. Three turns of
   attention for one fact. Fixed in this PR: a reading with no rollup keeps the

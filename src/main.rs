@@ -1401,14 +1401,43 @@ fn field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or_default()
 }
 
+/// How long a hook waits for its payload.
+///
+/// Claude Code writes the payload and closes stdin, so this never fires in
+/// practice. It is here because the failure it prevents is the worst shape a
+/// hook has: one that hangs the session waiting for a write nobody is going to
+/// make. Generous, because the cost of firing early is a hook that does
+/// nothing.
+const PAYLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The hook payload, or nothing within `timeout`.
+///
+/// Read on a thread rather than through a non-blocking descriptor: the process
+/// exits either way, so a reader still parked on a pipe nobody closed costs one
+/// thread until then, and stdin needs no special setup to be read normally.
+fn payload<R: std::io::Read + Send + 'static>(
+    source: R,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let (done, waiting) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut raw = String::new();
+        let mut source = source;
+        let read = std::io::Read::read_to_string(&mut source, &mut raw);
+        let _ = done.send(read.map(|_| raw).map_err(|e| e.to_string()));
+    });
+    match waiting.recv_timeout(timeout) {
+        Ok(read) => read,
+        Err(_) => Err(format!(
+            "no hook payload on stdin within {}",
+            humantime::format_duration(timeout)
+        )),
+    }
+}
+
 /// Do what a hook asks, or say why not. The caller swallows the error.
 fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String> {
-    use std::io::Read;
-
-    let mut raw = String::new();
-    std::io::stdin()
-        .read_to_string(&mut raw)
-        .map_err(|e| e.to_string())?;
+    let raw = payload(std::io::stdin(), PAYLOAD_TIMEOUT)?;
     let input: HookInput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     if input.session_id.is_empty() {
         return Err("the hook payload carried no session_id".to_string());
@@ -2173,7 +2202,9 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, ellipsize, finished_already, wait_targets, watch_target, watch_targets};
+    use super::{
+        classify, ellipsize, finished_already, payload, wait_targets, watch_target, watch_targets,
+    };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
     use inkling::domain::watch::{Sighting, Standing};
@@ -2298,6 +2329,33 @@ mod tests {
 
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("github.com/dpep/inkling#7: already merged"));
+    }
+
+    #[test]
+    fn a_hook_payload_that_never_arrives_does_not_hang_the_session() {
+        // Claude Code always closes stdin, but a hook whose worst case is a
+        // hung session has the wrong worst case.
+        struct Silent;
+
+        impl std::io::Read for Silent {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                Ok(0)
+            }
+        }
+
+        let error = payload(Silent, std::time::Duration::from_millis(20)).unwrap_err();
+        assert!(error.contains("within 20ms"), "{error}");
+    }
+
+    #[test]
+    fn a_hook_payload_is_read_whole() {
+        let json = r#"{"session_id":"abc","tool_name":"Bash"}"#;
+        let read = payload(
+            std::io::Cursor::new(json),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(read.as_deref(), Ok(json));
     }
 
     #[test]
