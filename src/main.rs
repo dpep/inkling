@@ -679,6 +679,12 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 }
             }
 
+            // Here as well as in `subscribe`, because the two halves of a
+            // reason to serve arrive in either order: a session subscribes
+            // before it has watched anything, and a watch outlives the server
+            // that stood down when the last one finished.
+            ensure_serving(&config, &cli.common, "watch");
+
             watch_out(&watches.read(), &owner, clock.now(), *json)?;
             // The good references are watched either way; the exit code is
             // where a script learns that one of its arguments was not.

@@ -363,13 +363,21 @@ impl Watches {
         if let Some(entry) = self.subscribers.get_mut(subscriber) {
             entry.cursor = head;
         }
-        tracing::debug!(
-            subscriber,
-            cursor_before = cursor,
-            cursor_after = head,
-            returned = due.len(),
-            "events read"
-        );
+        // The third corner of the triangle that answers "I never got told":
+        // transitions detected, pushes written, events pulled. At info when
+        // it carried something, because that is the line somebody will come
+        // looking for — and at debug when it didn't, because that is every
+        // prompt of every session and would be the whole log.
+        match due.is_empty() {
+            true => tracing::debug!(subscriber, cursor = cursor, "events read, nothing owed"),
+            false => tracing::info!(
+                subscriber,
+                cursor_before = cursor,
+                cursor_after = head,
+                returned = due.len(),
+                "events read"
+            ),
+        }
         due
     }
 
