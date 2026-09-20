@@ -231,7 +231,7 @@ pub enum Ensured {
     Spawned { pid: u32 },
 }
 
-/// Make sure a server exists, and return without waiting for it.
+/// Make sure a server exists, and don't return until it is one.
 ///
 /// Two callers at once both find the lock free and both spawn; the flock in
 /// `Serve::run` picks the winner and the loser stands down quietly. That race
@@ -245,9 +245,42 @@ pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<En
             drop(lock);
             let pid = spawn_detached(&std::env::current_exe()?, args)?;
             tracing::info!(pid, %reason, "spawned a server");
+            if !claimed(&config.status, pid, &RealSleeper) {
+                // Not a failure. Either the child is slower than the window,
+                // or it lost the lock race and stood down — in which case the
+                // winner is already serving.
+                tracing::debug!(pid, "the spawned server has not claimed the lock yet");
+            }
             Ok(Ensured::Spawned { pid })
         }
     }
+}
+
+/// How long to wait for a just-spawned server to claim the lock, as a number of
+/// looks and the gap between them — 250ms in all.
+///
+/// So that `inkling status` a moment after the command that spawned one doesn't
+/// report `serving no`. The child takes about 40ms to get there: 5ms to exec,
+/// 27ms for `gh auth token`, the rest config and the lock. This is paid on the
+/// spawn, which happens once per server rather than once per caller — every
+/// other caller finds the lock held and returns immediately.
+const TAKEOFF_LOOKS: u32 = 25;
+const TAKEOFF_LOOK: Duration = Duration::from_millis(10);
+
+/// Whether the server at `pid` has claimed the lock yet.
+///
+/// Reads the status file rather than probing the lock, because probing *takes*
+/// the lock when it is free — which in this window would lock out the very
+/// child being waited for. A server writes its record as its first act after
+/// acquiring, so the record naming the pid is the arrival signal.
+fn claimed(status: &Path, pid: u32, sleeper: &dyn Sleeper) -> bool {
+    for _ in 0..TAKEOFF_LOOKS {
+        if read_record(status).is_some_and(|record| record.pid == pid) {
+            return true;
+        }
+        sleeper.sleep(TAKEOFF_LOOK);
+    }
+    false
 }
 
 /// A new session with no controlling terminal, stdio discarded, cwd at the
@@ -313,6 +346,10 @@ impl Serve<'_> {
             max_lifetime_seconds = self.config.max_lifetime.as_secs(),
             "serving"
         );
+        // Before the first tick, because taking the lock is the news and a
+        // tick can take a second. It is also what the caller that spawned us
+        // waits for — see `claimed`.
+        self.write_status(&record);
 
         // When the current run of nothing-to-do began. `None` means the last
         // tick found work.
@@ -707,6 +744,42 @@ mod tests {
         assert!(status.record.is_none());
     }
 
+    /// Naps that cost nothing, for the waiting a spawn does.
+    struct Unslept;
+
+    impl Sleeper for Unslept {
+        fn sleep(&self, _: Duration) {}
+    }
+
+    #[test]
+    fn a_spawn_waits_for_the_child_to_claim_the_lock() {
+        let scratch = Scratch::new("takeoff");
+        let config = scratch.config();
+        assert!(
+            !claimed(&config.status, 4242, &Unslept),
+            "nothing has claimed anything"
+        );
+
+        atomically(
+            &config.status,
+            &Record {
+                pid: 4242,
+                started_at: "2026-09-20T12:00:00Z".parse().unwrap(),
+                last_tick_at: None,
+                ticks: 0,
+                failures: 0,
+                last_error: None,
+            },
+        )
+        .unwrap();
+
+        assert!(claimed(&config.status, 4242, &Unslept));
+        assert!(
+            !claimed(&config.status, 9999, &Unslept),
+            "and a record left by an earlier server is not this one arriving"
+        );
+    }
+
     #[test]
     fn a_running_server_needs_no_spawning() {
         let scratch = Scratch::new("ensure");
@@ -716,6 +789,31 @@ mod tests {
         assert_eq!(
             ensure_running(&config, &["serve"], "test").unwrap(),
             Ensured::AlreadyRunning
+        );
+    }
+
+    #[test]
+    fn a_server_records_itself_before_its_first_tick() {
+        // Found by dogfooding: `inkling status` straight after the `watch` that
+        // spawned a server said `serving no`. A tick can take a second, and the
+        // claim on the lock is news before then.
+        let scratch = Scratch::new("claims");
+        let config = scratch.config();
+        let status = config.status.clone();
+        let seen = std::cell::RefCell::new(Vec::new());
+        serve(
+            config,
+            &(|| {
+                seen.borrow_mut()
+                    .push(read_record(&status).map(|record| (record.pid, record.ticks)));
+                Ok(Pulse::Idle)
+            }),
+        );
+
+        assert_eq!(
+            seen.borrow().first().copied().flatten(),
+            Some((std::process::id(), 0)),
+            "the first tick should already find the claim on file"
         );
     }
 

@@ -38,7 +38,9 @@ fixed, say where and leave the line.
   command was given.
 - `inkling status` straight after the `watch` that spawned the server said
   `serving no`; a second later it said yes. The spawn returns before the child
-  takes the lock. Harmless, but it's the first thing you look at. Open.
+  takes the lock. Harmless, but it's the first thing you look at. Fixed in this
+  PR: a server records itself as it takes the lock, and `ensure_running` waits
+  up to 250ms for that record rather than returning into a lie.
 - A success message carries no follow-up command while a failure does. Right
   call — there's nothing to look up when CI is green.
 
