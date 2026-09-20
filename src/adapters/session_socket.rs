@@ -33,10 +33,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Where a session listens, and the token that makes a message its own.
-#[derive(Debug, Clone)]
+///
+/// Stored as well as used: a subscription outlives the process that made it,
+/// so this is what `watches.json` keeps. One type rather than a live one and
+/// a persisted one — there is nothing in an address that doesn't survive a
+/// write. `Debug` stays redacted through `Secret`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAddress {
     path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<Secret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     identity: Option<SocketIdentity>,
 }
 

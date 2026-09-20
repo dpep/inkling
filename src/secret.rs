@@ -4,9 +4,14 @@
 //! `{:?}` is all it takes. Wrapping them makes the leak impossible rather
 //! than merely discouraged: reading the value takes an explicit `expose()`.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, PartialEq, Eq)]
+/// Serializable on purpose, and only on purpose: an attached session's token
+/// has to live in `watches.json` beside the address it belongs to, and that
+/// file is written 0600. Serialization was never where tokens leaked —
+/// `Debug` was, and it stays redacted.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Secret(String);
 
 #[derive(Debug, thiserror::Error)]
@@ -126,6 +131,18 @@ mod tests {
     #[test]
     fn exposing_returns_the_real_value() {
         assert_eq!(Secret::new("abc").expose(), "abc");
+    }
+
+    #[test]
+    fn a_secret_round_trips_as_a_plain_string() {
+        // What the state file holds. Redaction is Debug's job; a stored token
+        // that came back as "redacted" would be a token that never worked.
+        let json = serde_json::to_string(&Secret::new("tok_abc123")).unwrap();
+        assert_eq!(json, r#""tok_abc123""#);
+        assert_eq!(
+            serde_json::from_str::<Secret>(&json).unwrap().expose(),
+            "tok_abc123"
+        );
     }
 
     #[test]

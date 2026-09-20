@@ -16,15 +16,21 @@
 //! poller later — needs no state of its own and loses nothing when killed.
 
 use crate::adapters::lock::FileLock;
+use crate::adapters::session_socket::SessionAddress;
 use crate::domain::model::Reference;
 use crate::domain::watch::{Event, Sighting, Standing, transitions};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const VERSION: u32 = 1;
+
+/// The file holds session tokens, so nobody else on the machine reads it.
+const OWNER_ONLY: u32 = 0o600;
 
 /// How long a transition stays readable, and how long a silent subscriber
 /// keeps its cursor.
@@ -33,6 +39,16 @@ pub const VERSION: u32 = 1;
 /// would let one dead session pin it forever, and a transition nobody read in
 /// a day is not something to act on — the work moved on without it.
 pub const RETENTION: TimeDelta = TimeDelta::hours(24);
+
+/// How long a subscriber record outlives its last sign of life.
+///
+/// Deliberately longer than the event log, and counted in days rather than
+/// hours: a subscribed session that is waiting for something is silent by
+/// definition — that is the whole case for pushing to it — so an hour of
+/// quiet says nothing about whether it is still there. Dropping the record
+/// would drop the address push needs, and the cursor a resumed session
+/// returns to.
+pub const SUBSCRIBER_RETENTION: TimeDelta = TimeDelta::days(7);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watches {
@@ -89,12 +105,22 @@ impl Pruned {
     }
 }
 
+/// A named cursor, which may also carry somewhere to push to.
+///
+/// That sentence is the whole of push delivery. A subscriber is told each
+/// transition once, by whichever of push and pull reaches it first, and the
+/// cursor is what makes "once" true across both.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscriber {
     pub cursor: u64,
-    /// Last time this subscriber asked. A cursor nobody reads is dropped with
-    /// the events it was pointing at.
+    /// Last time this subscriber asked, or was pushed to. A cursor with no
+    /// sign of life for `SUBSCRIBER_RETENTION` is dropped.
     pub seen_at: DateTime<Utc>,
+    /// Where a running session is listening, while one is. Absent means pull
+    /// only — which is every subscriber that predates `inkling subscribe`,
+    /// and every session that has since ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<SessionAddress>,
 }
 
 impl Watches {
@@ -229,14 +255,7 @@ impl Watches {
     /// the next poll will restate anyway.
     pub fn take(&mut self, subscriber: &str, now: DateTime<Utc>) -> Vec<Event> {
         let head = self.last_seq;
-        let entry = self.subscribers.entry(subscriber.to_string());
-        let cursor = entry
-            .and_modify(|s| s.seen_at = now)
-            .or_insert(Subscriber {
-                cursor: head,
-                seen_at: now,
-            })
-            .cursor;
+        let cursor = self.meet(subscriber, now).cursor;
 
         let due = crate::domain::watch::since(&self.events, cursor).to_vec();
         if let Some(entry) = self.subscribers.get_mut(subscriber) {
@@ -250,6 +269,80 @@ impl Watches {
             "events read"
         );
         due
+    }
+
+    /// The subscriber's record, created at the head of the log if this is the
+    /// first anyone has heard of it.
+    ///
+    /// Starting at the head rather than at zero is the baseline rule one level
+    /// up: a session met for the first time doesn't inherit transitions
+    /// another session already acted on.
+    fn meet(&mut self, subscriber: &str, now: DateTime<Utc>) -> &mut Subscriber {
+        let head = self.last_seq;
+        let entry = self
+            .subscribers
+            .entry(subscriber.to_string())
+            .or_insert(Subscriber {
+                cursor: head,
+                seen_at: now,
+                address: None,
+            });
+        entry.seen_at = now;
+        entry
+    }
+
+    /// Attach somewhere to push to. Reports whether it replaced an address
+    /// that was already there.
+    ///
+    /// Re-subscribing keeps the cursor: `claude --resume` keeps the session
+    /// id but gets a new process and a new socket, and what that session
+    /// wants is the net change since it left — not a replay of it, and not
+    /// silence about it.
+    pub fn attach(
+        &mut self,
+        subscriber: &str,
+        address: SessionAddress,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.meet(subscriber, now)
+            .address
+            .replace(address)
+            .is_some()
+    }
+
+    /// Stop pushing to a subscriber, and nothing else.
+    ///
+    /// The cursor and everything past it stay, so a session that ends with
+    /// unread news can still pull it on its way back in. Reports whether
+    /// there was an address to detach.
+    pub fn detach(&mut self, subscriber: &str) -> bool {
+        self.subscribers
+            .get_mut(subscriber)
+            .and_then(|entry| entry.address.take())
+            .is_some()
+    }
+
+    /// Every subscriber a push could reach, with where its cursor sits.
+    pub fn attached(&self) -> Vec<(&str, &SessionAddress, u64)> {
+        self.subscribers
+            .iter()
+            .filter_map(|(id, entry)| {
+                let address = entry.address.as_ref()?;
+                Some((id.as_str(), address, entry.cursor))
+            })
+            .collect()
+    }
+
+    /// Move a cursor up to a sequence number that was successfully pushed.
+    ///
+    /// Forwards only. A prompt that pulled while the push was in flight has
+    /// already moved it, and winding it back would tell that session the same
+    /// thing twice — which is the one promise this feed makes.
+    pub fn pushed(&mut self, subscriber: &str, seq: u64, now: DateTime<Utc>) {
+        if let Some(entry) = self.subscribers.get_mut(subscriber) {
+            entry.cursor = entry.cursor.max(seq);
+            entry.seen_at = now;
+        }
     }
 
     /// Drop what has aged out: expired watches, events past retention, and
@@ -269,7 +362,7 @@ impl Watches {
         });
         self.events.retain(|event| now - event.at < retention);
         self.subscribers
-            .retain(|_, subscriber| now - subscriber.seen_at < retention);
+            .retain(|_, subscriber| now - subscriber.seen_at < SUBSCRIBER_RETENTION);
         Pruned {
             watches: before.0 - self.watches.len(),
             events: before.1 - self.events.len(),
@@ -383,8 +476,22 @@ impl WatchStore {
         }
         let json =
             serde_json::to_string_pretty(watches).map_err(|e| StoreError::Write(e.to_string()))?;
+
+        // Owner-only from the moment it exists: this file carries session
+        // tokens. `mode` covers the file this call creates; `set_permissions`
+        // covers a temp left behind by an earlier, looser write.
         let temp = self.path.with_extension("tmp");
-        std::fs::write(&temp, json).map_err(|e| StoreError::Write(e.to_string()))?;
+        let write = |temp: &Path| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(OWNER_ONLY)
+                .open(temp)?;
+            file.set_permissions(std::fs::Permissions::from_mode(OWNER_ONLY))?;
+            file.write_all(json.as_bytes())
+        };
+        write(&temp).map_err(|e| StoreError::Write(e.to_string()))?;
         std::fs::rename(&temp, &self.path).map_err(|e| StoreError::Write(e.to_string()))
     }
 }
@@ -643,22 +750,146 @@ mod tests {
     }
 
     #[test]
-    fn old_events_and_silent_subscribers_age_out_together() {
+    fn old_events_age_out_without_taking_their_readers_with_them() {
         let mut watches = watching(State::Open);
         watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
-        watches.take("gone", now());
+        watches.take("quiet", now());
 
-        let much_later = now() + TimeDelta::hours(25);
-        watches.collect_garbage(much_later, RETENTION);
-
+        watches.collect_garbage(now() + TimeDelta::hours(25), RETENTION);
         assert!(
             watches.events.is_empty(),
             "a day-old transition is not news"
         );
+        assert_eq!(
+            watches.subscribers.len(),
+            1,
+            "a session waiting for something is silent by definition"
+        );
+
+        watches.collect_garbage(now() + TimeDelta::days(8), RETENTION);
         assert!(
             watches.subscribers.is_empty(),
-            "a cursor nobody reads must not pin the log"
+            "but a week of nothing at all is gone"
         );
+    }
+
+    fn address(path: &str) -> SessionAddress {
+        SessionAddress::new(path, Some(crate::secret::Secret::new("tok_s3cret")))
+    }
+
+    #[test]
+    fn re_subscribing_replaces_the_address_and_keeps_the_cursor() {
+        // `claude --resume` keeps the session id and gets a new socket. The
+        // returning session wants the net change since it left: replaying
+        // what it was already told would be noise, and starting it over at
+        // the head would lose what moved while it was away.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/first"), now());
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
+
+        let replaced = watches.attach("s-1", address("/tmp/second"), now());
+        assert!(replaced, "it said so");
+
+        let attached = watches.attached();
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].1.path(), Path::new("/tmp/second"));
+        assert_eq!(
+            watches.take("s-1", now()).len(),
+            1,
+            "the transition it missed is still owed to it"
+        );
+    }
+
+    #[test]
+    fn detaching_stops_the_push_and_nothing_else() {
+        // A session that ends with unread news gets it when it comes back,
+        // or from any other reader of the same cursor.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
+
+        assert!(watches.detach("s-1"));
+        assert!(watches.attached().is_empty(), "nowhere left to push");
+        assert!(!watches.detach("s-1"), "and nothing left to detach");
+        assert_eq!(
+            watches.take("s-1", now()).len(),
+            1,
+            "the event is still pullable"
+        );
+    }
+
+    #[test]
+    fn a_push_and_a_pull_never_deliver_the_same_transition_twice() {
+        // One cursor, moved by whichever got there first. The push here lands
+        // while the prompt hook is mid-pull.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
+
+        let pushed = watches.attached()[0].2;
+        let due = crate::domain::watch::since(&watches.events, pushed).to_vec();
+        assert_eq!(due.len(), 1);
+        watches.pushed("s-1", due[0].seq, now());
+
+        assert!(
+            watches.take("s-1", now()).is_empty(),
+            "the prompt does not repeat what the push delivered"
+        );
+    }
+
+    #[test]
+    fn a_late_push_does_not_wind_a_cursor_back() {
+        // The other order: the prompt pulled while the push was in flight.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
+        watches.record(&[(pr(3), seen_pull(State::Merged, None))], now());
+
+        assert_eq!(watches.take("s-1", now()).len(), 2, "pulled both");
+        watches.pushed("s-1", 1, now());
+        assert!(
+            watches.take("s-1", now()).is_empty(),
+            "the second event must not come round again"
+        );
+    }
+
+    #[test]
+    fn an_address_survives_a_round_trip_through_the_file() {
+        let store = WatchStore::new(scratch("address"));
+        store
+            .update(now(), |watches| {
+                watches.attach("s-1", address("/tmp/s"), now())
+            })
+            .unwrap();
+
+        let reloaded = store.read();
+        let attached = reloaded.attached();
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].0, "s-1");
+        assert_eq!(attached[0].1.path(), Path::new("/tmp/s"));
+    }
+
+    #[test]
+    fn the_file_is_readable_only_by_its_owner() {
+        // It holds session tokens now.
+        let path = scratch("permissions");
+        let store = WatchStore::new(&path);
+        store
+            .update(now(), |watches| {
+                watches.attach("s-1", address("/tmp/s"), now())
+            })
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, OWNER_ONLY, "{mode:o}");
+    }
+
+    #[test]
+    fn a_stored_subscriber_never_writes_its_token_to_a_log() {
+        let mut watches = Watches::default();
+        watches.attach("s-1", address("/tmp/s"), now());
+        let debug = format!("{watches:?}");
+        assert!(!debug.contains("s3cret"), "{debug}");
     }
 
     #[test]
