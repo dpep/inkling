@@ -46,7 +46,8 @@ impl Category {
 pub enum Standing {
     PullRequest {
         state: State,
-        /// `None` when the repository runs no checks at all.
+        /// `None` when the head commit has no check rollup — no checks
+        /// configured, or none created yet. See `carried_over`.
         checks: Option<CheckState>,
     },
     Issue {
@@ -147,17 +148,35 @@ pub struct Event {
     pub audience: BTreeSet<String>,
 }
 
-/// What changed between the last standing and this sighting.
+/// What one reading amounts to, given the reading before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reading {
+    /// Where the reference stands now: this sighting, with any axis it did not
+    /// observe carried over from the standing before it.
+    pub standing: Standing,
+    /// What moved. Empty on a baseline, and empty when nothing did.
+    pub moved: Vec<Transition>,
+}
+
+/// Compare a sighting against the standing before it.
 ///
 /// `before` is `None` on the first sighting of a watch, which yields nothing:
 /// a baseline is not an event. Without that rule every new watch would
 /// announce a state its owner had just looked up.
-pub fn transitions(before: Option<&Standing>, after: &Sighting) -> Vec<Transition> {
+///
+/// The standing comes back *with* the transitions rather than beside them,
+/// because the two have to agree: storing a standing other than the one that
+/// was compared would diff the next reading against something nobody was ever
+/// told about.
+pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
+    let standing = carried_over(before, &after.standing);
     let Some(before) = before else {
-        return Vec::new();
+        return Reading {
+            standing,
+            moved: Vec::new(),
+        };
     };
-
-    match (before, &after.standing) {
+    let moved = match (before, &standing) {
         (
             Standing::PullRequest {
                 state: was,
@@ -200,11 +219,43 @@ pub fn transitions(before: Option<&Standing>, after: &Sighting) -> Vec<Transitio
         // Same status, or a reference that somehow changed kind — which it
         // can't, since a watch is keyed by the reference itself.
         _ => Vec::new(),
+    };
+    Reading { standing, moved }
+}
+
+/// A pull request whose head commit has no check rollup keeps the rollup it
+/// had.
+///
+/// `None` means both "this repository runs no checks" and "the commit pushed a
+/// second ago has no suite yet", and one reading cannot tell them apart. Once a
+/// rollup has been seen, its absence is a gap in our observation rather than a
+/// standing: carrying it over makes the feed report what it would have reported
+/// had the suite appeared at once, so what arrives no longer depends on whether
+/// a poll happened to land in the gap.
+///
+/// Not symmetric, on purpose. A rollup we have never seen becoming one we have
+/// is news — suppressing that too would silence a suite that goes straight to
+/// red on a pull request watched before its first check existed.
+fn carried_over(before: Option<&Standing>, after: &Standing) -> Standing {
+    match (before, after) {
+        (
+            Some(Standing::PullRequest {
+                checks: Some(had), ..
+            }),
+            Standing::PullRequest {
+                state,
+                checks: None,
+            },
+        ) => Standing::PullRequest {
+            state: *state,
+            checks: Some(*had),
+        },
+        _ => after.clone(),
     }
 }
 
-/// `None` is a repository with no checks, which reads better as a word than
-/// as an absence in `pending → none`.
+/// `None` is a pull request with no check rollup, which reads better as a word
+/// than as an absence in `none → pending`.
 fn checks_label(checks: Option<CheckState>) -> &'static str {
     match checks {
         Some(state) => state.as_str(),
@@ -311,13 +362,29 @@ mod tests {
         }
     }
 
+    /// What moved, where the standing that came back with it isn't the point.
+    fn changed(before: Option<&Standing>, after: &Sighting) -> Vec<Transition> {
+        reading(before, after).moved
+    }
+
+    fn labels(moved: &[Transition]) -> Vec<(&str, &str, &str)> {
+        moved
+            .iter()
+            .map(|t| (t.axis.as_str(), t.from.as_str(), t.to.as_str()))
+            .collect()
+    }
+
+    fn checks(state: State, checks: Option<CheckState>) -> Standing {
+        Standing::PullRequest { state, checks }
+    }
+
     #[test]
     fn the_first_sighting_is_a_baseline_not_an_event() {
         // The rule the whole feed rests on: a subscriber hears about change,
         // not about where things already were when it subscribed.
-        assert!(transitions(None, &pull(State::Open, None)).is_empty());
-        assert!(transitions(None, &pull(State::Merged, Some(CheckState::Failure))).is_empty());
-        assert!(transitions(None, &issue("In Progress", Category::Indeterminate)).is_empty());
+        assert!(changed(None, &pull(State::Open, None)).is_empty());
+        assert!(changed(None, &pull(State::Merged, Some(CheckState::Failure))).is_empty());
+        assert!(changed(None, &issue("In Progress", Category::Indeterminate)).is_empty());
     }
 
     #[test]
@@ -326,7 +393,7 @@ mod tests {
             state: State::Open,
             checks: None,
         };
-        let moved = transitions(Some(&before), &pull(State::Merged, None));
+        let moved = changed(Some(&before), &pull(State::Merged, None));
         assert_eq!(moved.len(), 1);
         assert_eq!(moved[0].axis, Axis::State);
         assert_eq!(
@@ -341,9 +408,7 @@ mod tests {
             state: State::Open,
             checks: Some(CheckState::Pending),
         };
-        assert!(
-            transitions(Some(&before), &pull(State::Open, Some(CheckState::Pending))).is_empty()
-        );
+        assert!(changed(Some(&before), &pull(State::Open, Some(CheckState::Pending))).is_empty());
     }
 
     #[test]
@@ -354,7 +419,7 @@ mod tests {
             state: State::Open,
             checks: Some(CheckState::Pending),
         };
-        let moved = transitions(
+        let moved = changed(
             Some(&before),
             &pull(State::Approved, Some(CheckState::Success)),
         );
@@ -374,7 +439,7 @@ mod tests {
             failing: Some("test / build".into()),
             ..pull(State::Open, Some(CheckState::Failure))
         };
-        let moved = transitions(Some(&before), &after);
+        let moved = changed(Some(&before), &after);
         assert_eq!(moved[0].detail.as_deref(), Some("test / build"));
     }
 
@@ -390,7 +455,59 @@ mod tests {
             failing: Some("lint".into()),
             ..pull(State::Open, Some(CheckState::Failure))
         };
-        assert!(transitions(Some(&before), &after).is_empty());
+        assert!(changed(Some(&before), &after).is_empty());
+    }
+
+    #[test]
+    fn a_commit_with_no_rollup_yet_keeps_the_one_it_had() {
+        // Found by dogfooding: pushing to a pull request produced `checks
+        // success → none` and `none → pending` before the `pending → success`
+        // that was the news. The head commit briefly has no rollup, which says
+        // nothing about where CI stands.
+        let green = checks(State::Open, Some(CheckState::Success));
+        let gap = reading(Some(&green), &pull(State::Open, None));
+        assert!(gap.moved.is_empty(), "{:?}", gap.moved);
+        assert_eq!(gap.standing, green, "the rollup is still the one we saw");
+
+        // And when the new suite turns up, the news is that it started — the
+        // same pair of events a poll that missed the gap would have reported.
+        let started = reading(
+            Some(&gap.standing),
+            &pull(State::Open, Some(CheckState::Pending)),
+        );
+        assert_eq!(labels(&started.moved), [("checks", "success", "pending")]);
+    }
+
+    #[test]
+    fn a_verdict_reached_while_the_rollup_was_missing_still_arrives() {
+        // Why the gap is carried over rather than skipped over: suppressing
+        // transitions in *both* directions would let a poll that lands in the
+        // gap swallow a red suite entirely.
+        let green = checks(State::Open, Some(CheckState::Success));
+        let gap = reading(Some(&green), &pull(State::Open, None));
+        let red = reading(
+            Some(&gap.standing),
+            &pull(State::Open, Some(CheckState::Failure)),
+        );
+        assert_eq!(labels(&red.moved), [("checks", "success", "failure")]);
+    }
+
+    #[test]
+    fn a_pull_request_with_no_rollup_to_carry_reports_the_first_one() {
+        // Nothing was ever seen, so there is nothing to carry and the first
+        // rollup is a real first observation. The asymmetry is the point: a
+        // suite that goes straight to red on a pull request watched before its
+        // first check existed must not be silent.
+        let none = checks(State::Open, None);
+        let baseline = reading(None, &pull(State::Open, None));
+        assert!(baseline.moved.is_empty());
+        assert_eq!(
+            baseline.standing, none,
+            "no checks is a standing of its own"
+        );
+
+        let first = reading(Some(&none), &pull(State::Open, Some(CheckState::Failure)));
+        assert_eq!(labels(&first.moved), [("checks", "none", "failure")]);
     }
 
     #[test]
@@ -401,7 +518,7 @@ mod tests {
             state: State::Open,
             checks: Some(CheckState::Failure),
         };
-        let moved = transitions(Some(&before), &pull(State::Open, Some(CheckState::Pending)));
+        let moved = changed(Some(&before), &pull(State::Open, Some(CheckState::Pending)));
         assert_eq!(
             (moved[0].from.as_str(), moved[0].to.as_str()),
             ("failure", "pending")
@@ -417,7 +534,7 @@ mod tests {
             status: "In Review".into(),
             category: Category::Indeterminate,
         };
-        let moved = transitions(Some(&before), &issue("In QA", Category::Indeterminate));
+        let moved = changed(Some(&before), &issue("In QA", Category::Indeterminate));
         assert_eq!(moved.len(), 1);
         assert_eq!(moved[0].axis, Axis::Status);
         assert_eq!(

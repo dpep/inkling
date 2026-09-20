@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A push no longer costs you two useless events.** The head commit briefly has no check rollup,
+  and a reading without one now keeps the rollup it had instead of reporting `checks success → none`
+  and `none → pending` ahead of the `pending → success` that was the news. A first rollup is still
+  reported, so a pull request watched before its first check existed can't go red silently, and
+  `wait --until checks` still answers straight away in a repository that runs no checks.
 - **New: `inkling subscribe` / `inkling unsubscribe`.** A Claude Code session attaches its inbox,
   and a resident Inkling pushes each transition of something that session is watching into it the
   moment a poll finds it — one line starting `inkling:`, built only from the reference, what moved,
@@ -26,7 +31,9 @@
   `[serve]` configures `interval`, `idle_after` and `max_lifetime`.
 - **`inkling status` shows the server and the readers** — whether one is running (from the lock,
   so a `kill -9` doesn't read as healthy), its pid, uptime, ticks and failures, and for each reader
-  whether it is attached, where it has got to, and how many watches it owns. Never the token.
+  whether it is attached, where it has got to, and how many watches it owns. Never the token. A
+  reader nothing can reach — detached, watching nothing, owed nothing — is counted as dormant rather
+  than listed; its cursor is still kept for a week in case that session comes back.
 - **You must do something: every watch now has an owner, and every read names one.** With several
   sessions running, one session's CI result arriving in another's turn is noise it can't act on.
   A watch registered from a session's Bash belongs to that session; from a terminal it belongs to
@@ -39,9 +46,10 @@
   removing a watch somebody else also has.
 - **`watches.json` is written `0600`**, because it now holds session tokens. An existing file keeps
   its old permissions until the next write.
-- **`inkling watch owner/repo#N` works without the host.** It names a pull request completely once
-  the host defaults; the fill-in-from-tracked rule is `run`'s, where a short form selects among
-  tracked records. Shorter forms still need a tracked match.
+- **`owner/repo#N` works without the host, in every command that takes a reference.** It names a
+  pull request completely once the host defaults, so `watch`, `unwatch`, `wait` and `run` all accept
+  it. Only the shorter forms — `repo#N`, `#N`, `N` — still need a tracked record to select among,
+  which is the one thing a short form is for.
 - **One unresolvable reference no longer stops the rest.** `watch` and `unwatch` report what they
   couldn't resolve, act on what they could, and exit 1. `wait` deliberately keeps its all-or-nothing
   rule.

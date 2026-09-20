@@ -6,6 +6,31 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- All four hooks installed globally; pushes arrive mid-turn as well as when
+  idle, and both read naturally.
+- The PostToolUse hook fired live: `gh pr view 3` auto-watched #3 with the
+  right owner, and the log said which command matched. #3 was already merged
+  and was dropped at its first reading without a message. Good.
+- A session was told `draft → merged` about the pull request it had merged
+  itself seconds earlier. Kept deliberately: `gh pr merge` returns before
+  GitHub has finished, so that line is the confirmation it landed, and it
+  arrives once before the watch removes itself. Reasoning in docs/watching.md.
+- A subscriber left over from before ownership — detached, no watches, owed
+  nothing — sat in `inkling status` for hours. The GC rule is right and does
+  collect it: seven days of silence, chosen so a session that is waiting for
+  something (silent by definition) keeps the cursor `--resume` comes back to.
+  What was wrong was the listing. Fixed in this PR: a reader nothing can reach
+  is counted as dormant, not given a row.
+- `inkling hook` read stdin to EOF with no timeout. Claude Code always closes
+  it, so nothing was observed going wrong — but the worst case of a hook that
+  waits forever is a hung session, which is the wrong worst case to leave
+  lying around. Fixed in this PR: 2s, then it logs and exits 0 as any other
+  hook failure does.
+- Pushing a commit to #7 produced `checks success → none` and `none → pending`
+  in the session before the `pending → success` that mattered. Three turns of
+  attention for one fact. Fixed in this PR: a reading with no rollup keeps the
+  rollup it had, so the push reads `success → pending` then `pending →
+  success`. The reasoning and what it costs are in docs/watching.md.
 - First push into a real session (#7). The session subscribed by hand, watched
   its own PR, and went idle; `inkling: github.com/dpep/inkling#7 checks pending
   → success` woke it. The log said `pushed seq=7 outcome="written"
@@ -19,14 +44,18 @@ fixed, say where and leave the line.
 - `inkling wait dpep/inkling#7` was refused with "nothing tracked references
   it" seconds after `inkling watch dpep/inkling#7` accepted the same words. The
   owner/repo#N fix went into `watch` only. Expected one rule for every command
-  that takes a reference. Open.
+  that takes a reference. Fixed in this PR: `complete` in `main.rs` is that
+  rule, and one test puts the same words through every command.
 - `inkling watch <new pr>` also printed "already merged — nothing left to
   watch" for two older PRs it happened to clean up on the same poll. Expected
   output about what I asked for; someone else's housekeeping belongs in the
-  log. Open.
+  log. Fixed in this PR: `finished_already` reports only the references the
+  command was given.
 - `inkling status` straight after the `watch` that spawned the server said
   `serving no`; a second later it said yes. The spawn returns before the child
-  takes the lock. Harmless, but it's the first thing you look at. Open.
+  takes the lock. Harmless, but it's the first thing you look at. Fixed in this
+  PR: a server records itself as it takes the lock, and `ensure_running` waits
+  up to 250ms for that record rather than returning into a lie.
 - A success message carries no follow-up command while a failure does. Right
   call — there's nothing to look up when CI is green.
 
