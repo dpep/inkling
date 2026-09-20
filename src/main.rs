@@ -505,10 +505,15 @@ fn run(cli: &Cli) -> Result<i32, String> {
         Command::Watch { targets, ttl, json } => {
             let watches = watch_store(&cli.common);
             let clock = SystemClock;
+            let mut refused = Vec::new();
 
             if !targets.is_empty() {
                 let snapshot = store.load().map_err(|e| e.to_string())?;
-                let references = watch_targets(targets, &config.github.hosts, &snapshot)?;
+                let references;
+                (references, refused) = watch_targets(targets, &config.github.hosts, &snapshot);
+                for problem in &refused {
+                    println!("{problem}");
+                }
                 let deadline = clock.now()
                     + TimeDelta::from_std(*ttl).map_err(|_| "--ttl is too long".to_string())?;
 
@@ -525,17 +530,24 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 // `events` next runs: a transition in that gap would be
                 // swallowed into the baseline, which is the one thing the
                 // caller just asked not to happen.
-                match poll(&config, &watches, &clock, None, "watch") {
-                    Ok(polled) => finished_already(&polled, &watches.read()),
-                    Err(error) => {
-                        println!("could not read them just now: {error}");
-                        println!("  the next `inkling events` will pick them up");
+                if !references.is_empty() {
+                    match poll(&config, &watches, &clock, None, "watch") {
+                        Ok(polled) => finished_already(&polled, &watches.read()),
+                        Err(error) => {
+                            println!("could not read them just now: {error}");
+                            println!("  the next `inkling events` will pick them up");
+                        }
                     }
                 }
             }
 
             watch_out(&watches.read(), clock.now(), *json)?;
-            Ok(0)
+            // The good references are watched either way; the exit code is
+            // where a script learns that one of its arguments was not.
+            Ok(match refused.is_empty() {
+                true => 0,
+                false => 1,
+            })
         }
         Command::Unwatch { targets, all } => {
             if targets.is_empty() && !all {
@@ -553,7 +565,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
 
             let snapshot = store.load().map_err(|e| e.to_string())?;
-            let references = watch_targets(targets, &config.github.hosts, &snapshot)?;
+            let (references, refused) = watch_targets(targets, &config.github.hosts, &snapshot);
+            for problem in &refused {
+                println!("{problem}");
+            }
             let removed = watches
                 .update(clock.now(), |file| {
                     references
@@ -572,7 +587,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
                     false => println!("{reference}: not being watched"),
                 }
             }
-            Ok(0)
+            Ok(match refused.is_empty() {
+                true => 0,
+                false => 1,
+            })
         }
         Command::Events {
             since,
@@ -1092,15 +1110,25 @@ fn watch_store(common: &Common) -> inkling::adapters::watches_json::WatchStore {
 
 /// The same targets `wait` takes, plus Jira issues. Channels are refused for
 /// the same reason: there is no such thing as watching one.
+///
+/// Returns what resolved and what didn't, rather than stopping at the first
+/// failure: watching is per-reference, so a typo in one argument must not
+/// cost the caller the watch on the one beside it. The refusals are still
+/// reported, and still change the exit code.
 fn watch_targets(
     targets: &[String],
     hosts: &[String],
     snapshot: &inkling::adapters::store_json::Snapshot,
-) -> Result<Vec<inkling::domain::model::Reference>, String> {
-    targets
-        .iter()
-        .map(|target| watch_target(target, hosts, snapshot))
-        .collect()
+) -> (Vec<inkling::domain::model::Reference>, Vec<String>) {
+    let mut references = Vec::new();
+    let mut refused = Vec::new();
+    for target in targets {
+        match watch_target(target, hosts, snapshot) {
+            Ok(reference) => references.push(reference),
+            Err(problem) => refused.push(problem),
+        }
+    }
+    (references, refused)
 }
 
 /// Resolve one target to watch.
@@ -1554,7 +1582,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{ellipsize, watch_target};
+    use super::{ellipsize, watch_target, watch_targets};
     use inkling::adapters::store_json::Snapshot;
 
     fn hosts() -> Vec<String> {
@@ -1578,6 +1606,19 @@ mod tests {
             let error = watch_target(target, &hosts(), &Snapshot::default()).unwrap_err();
             assert!(error.contains("nothing tracked"), "{target}: {error}");
         }
+    }
+
+    #[test]
+    fn one_unresolvable_reference_does_not_stop_the_others() {
+        // Found by dogfooding: a typo in the second argument cost the watch
+        // on the first one, which was the whole reason for running it.
+        let targets = ["dpep/inkling#3".to_string(), "42".to_string()];
+        let (references, refused) = watch_targets(&targets, &hosts(), &Snapshot::default());
+
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].to_string(), "github.com/dpep/inkling#3");
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("#42"), "{refused:?}");
     }
 
     #[test]
