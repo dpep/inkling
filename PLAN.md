@@ -190,9 +190,11 @@ it off the critical path.
 Decisions deferred *since* this plan was written — with the measurements
 behind them — live in [docs/deferred.md](docs/deferred.md). `inkling wait`
 and its milestones W0–W3 have their own design in
-[docs/waiting.md](docs/waiting.md).
+[docs/waiting.md](docs/waiting.md); `inkling watch` and `inkling events` in
+[docs/watching.md](docs/watching.md), which is also where Jira arrived — as a
+watchable reference type, deliberately not as something detected in Slack.
 
 
-Jira, Calendar, or CI providers. Non-reaction enrichments. The Slack Web API adapter, and with it
+Calendar or CI providers. Non-reaction enrichments. The Slack Web API adapter, and with it
 retraction, the retraction plumbing, and `ChangesRequested` signaling. SQLite. Postgres. Any
 hosted-service component. Each has a named seam in DESIGN.md and none is built now.

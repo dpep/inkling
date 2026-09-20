@@ -22,8 +22,10 @@ Three properties define it:
 The MVP: find GitHub PR links in Slack messages, track each PR along its lifecycle, and keep the
 message's reactions reflecting where it is.
 
-Non-goals: no web UI, no hosted service yet, no Jira/Calendar/CI adapters, no generic automation
-platform, no LLM-driven business logic.
+Non-goals: no web UI, no hosted service yet, no Calendar/CI adapters, no generic automation
+platform, no LLM-driven business logic. (Jira became a reference type for `inkling watch` — see
+[docs/watching.md](docs/watching.md). It is watchable on request, never detected in a Slack
+message, so the enrichment loop above is unchanged.)
 
 ## 2. Core domain model
 
