@@ -6,6 +6,30 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- First push into a real session (#7). The session subscribed by hand, watched
+  its own PR, and went idle; `inkling: github.com/dpep/inkling#7 checks pending
+  → success` woke it. The log said `pushed seq=7 outcome="written"
+  advanced=true`, `events` then printed nothing, `gh pr checks` agreed, and the
+  `wait` running alongside exited 0. Good: four sources, one answer, and no
+  duplicate at the next pull.
+- The pushed message arrives labelled "another Claude session sent a message",
+  with no sender name. It reads fine because of the `inkling:` prefix, but the
+  harness wraps it in advice about teammates' requests. It's a fact, not a
+  request — worth saying so in the skill.
+- `inkling wait dpep/inkling#7` was refused with "nothing tracked references
+  it" seconds after `inkling watch dpep/inkling#7` accepted the same words. The
+  owner/repo#N fix went into `watch` only. Expected one rule for every command
+  that takes a reference. Open.
+- `inkling watch <new pr>` also printed "already merged — nothing left to
+  watch" for two older PRs it happened to clean up on the same poll. Expected
+  output about what I asked for; someone else's housekeeping belongs in the
+  log. Open.
+- `inkling status` straight after the `watch` that spawned the server said
+  `serving no`; a second later it said yes. The spawn returns before the child
+  takes the lock. Harmless, but it's the first thing you look at. Open.
+- A success message carries no follow-up command while a failure does. Right
+  call — there's nothing to look up when CI is green.
+
 - The auto-watch hook costs 0.2ms over the process on a command that isn't a
   candidate, and 3ms when it is — against 5.5ms just to start the binary, 50
   runs each. The process is the cost of a command hook; what inkling does
