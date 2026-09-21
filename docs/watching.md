@@ -360,6 +360,73 @@ an issue with every field defaulted), and unrecognized output is reported
 with a snippet of what actually arrived, because the likeliest failure is a
 different `acli` version.
 
+## How it fails
+
+Four hooks put inkling inside every Claude Code session on the machine, so the
+guarantee has to be stated rather than hoped for:
+
+> **Inkling failing costs a session the notification and nothing else.** Every
+> hook exits 0, prints nothing it didn't mean to, and returns inside a bound
+> that does not depend on the store, the network, or any other process.
+
+Exit 0 is not politeness, it is the protocol: on `UserPromptSubmit` exit 2
+erases the user's prompt, and on `SessionStart` it blocks the session. So
+`swallowing` is where every hook ends — above the config load, and catching
+panics, because those are the two failures the hook body never gets to see.
+
+The bounds, measured 2026-09-20 on this machine, 30 runs each:
+
+| | |
+| --- | --- |
+| `hook prompt`, nothing watched | **6.5ms** median, 7.1ms p90 |
+| `hook post-tool`, command isn't a candidate | **6.1ms** |
+| `hook post-tool`, registers a watch | **7.1ms** |
+| `hook post-tool`, 1MiB of tool output | **11.4ms** |
+| the binary starting at all | ~5.5ms of the above |
+
+And the caps, which is what the worst case is made of:
+
+| | |
+| --- | --- |
+| waiting for the data lock | **250ms**, then `the store was busy` (`PATIENCE`) |
+| a prompt hook's refresh, all of it | **3s**, then `gave up refreshing watches` (`REFRESH_BUDGET`) |
+| a token command | **2s** (`gh auth token` measures 27ms) |
+| one `acli` read | **5s** (measures 1.5s) |
+| reading the hook payload from stdin | **2s** |
+| a connect or a write to a session socket | **3s** each |
+| messages pushed to one session | **5 per 5 minutes** (`PUSH_BUDGET`) |
+| references one tool call may register | **8** (`MAX_REFERENCES`) |
+
+So a prompt hook's worst case is 3s of refresh plus 250ms of lock plus the
+process: **~3.3s against a 30s budget**, whatever GitHub, `gh`, `acli` or
+another inkling is doing. A `post-tool` or `session-end` hook never looks
+upstream at all, so theirs is 250ms plus the process.
+
+What that costs, plainly: a hook that gives up **skips a refresh, not a
+message**. The feed is complete either way — every transition is in the log for
+24 hours addressed to its readers — so the next prompt, or the server's next
+tick, picks up what this one didn't.
+
+The daemon's tick is bounded but not short: one `acli` per watched issue at 5s
+each, a GitHub request at 30s, and delivery at up to 6s per attached session.
+Measured with a hung `acli`: ticks every 5.01s, `longest_tick_ms=5016`, still
+serving. Nothing a session waits on is inside that — delivery happens between
+the two store operations rather than inside one, so the data lock is held for
+milliseconds of JSON however long the tick takes. A tick with five attached
+sessions, only one of them healthy, took **2ms** and detached the other four
+with a reason each.
+
+Two things are deliberately left:
+
+- **A server that cannot start is respawned by every hook that has a reason for
+  one**, with no backoff. It costs one fork and about 2ms, and since fatal
+  errors now reach the log the reason is one `inkling logs` away. Backoff needs
+  state that a doomed child never gets to write, which is more machinery than
+  the fault is worth.
+- **Deleting `serve.lock` lets two daemons run at once**, each pushing. The push
+  budget is what bounds the damage; a lock generation number would prevent it,
+  and nothing has ever deleted that file except a person.
+
 ## What would tell us this is wrong
 
 Every poll writes a summary line; every transition, baseline, expiry, prune
