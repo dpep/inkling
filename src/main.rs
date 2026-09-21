@@ -351,6 +351,12 @@ fn main() {
     let code = match run(&cli) {
         Ok(code) => code,
         Err(error) => {
+            // Both sinks, deliberately. A server spawned by a hook has its
+            // stdio on /dev/null and no terminal to print to, so until this
+            // line existed a `serve` that died on its first act — an
+            // unresolvable token, most often — died without saying anything
+            // anywhere, while every hook went on spawning another one.
+            tracing::error!(error, "inkling failed");
             eprintln!("inkling: {error}");
             2
         }
@@ -360,6 +366,15 @@ fn main() {
     // error that explains the exit code.
     drop(_logging);
     std::process::exit(code);
+}
+
+/// Where the log files are, for reading them back. `off` suppresses writing
+/// them, not reading whatever is already there.
+fn log_directory(common: &Common) -> PathBuf {
+    match common.log_dir.as_deref() {
+        Some("off") | None => obs::default_log_directory(),
+        Some(dir) => PathBuf::from(dir),
+    }
 }
 
 fn config_path(common: &Common) -> PathBuf {
@@ -395,15 +410,20 @@ fn run(cli: &Cli) -> Result<i32, String> {
             follow,
             path: show_path,
         } => {
-            let directory = match cli.common.log_dir.as_deref() {
-                Some("off") | None => obs::default_log_directory(),
-                Some(dir) => PathBuf::from(dir),
-            };
+            let directory = log_directory(&cli.common);
             if *show_path {
                 println!("{}", directory.display());
                 return Ok(0);
             }
             return logs(&directory, *lines, grep.as_deref(), *follow);
+        }
+        // Before the config load, so a config that won't parse is this hook's
+        // failure rather than the session's — see `swallowing`.
+        Command::Hook { event } => {
+            return Ok(swallowing(*event, || {
+                let config = Config::load(&path).map_err(|e| e.to_string())?;
+                hook(*event, &config, &cli.common)
+            }));
         }
         Command::Config {
             action: Some(ConfigAction::Get { key }),
@@ -528,15 +548,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             Ok(0)
         }
-        Command::Hook { event } => {
-            // A hook runs inside somebody's session, on a short timeout, and
-            // its failure is their failure. So: whatever went wrong, it goes
-            // to the log and this exits 0 having said nothing.
-            if let Err(error) = hook(*event, &config, &cli.common) {
-                tracing::warn!(event = event.as_str(), error, "hook failed");
-            }
-            Ok(0)
-        }
+        // Handled above, before the config load it must not depend on.
+        Command::Hook { .. } => unreachable!(),
         Command::Serve => {
             let token = Secret::resolve(
                 config.github.token_env.as_deref(),
@@ -631,6 +644,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             println!();
             println!("github      {}", credentials(&config));
+
+            println!();
+            last_day_out(&log_directory(&cli.common), now);
             Ok(0)
         }
         Command::Watch { targets, ttl, json } => {
@@ -1410,28 +1426,99 @@ fn field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
 /// nothing.
 const PAYLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The hook payload, or nothing within `timeout`.
+/// Do `work`, or give up on it once `budget` has passed.
 ///
-/// Read on a thread rather than through a non-blocking descriptor: the process
-/// exits either way, so a reader still parked on a pipe nobody closed costs one
-/// thread until then, and stdin needs no special setup to be read normally.
+/// On a thread, because the alternative is bounding every step a poll is made
+/// of — a token subprocess, an HTTP request, one `acli` per issue — and the
+/// sum of those bounds is not a bound worth having. The process exits either
+/// way, so work still in flight costs one thread until then; abandoning a poll
+/// loses its own request and nothing else, since every write it might still
+/// make lands under the store's lock by rename.
+fn within<T: Send + 'static>(
+    budget: std::time::Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (done, waiting) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    waiting.recv_timeout(budget).ok()
+}
+
+/// The hook payload, or nothing within `timeout`.
 fn payload<R: std::io::Read + Send + 'static>(
     source: R,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let (done, waiting) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    within(timeout, move || {
         let mut raw = String::new();
         let mut source = source;
-        let read = std::io::Read::read_to_string(&mut source, &mut raw);
-        let _ = done.send(read.map(|_| raw).map_err(|e| e.to_string()));
-    });
-    match waiting.recv_timeout(timeout) {
-        Ok(read) => read,
-        Err(_) => Err(format!(
+        std::io::Read::read_to_string(&mut source, &mut raw)
+            .map(|_| raw)
+            .map_err(|e| e.to_string())
+    })
+    .unwrap_or_else(|| {
+        Err(format!(
             "no hook payload on stdin within {}",
             humantime::format_duration(timeout)
-        )),
+        ))
+    })
+}
+
+/// Run a hook, and cost the calling session nothing whatever happens.
+///
+/// A hook's exit code is a decision in Claude Code's protocol, not a status: 2
+/// on `UserPromptSubmit` erases the user's prompt, and 2 on `SessionStart`
+/// blocks the session. So the answer is always 0, and that has to hold for the
+/// failures the body below never gets to see — a config that won't parse, and a
+/// panic.
+fn swallowing(event: HookEvent, run: impl FnOnce() -> Result<(), String>) -> i32 {
+    // The default hook writes to stderr, which is noise in somebody's
+    // transcript; whoever is debugging this is reading the log.
+    std::panic::set_hook(Box::new(|panicked| {
+        tracing::error!(%panicked, "panicked");
+    }));
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    let _ = std::panic::take_hook();
+
+    match ran {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(event = event.as_str(), error, "hook failed"),
+        // The panic itself was logged by the hook above.
+        Err(_) => tracing::error!(event = event.as_str(), "hook panicked"),
+    }
+    0
+}
+
+/// How long a prompt hook will spend looking upstream before answering with
+/// what it already has.
+///
+/// A real poll of 14 references measured 1.65s (docs/watching.md), so this
+/// covers the honest case and cuts the pathological one: a `gh auth token`
+/// waiting on a keychain, an `acli` that never returns. Giving up costs a
+/// refresh, not a message — the feed is complete either way, and a resident
+/// server is what is supposed to be paying for this.
+const REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Look upstream on the prompt path, or don't, and say which.
+fn refresh_within(
+    budget: std::time::Duration,
+    config: Config,
+    path: &std::path::Path,
+    refresh: TimeDelta,
+) {
+    let path = path.to_path_buf();
+    let polled = within(budget, move || {
+        let store = inkling::adapters::watches_json::WatchStore::new(path);
+        poll(&config, &store, &SystemClock, Some(refresh), "prompt")
+    });
+    match polled {
+        Some(Ok(_)) => {}
+        Some(Err(error)) => tracing::warn!(%error, "could not refresh watches"),
+        None => tracing::warn!(
+            budget_ms = budget.as_millis() as u64,
+            "gave up refreshing watches; answering with what is already known"
+        ),
     }
 }
 
@@ -1523,10 +1610,8 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             // The pull leg, and the reason push is allowed to be lossy: if a
             // message was held or refused, this is where it turns up.
             let refresh = TimeDelta::seconds(60);
-            if watches.read().due(clock.now(), refresh)
-                && let Err(error) = poll(config, &watches, &clock, Some(refresh), "prompt")
-            {
-                tracing::warn!(%error, "could not refresh watches");
+            if watches.read().due(clock.now(), refresh) {
+                refresh_within(REFRESH_BUDGET, config.clone(), watches.path(), refresh);
             }
             let due = watches
                 .update(clock.now(), |file| {
@@ -1976,6 +2061,34 @@ fn serve_out(status: &inkling::serve::Status) {
     }
 }
 
+/// What the last day cost and produced, read back out of the log.
+///
+/// "Is inkling being used, and is it working" was five greps: the counts are
+/// spread across a hook, a resident server and a terminal, and only the log
+/// sees all three. This is the one place that adds them up. Every line here
+/// names the `inkling logs -g` that shows the detail behind it.
+fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
+    let from = (now - TimeDelta::hours(24))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let lines = obs::since(directory, &from);
+    let tally = obs::Tally::of(lines.iter().map(String::as_str));
+
+    println!("last 24h    {} sessions subscribed", tally.subscribed);
+    println!(
+        "  watches   {} registered, {} transitions",
+        tally.watches, tally.transitions
+    );
+    println!(
+        "  delivered {} pushed, {} withheld, {} pulled",
+        tally.pushed, tally.withheld, tally.pulls
+    );
+    println!(
+        "  trouble   {} hook failures, {} references unread, {} errors",
+        tally.hook_failures, tally.unread, tally.errors
+    );
+}
+
 /// Who is reading, where each one has got to, and whether it can be pushed
 /// to. Never the token, and never the socket path — neither is anybody's
 /// business at a glance.
@@ -2218,7 +2331,8 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, ellipsize, finished_already, payload, wait_targets, watch_target, watch_targets,
+        HookEvent, classify, ellipsize, finished_already, payload, swallowing, wait_targets,
+        watch_target, watch_targets, within,
     };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
@@ -2361,6 +2475,48 @@ mod tests {
 
         let error = payload(Silent, std::time::Duration::from_millis(20)).unwrap_err();
         assert!(error.contains("within 20ms"), "{error}");
+    }
+
+    #[test]
+    fn work_that_overruns_its_budget_is_left_behind() {
+        // The refresh a prompt hook pays for: a `gh auth token` that never
+        // returns, or an `acli` that hangs, must cost the prompt the budget
+        // and not a second more.
+        let started = std::time::Instant::now();
+        let answer = within(std::time::Duration::from_millis(50), || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            "too late"
+        });
+
+        assert_eq!(answer, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn work_that_finishes_in_time_comes_back() {
+        assert_eq!(
+            within(std::time::Duration::from_secs(5), || "in time"),
+            Some("in time")
+        );
+    }
+
+    #[test]
+    fn a_hook_that_fails_costs_the_session_nothing() {
+        // Exit codes are decisions in the hook protocol: 2 on
+        // UserPromptSubmit erases the prompt, 2 on SessionStart blocks the
+        // session. Nothing inkling can get wrong is worth either.
+        assert_eq!(
+            swallowing(HookEvent::Prompt, || Err("the config won't parse".into())),
+            0
+        );
+    }
+
+    #[test]
+    fn a_hook_that_panics_costs_the_session_nothing() {
+        assert_eq!(
+            swallowing(HookEvent::Prompt, || panic!("somewhere deep")),
+            0
+        );
     }
 
     #[test]

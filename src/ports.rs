@@ -229,6 +229,11 @@ pub enum StoreError {
     Write(String),
     #[error("state was written by a newer version ({found}); refusing to overwrite it")]
     FutureVersion { found: u32 },
+    /// Somebody else held the lock for longer than the caller could wait. Its
+    /// own class because it is the one store failure that is nobody's fault
+    /// and fixes itself: the next caller gets in.
+    #[error("the store was busy for {waited_ms}ms")]
+    Busy { waited_ms: u64 },
 }
 
 pub trait Clock {

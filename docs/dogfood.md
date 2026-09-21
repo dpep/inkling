@@ -6,6 +6,82 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- The audit's release build went live the moment it finished: the installed
+  `inkling` is a symlink into `target/release`, so every session's hooks ran
+  ten unmerged commits for half an hour, and a repro of a bug "on the installed
+  build" silently tested the fix instead. Expected installing to be something
+  you do, not something a build does. Open — CLAUDE.md now says to build
+  branches in debug; a copy instead of a symlink would close it.
+- First pushed failure, on another repo (myclaude#3): `checks pending →
+  failure: contextdb-mcp stdio smoke (gh pr checks 3 --repo …)`. It named the
+  job, and the job turned out to have been red on that repo's main for three
+  weeks — found and fixed the same hour. Good. But the push came when the
+  first job went red, and GitHub doesn't serve a job's log until the whole run
+  finishes, so the next step had to wait on `gh run watch`. Open: push red
+  when the rollup is final, or say the logs may not be ready.
+- Watching PRs in a second repo needed nothing: the hook registered them, the
+  server polled both repos in one query, and each result arrived once.
+
+A resilience audit ran every hook against a scratch state directory and broke
+things on purpose. The bar was that inkling failing must cost a session nothing
+but the missing notification, and the log must say what happened. Nine findings
+in severity order, all fixed on the `resilience` branch.
+
+- A `config.toml` that wouldn't parse made all four hooks exit 2. On
+  UserPromptSubmit exit 2 *erases the user's prompt*, and on SessionStart it
+  blocks the session — so one bad character in a config file silently broke
+  every prompt on this machine. Expected a hook to be incapable of exiting
+  non-zero. Fixed in `swallowing` in `main.rs`: the hook arm now runs above the
+  config load and catches panics too.
+- `hook prompt` waited on the data lock with a blocking flock: measured 19.3s
+  against a lock held for 20s, and post-tool and session-end the same. Expected
+  a bound. Fixed in `FileLock::acquire_within` and `WatchStore::update` — 250ms,
+  then it logs `the store was busy` and gives up. Measured after: 260ms.
+- A `gh auth token` that never returns left `hook prompt` still running at 25s,
+  and so did a hung `acli`. Expected the prompt path to be bounded. Fixed twice
+  over: a 3s deadline on the whole refresh (`within`, `REFRESH_BUDGET`) and
+  timeouts on both subprocesses (`subprocess::output_within`, 2s and 5s). The
+  second is what closes serve.rs's own listed gap — before it, the daemon's
+  first tick against a hung `acli` never came round at all; after, it ticks
+  every 5.01s and keeps serving.
+- One PostToolUse whose tool output listed pull request URLs registered 1,586
+  watches in 19ms, and the next poll asked GitHub for all of them in one
+  492,641-byte query, which GitHub refuses — taking every other watch on the
+  machine down with it for the 24h TTL, and writing 838KiB of log per poll.
+  Expected a cap. Fixed in `detect::MAX_REFERENCES`: eight. Measured after: 8
+  watches, 3.2KiB.
+- A reference that flaps pushed one message per tick with nothing to stop it:
+  measured 7 messages into a live listener in 13s, which is 4/minute for a day
+  at the shipped interval. Claude Code drops *identical* repeats and these
+  alternate. Expected a ceiling on what inkling can cost one session. Fixed in
+  `PUSH_BUDGET`/`PUSH_WINDOW`: five per five minutes, the rest left in the feed.
+  Measured after: 5 in 31s of the same flapping, all 15 transitions still
+  pullable.
+- A `serve` that died on its first act — an unresolvable token, the common case
+  — said nothing anywhere: its stdio is `/dev/null` and a fatal error only went
+  to stderr. Three hooks spawned three doomed servers and the log held only
+  `spawned a server` three times. Fixed in `main`: fatal errors go to the log as
+  well as stderr.
+- `WatchStore::read` turned every failure into an empty store with `.ok()`, so a
+  file chmod 000 or from a newer version read exactly like "nothing is being
+  watched" — and `should_serve`, `due` and the push round all read through it.
+  Fixed: still empty, now with the reason logged.
+- A poll wrote one WARN per unreadable reference. Fixed in `watch::NAMED_FAILURES`:
+  the first five name themselves, the count is on `polled watches`. Measured:
+  200 failures went from 200 lines to 6.
+- Answering "is inkling healthy and is it being used" took five greps, because
+  the counts are spread across a hook, the server and a terminal. Fixed: a
+  `last 24h` block in `inkling status`, counted out of the log.
+- Not fixed, and reported instead: a doomed server is respawned by every hook
+  that has a reason for one, with no backoff — one fork and ~2ms per hook now
+  that nothing waits on it, and visible in the log since the fix above. Also, a
+  deleted `serve.lock` still lets two daemons run at once (measured: both logged
+  `serving`); the push budget is what now bounds what that costs a session.
+- Good, and worth recording: the socket side needed nothing. A tick with five
+  attached sessions — one live, one wedged, one dead socket, one absent path,
+  one a regular file — finished in 2ms, detached the three bad ones with a
+  reason each, and the live one still got its message. `probe`, `vet_path` and
+  the identity pin all did what they say.
 - #8 was the first PR watched with no inkling command typed: the PostToolUse
   hook saw `gh pr create`, registered the watch for the right session, and
   spawned the server (`reason=post-tool`); `status` said `serving yes` at

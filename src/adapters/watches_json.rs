@@ -50,6 +50,25 @@ pub const RETENTION: TimeDelta = TimeDelta::hours(24);
 /// returns to.
 pub const SUBSCRIBER_RETENTION: TimeDelta = TimeDelta::days(7);
 
+/// How many messages one session may be sent in `PUSH_WINDOW`.
+///
+/// A push costs the session a turn, so this is a ceiling on what inkling can
+/// cost one session however badly the thing it is watching behaves. Measured
+/// 2026-09-20: a pull request whose review decision oscillated produced one
+/// push per tick — seven in 13 seconds — and nothing stood between that and
+/// the session until the watch's deadline a day later. Five is more than any
+/// five minutes of genuine news, and what it withholds stays in the feed for
+/// the next prompt.
+pub const PUSH_BUDGET: usize = 5;
+pub const PUSH_WINDOW: TimeDelta = TimeDelta::minutes(5);
+
+/// How long a writer waits for the lock before giving up.
+///
+/// The critical section is a small file read, a tidy and a rename — measured
+/// at 2ms. This is a hundred times that, and still short enough that nobody
+/// watching a session notice it.
+const PATIENCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watches {
     pub version: u32,
@@ -141,6 +160,10 @@ pub struct Subscriber {
     /// and every session that has since ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<SessionAddress>,
+    /// When messages were pushed here, oldest first, kept only for
+    /// `PUSH_WINDOW`. What `allowance` counts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pushes: Vec<DateTime<Utc>>,
 }
 
 impl Watches {
@@ -415,6 +438,7 @@ impl Watches {
                 cursor: head,
                 seen_at: now,
                 address: None,
+                pushes: Vec::new(),
             });
         entry.seen_at = now;
         entry
@@ -467,11 +491,28 @@ impl Watches {
     /// Forwards only. A prompt that pulled while the push was in flight has
     /// already moved it, and winding it back would tell that session the same
     /// thing twice — which is the one promise this feed makes.
-    pub fn pushed(&mut self, subscriber: &str, seq: u64, now: DateTime<Utc>) {
+    pub fn pushed(&mut self, subscriber: &str, seq: u64, sent: usize, now: DateTime<Utc>) {
         if let Some(entry) = self.subscribers.get_mut(subscriber) {
             entry.cursor = entry.cursor.max(seq);
             entry.seen_at = now;
+            entry.pushes.retain(|at| now - *at < PUSH_WINDOW);
+            entry.pushes.extend(std::iter::repeat_n(now, sent));
         }
+    }
+
+    /// How many more messages this session may be sent right now.
+    ///
+    /// Zero is not a failure and nothing is dropped: the transitions stay in
+    /// the feed, addressed to this reader, and the next prompt takes them.
+    pub fn allowance(&self, subscriber: &str, now: DateTime<Utc>) -> usize {
+        let recent = self.subscribers.get(subscriber).map_or(0, |entry| {
+            entry
+                .pushes
+                .iter()
+                .filter(|at| now - **at < PUSH_WINDOW)
+                .count()
+        });
+        PUSH_BUDGET.saturating_sub(recent)
     }
 
     /// Drop what has aged out: expired watches, events past retention, and
@@ -532,23 +573,56 @@ impl WatchStore {
 
     /// Read without taking the lock. Writes land by rename, so a reader sees
     /// one version or the other, never half of one.
+    ///
+    /// A file it cannot use reads as no file, because every caller here is on
+    /// a path that must not fail — but it says so. Silently, "inkling has
+    /// stopped noticing anything" and "nothing is being watched" looked
+    /// identical, which is the one pair of states worth telling apart.
     pub fn read(&self) -> Watches {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Watches>(&raw).ok())
-            .filter(|watches| watches.version <= VERSION)
-            .unwrap_or_default()
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Watches::default(),
+            Err(error) => {
+                tracing::warn!(%error, path = %self.path.display(), "cannot read the watch store");
+                return Watches::default();
+            }
+        };
+        match serde_json::from_str::<Watches>(&raw) {
+            Ok(watches) if watches.version <= VERSION => watches,
+            Ok(watches) => {
+                tracing::warn!(
+                    found = watches.version,
+                    supported = VERSION,
+                    "the watch store is from a newer version; reading it as empty"
+                );
+                Watches::default()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the watch store is unreadable; reading it as empty");
+                Watches::default()
+            }
+        }
     }
 
     /// Load, tidy, change, save — all under the lock, which is the only way
     /// anything in here is written.
+    ///
+    /// The wait for the lock is capped at `PATIENCE`, and a caller that loses
+    /// is told so rather than queued. Every hook Claude Code runs comes through
+    /// here, and a hook that waits on a lock is a session waiting on a lock;
+    /// giving up costs one notification, which is the price this whole tool is
+    /// allowed to charge.
     pub fn update<T>(
         &self,
         now: DateTime<Utc>,
         change: impl FnOnce(&mut Watches) -> T,
     ) -> Result<T, StoreError> {
         let lock_path = FileLock::path_for(&self.path);
-        let _lock = FileLock::acquire(&lock_path).map_err(|e| StoreError::Write(e.to_string()))?;
+        let _lock = FileLock::acquire_within(&lock_path, PATIENCE)
+            .map_err(|e| StoreError::Write(e.to_string()))?
+            .ok_or(StoreError::Busy {
+                waited_ms: PATIENCE.as_millis() as u64,
+            })?;
 
         let mut watches = self.load()?;
         let pruned = watches.collect_garbage(now, RETENTION);
@@ -1058,7 +1132,7 @@ mod tests {
         let pushed = watches.attached()[0].2;
         let due = crate::domain::watch::since(&watches.events, pushed).to_vec();
         assert_eq!(due.len(), 1);
-        watches.pushed("s-1", due[0].seq, now());
+        watches.pushed("s-1", due[0].seq, 1, now());
 
         assert!(
             watches.take("s-1", now()).is_empty(),
@@ -1075,7 +1149,7 @@ mod tests {
         watches.record(&[(pr(3), seen_pull(State::Merged, None))], now());
 
         assert_eq!(watches.take("s-1", now()).len(), 2, "pulled both");
-        watches.pushed("s-1", 1, now());
+        watches.pushed("s-1", 1, 1, now());
         assert!(
             watches.take("s-1", now()).is_empty(),
             "the second event must not come round again"
@@ -1229,5 +1303,30 @@ mod tests {
         std::fs::write(&path, r#"{"version": 99}"#).unwrap();
         let store = WatchStore::new(&path);
         assert!(store.update(now(), |_| ()).is_err());
+    }
+
+    #[test]
+    fn a_writer_gives_up_on_a_held_lock_rather_than_queueing() {
+        // Every hook Claude Code runs writes through here. Whatever is holding
+        // the lock — a stopped process, a store on a stalled filesystem — the
+        // hook has to come back, and the cost is one missed notification.
+        let path = scratch("busy");
+        let store = WatchStore::new(&path);
+        let _held = FileLock::try_acquire(&FileLock::path_for(&path))
+            .unwrap()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let refused = store.update(now(), |w| w.watch(&pr(3), "s-1", forever(), now()));
+
+        assert!(
+            matches!(refused, Err(StoreError::Busy { .. })),
+            "{refused:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?} is not a bound a prompt can pay",
+            started.elapsed()
+        );
     }
 }

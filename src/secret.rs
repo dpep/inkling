@@ -14,6 +14,11 @@ use std::fmt;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Secret(String);
 
+/// How long a token command gets. `gh auth token` measures 27ms, so this is
+/// two orders of magnitude of slack and still inside the 3s a prompt hook
+/// allows its whole refresh.
+const TOKEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
     #[error("environment variable {0} is not set")]
@@ -51,15 +56,19 @@ impl Secret {
     }
 
     /// Run a command and take its stdout, for `gh auth token` and friends.
+    ///
+    /// Bounded, because this is the first thing a poll does and a poll runs on
+    /// a prompt hook. `gh auth token` measures 27ms; a credential helper
+    /// waiting on a keychain measures forever.
     pub fn from_command(command: &str) -> Result<Self, SecretError> {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .map_err(|source| SecretError::Command {
-                command: command.to_string(),
-                source,
-            })?;
+        let output = crate::subprocess::output_within(
+            std::process::Command::new("sh").arg("-c").arg(command),
+            TOKEN_TIMEOUT,
+        )
+        .map_err(|source| SecretError::Command {
+            command: command.to_string(),
+            source,
+        })?;
 
         if !output.status.success() {
             return Err(SecretError::CommandFailed {

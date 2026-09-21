@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **A hook can no longer cost you a prompt.** If `config.toml` didn't parse, every hook exited 2 —
+  which on `UserPromptSubmit` erases the prompt you just typed and on `SessionStart` blocks the
+  session. Hooks now exit 0 whatever happens, including a panic, and say why in `inkling logs`. If
+  you have been losing prompts and have a hand-edited config, this was it.
+- **Nothing a session waits on is unbounded any more.** A prompt hook spends at most 3s looking
+  upstream and 250ms waiting for the store, so its worst case is ~3.3s rather than however long
+  `gh auth token`, `acli`, GitHub or another inkling took — previously measured still running at
+  25s. Giving up skips a refresh, not a message: the feed still has everything for 24 hours. The
+  numbers and what they cost are in docs/watching.md.
+- **A flapping pull request can no longer fill your session.** At most five pushed messages per
+  session per five minutes; the rest wait in `inkling events` for your next prompt. Before this, a
+  review decision that oscillated pushed one message per tick — four a minute, for a day.
+- **`inkling status` has a `last 24h` block** — sessions subscribed, watches registered,
+  transitions, pushed/withheld/pulled, and what went wrong. Health in one command instead of five
+  greps through the log.
+- **One tool call can register at most eight watches.** A command whose output listed pull request
+  URLs registered 1,586 of them, and the poll that followed asked GitHub about all of them at once
+  — which fails, taking every other watch with it. Nothing you do by hand hits this cap.
+- **`acli` and `gh auth token` are killed if they stop answering** (5s and 2s). A hung `acli` used
+  to hang the resident server's tick for good, so nothing was delivered to anyone until it was
+  restarted.
+
 - **A suite that has only started is no longer pushed into a session.** A push costs a turn, and
   `checks … → pending` leaves nothing to do. It stays in `inkling events`, where a prompt made while
   CI runs still sees it; otherwise the verdict is pushed and passes over it.

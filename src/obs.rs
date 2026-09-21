@@ -231,6 +231,75 @@ fn stamp(line: &str) -> Option<&str> {
         .then_some(candidate)
 }
 
+/// Log lines stamped at or after `from`, an RFC 3339 prefix.
+///
+/// Only the two newest files are opened: the suffix is a date, so a 24-hour
+/// window never spans more than two of them, and a window is not a reason to
+/// read a fortnight.
+pub fn since(directory: &Path, from: &str) -> Vec<String> {
+    let mut files = log_files(directory);
+    let recent = files.split_off(files.len().saturating_sub(2));
+    recent
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .flat_map(|text| {
+            chronological(&text)
+                .into_iter()
+                .filter(|line| stamp(line).is_none_or(|at| at >= from))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// What the log says happened in a window.
+///
+/// The counts live in the log rather than the store because they are spread
+/// across processes — a hook, a resident server, somebody at a terminal — and
+/// the daily file is the only place those meet. Counted by the message each
+/// line carries, so renaming a message means updating a marker here; the tests
+/// pin the pairs against real lines.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub subscribed: usize,
+    pub watches: usize,
+    pub transitions: usize,
+    pub pushed: usize,
+    pub withheld: usize,
+    pub pulls: usize,
+    pub hook_failures: usize,
+    pub unread: usize,
+    pub errors: usize,
+}
+
+impl Tally {
+    pub fn of<'a>(lines: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut tally = Self::default();
+        for line in lines {
+            let counts = [
+                (&mut tally.subscribed, line.contains(": subscribed ")),
+                (&mut tally.watches, line.contains("watch registered")),
+                (
+                    &mut tally.transitions,
+                    line.contains("transition reference="),
+                ),
+                (
+                    &mut tally.pushed,
+                    line.contains("pushed subscriber=") && line.contains(r#"outcome="written""#),
+                ),
+                (&mut tally.withheld, line.contains("withheld; the rest")),
+                (&mut tally.pulls, line.contains("events read subscriber=")),
+                (&mut tally.hook_failures, line.contains("hook failed")),
+                (&mut tally.unread, line.contains("could not read watch")),
+                (&mut tally.errors, line.contains(" ERROR ")),
+            ];
+            for (count, matched) in counts {
+                *count += usize::from(matched);
+            }
+        }
+        tally
+    }
+}
+
 pub fn default_log_directory() -> PathBuf {
     crate::adapters::store_json::JsonStore::default_path()
         .parent()
@@ -375,6 +444,57 @@ mod tests {
         std::fs::write(dir.0.join("someone-else.log"), "theirs\n").unwrap();
 
         assert_eq!(tail(&dir.0, 10, None), ["ours"]);
+    }
+
+    /// Real lines, copied from a run, so a renamed message fails here.
+    const SAMPLE: &str = "\
+2026-09-21T00:38:01.505Z  INFO inkling::serve: serving pid=12705 lock=/x/serve.lock
+2026-09-21T00:38:01.508Z  INFO inkling: subscribed subscriber=\"sess-a\" socket=/tmp/a.sock reattached=false
+2026-09-21T00:38:01.509Z  INFO inkling: unsubscribed subscriber=\"sess-b\" detached=true
+2026-09-21T00:38:02.000Z  INFO inkling: watch registered automatically reference=x#9 owner=\"s\" tool=\"Bash\" matched=\"gh pr view\"
+2026-09-21T00:38:03.515Z  INFO inkling::adapters::watches_json: transition reference=x#9 axis=\"state\" from=\"open\" to=\"approved\" seq=1 audience=1
+2026-09-21T00:38:03.516Z  INFO inkling::push: pushed subscriber=\"sess-a\" seq=1 outcome=\"written\" elapsed_ms=0 advanced=true
+2026-09-21T00:38:05.000Z  INFO inkling::push: pushed subscriber=\"sess-a\" seq=2 outcome=\"gone\" elapsed_ms=0 advanced=false
+2026-09-21T00:38:06.000Z  INFO inkling::push: withheld; the rest waits for a prompt subscriber=\"sess-a\" owed=3 allowance=0
+2026-09-21T00:38:07.000Z  INFO inkling::adapters::watches_json: events read subscriber=\"sess-a\" cursor_before=6 cursor_after=7 returned=1
+2026-09-21T00:38:08.000Z  WARN inkling: hook failed event=\"prompt\" error=\"the store was busy for 250ms\"
+2026-09-21T00:38:09.000Z  WARN inkling::watch: could not read watch reference=x#4 error=not found or not visible
+2026-09-21T00:38:10.000Z ERROR inkling: inkling failed error=\"no token\"
+";
+
+    #[test]
+    fn the_log_answers_what_happened_and_what_went_wrong() {
+        assert_eq!(
+            Tally::of(SAMPLE.lines()),
+            Tally {
+                subscribed: 1,
+                watches: 1,
+                transitions: 1,
+                // The one that went nowhere doesn't count as delivered.
+                pushed: 1,
+                withheld: 1,
+                pulls: 1,
+                hook_failures: 1,
+                unread: 1,
+                errors: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_window_reads_only_the_lines_inside_it() {
+        let dir = TempDir::new("since");
+        std::fs::write(dir.0.join("inkling.2026-09-20.log"), SAMPLE).unwrap();
+        std::fs::write(
+            dir.0.join("inkling.2026-09-21.log"),
+            "2026-09-21T00:39:00.000Z  INFO inkling: subscribed subscriber=\"late\"\n",
+        )
+        .unwrap();
+
+        let recent = since(&dir.0, "2026-09-21T00:38:09");
+        assert_eq!(Tally::of(recent.iter().map(String::as_str)).subscribed, 1);
+        assert_eq!(Tally::of(recent.iter().map(String::as_str)).errors, 1);
+        assert_eq!(recent.len(), 3, "{recent:?}");
     }
 
     #[test]
