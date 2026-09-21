@@ -13,6 +13,7 @@ pub mod ports;
 pub mod push;
 pub mod secret;
 pub mod serve;
+pub mod subprocess;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod wait;

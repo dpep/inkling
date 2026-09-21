@@ -14,7 +14,7 @@
 use crate::domain::watch::Category;
 use crate::ports::{IssueLookup, IssueProvider, IssueStatus, ProviderError, RefError};
 use serde::Deserialize;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// One `acli` invocation. Behind a trait so tests replay recorded output
 /// instead of needing a Jira site.
@@ -61,13 +61,19 @@ impl AcliShell {
     }
 }
 
+/// How long one issue gets. Measured against this machine's `acli`: 1.5s for
+/// the answer, authenticated or not. A read that takes longer than this has
+/// stopped being a read — and a poll does one of these per watched issue, so
+/// an unbounded one is an unbounded tick.
+const VIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Shell for AcliShell {
     fn view(&self, key: &str) -> Result<String, Failure> {
-        let output = Command::new(&self.command)
-            .args(Self::args(key))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| Failure::Unavailable(format!("running `{}`: {e}", self.command)))?;
+        let output = crate::subprocess::output_within(
+            Command::new(&self.command).args(Self::args(key)),
+            VIEW_TIMEOUT,
+        )
+        .map_err(|e| Failure::Unavailable(format!("running `{}`: {e}", self.command)))?;
 
         match output.status.success() {
             true => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
