@@ -193,6 +193,16 @@ const BROWSE: &str = "atlassian.net/browse/";
 /// a rare case on every tool call.
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
+/// How many references one command may be about.
+///
+/// `gh pr create` prints one, `git push` prints one, and a command that names
+/// a dozen pull requests is not a command about any of them. Without a cap,
+/// 64KiB of URLs is ~1,600 of them: measured 2026-09-20, one PostToolUse
+/// registered 1,586 watches, which the next poll turned into a 481KiB GraphQL
+/// query that GitHub will refuse — and one refused batch is every watch on the
+/// machine going unread, because a poll asks about all of them at once.
+const MAX_REFERENCES: usize = 8;
+
 /// Whether a command is worth reading at all.
 ///
 /// The gate, and the reason a hook on every tool call is affordable: a few
@@ -223,7 +233,7 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
     let output = &output[..limit];
     let mut found: Vec<(Reference, &'static str)> = Vec::new();
     let mut add = |reference: Reference, why: &'static str| {
-        if !found.iter().any(|(seen, _)| *seen == reference) {
+        if found.len() < MAX_REFERENCES && !found.iter().any(|(seen, _)| *seen == reference) {
             found.push((reference, why));
         }
     };
@@ -714,5 +724,16 @@ mod touched_tests {
         let mut output = "x".repeat(OUTPUT_LIMIT + 10);
         output.push_str("https://github.com/dpep/inkling/pull/7");
         assert!(names("git push", &output).is_empty());
+    }
+
+    #[test]
+    fn a_command_about_a_hundred_pull_requests_is_about_none_of_them() {
+        // Measured: 64KiB of URLs registered 1,586 watches from one tool call,
+        // and the poll that followed asked GitHub for all of them in one
+        // 481KiB query. The cap is where that stops being possible.
+        let output: String = (1..=100)
+            .map(|n| format!("https://github.com/dpep/inkling/pull/{n}\n"))
+            .collect();
+        assert_eq!(names("gh pr view 1", &output).len(), MAX_REFERENCES);
     }
 }
