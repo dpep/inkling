@@ -4,6 +4,36 @@ Things deliberately not built, each with what was measured and what would
 change the answer. The point is to avoid re-deriving the evidence — most of
 these were decided against with numbers, not taste.
 
+## Tuning how often a watch is read
+
+**Placeholder, 2026-09-20.** A watch is read at 1/24 of how long it has been
+quiet, clamped to [1m, 60m] (`watches_json::read_every`; the reasoning is in
+[watching.md](watching.md#how-often-a-watch-is-read)). Chosen as "probably
+still too much, but ok for now", not derived from data, because there was
+none.
+
+What was known when it was chosen:
+
+| | |
+| --- | --- |
+| watch and event lifetime | 72h |
+| reads of one watch, old fixed 60s refresh | 4,320 over 72h |
+| reads of one watch that never moves, this rule | ~170 over 72h |
+| GitHub cost of a tick | one batched query, ~1 rate-limit point |
+| Jira cost of a tick | one `acli` per issue, ~1.5s each |
+| resident server, before | awake every 15s for as long as a watch lived |
+
+So the saving that mattered was the server sleeping, not GitHub's bill.
+
+**Revisit when** a week of real use gives numbers: `inkling status` puts
+upstream reads and transitions in one block, with reads per transition. If
+that ratio is in the hundreds, the floor or the share is too eager; slow it
+(a larger share, or a longer floor). If a line in docs/dogfood.md says news
+on a quiet pull request arrived too late — the cost this rule chose — speed
+it, or make more things count as a touch. Jira watches outnumbering pull
+requests would argue for a slower ceiling there specifically, since each of
+those reads is a subprocess.
+
 ## Keeping a claude session alive for the bridge
 
 **Deferred.** Measured 2026-08-19:

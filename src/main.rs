@@ -2105,7 +2105,7 @@ fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
         tally.pushed, tally.withheld, tally.pulls
     );
     println!(
-        "  upstream  {} pull requests in {} github queries, {} jira issues{}",
+        "  upstream  {} pull request reads in {} github queries, {} jira reads{}",
         tally.pull_requests_read,
         tally.github_queries,
         tally.issues_read,
