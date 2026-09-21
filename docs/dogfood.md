@@ -6,12 +6,18 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- `wait --until checks` on #13, started right after a force-push, exited 3
+  at 0s: `no checks … precluded after 0s (1 poll)`. The new head had no
+  rollup yet; `gh pr checks` showed `test pending` seconds later. Expected it
+  to wait for the checks the repo always runs. The no-checks shortcut is
+  meant for repos without CI, but a fresh push looks the same. Open.
 - #12 was pushed `checks pending → success` twice, which looked like a
   duplicate. It wasn't: CI triggers on `pull_request: edited`, so writing the
   dogfood note into the PR description (as CLAUDE.md asks) re-ran CI, and
   inkling correctly reported `success → pending` (kept out of the push, which
   is right) and then the second verdict. Inkling was right; the workflow
-  spends a CI run and a session turn on every description edit.
+  spends a CI run and a session turn on every description edit. Fixed:
+  the workflow no longer runs on `edited`.
 - The audit's release build went live the moment it finished: the installed
   `inkling` is a symlink into `target/release`, so every session's hooks ran
   ten unmerged commits for half an hour, and a repro of a bug "on the installed
