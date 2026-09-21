@@ -573,12 +573,35 @@ impl WatchStore {
 
     /// Read without taking the lock. Writes land by rename, so a reader sees
     /// one version or the other, never half of one.
+    ///
+    /// A file it cannot use reads as no file, because every caller here is on
+    /// a path that must not fail — but it says so. Silently, "inkling has
+    /// stopped noticing anything" and "nothing is being watched" looked
+    /// identical, which is the one pair of states worth telling apart.
     pub fn read(&self) -> Watches {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Watches>(&raw).ok())
-            .filter(|watches| watches.version <= VERSION)
-            .unwrap_or_default()
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Watches::default(),
+            Err(error) => {
+                tracing::warn!(%error, path = %self.path.display(), "cannot read the watch store");
+                return Watches::default();
+            }
+        };
+        match serde_json::from_str::<Watches>(&raw) {
+            Ok(watches) if watches.version <= VERSION => watches,
+            Ok(watches) => {
+                tracing::warn!(
+                    found = watches.version,
+                    supported = VERSION,
+                    "the watch store is from a newer version; reading it as empty"
+                );
+                Watches::default()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the watch store is unreadable; reading it as empty");
+                Watches::default()
+            }
+        }
     }
 
     /// Load, tidy, change, save — all under the lock, which is the only way

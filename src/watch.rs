@@ -46,6 +46,22 @@ pub struct Polled {
     pub skipped: bool,
 }
 
+/// How many unreadable references one poll names before it stops naming them.
+///
+/// A line per reference is what identifies the cause — wrong credentials, or a
+/// watch that outlived what it points at — and the first few carry that as well
+/// as all of them do. All of them is what a bad watch list costs: measured
+/// 2026-09-20, a poll of 1,586 references wrote 838KiB of log, and a daemon
+/// does that four times a minute. `polled watches` carries the count.
+const NAMED_FAILURES: usize = 5;
+
+fn name(so_far: &[String], reference: &Reference, error: &impl std::fmt::Display) {
+    match so_far.len() < NAMED_FAILURES {
+        true => tracing::warn!(%reference, %error, "could not read watch"),
+        false => tracing::debug!(%reference, %error, "could not read watch"),
+    }
+}
+
 impl Poller<'_> {
     /// Read every live watch and record what moved.
     ///
@@ -155,7 +171,7 @@ impl Poller<'_> {
                                 },
                             )),
                             Err(error) => {
-                                tracing::warn!(%reference, %error, "could not read watch");
+                                name(failures, &reference, &error);
                                 failures.push(format!("{reference}: {error}"));
                             }
                         }
@@ -193,7 +209,7 @@ impl Poller<'_> {
                                 },
                             )),
                             Err(error) => {
-                                tracing::warn!(%reference, %error, "could not read watch");
+                                name(failures, &reference, &error);
                                 failures.push(format!("{reference}: {error}"));
                             }
                         }
