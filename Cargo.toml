@@ -1,6 +1,6 @@
 [package]
 name = "inkling"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Tells agents and people when a pull request or Jira issue they care about changes."
 license = "MIT"

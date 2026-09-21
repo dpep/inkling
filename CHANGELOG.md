@@ -1,56 +1,54 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-20
 
-- **`git push` to an existing pull request now watches it.** The push prints no URL, so the
-  `post-tool` hook used to register nothing. It now reads the repository and branch git reports,
-  touches the session's own watch on that branch without asking GitHub, and otherwise looks it up
-  once — every open pull request whose head is exactly that repository and branch, upstream of a
-  fork included, never a stranger's branch of the same name. `git -C <dir> push` counts too. The
-  lookup is the hook's only network call (~0.5s, capped at 10s): if you configured `PostToolUse`
-  from the README rather than the plugin, add `"async": true` to it.
-- **Installing a new build no longer leaves nothing polling.** A server that sees a new build, or
-  reaches its 24h cap, while somebody is still watching now starts its successor before it exits;
-  before, nothing polled until a hook happened to start one, and an idle session waiting on CI
-  fires none. `make install` wakes the running server, so the new build takes over within a couple
-  of seconds instead of at its next wake (up to an hour). The install that brings this in is still
-  met by the old server, which stands down without a successor; run `inkling watch <pr>` once after
-  it if a session is waiting on something.
-- **`inkling wait` holds off 5s before its first reading.** For a second or two after a push GitHub
-  still reports the commit that was replaced, so a wait started straight after `git push` could judge
-  CI that never ran on your commit. Every wait is now 5s slower to answer, including one that is
-  already satisfied.
-- **`make install` copies instead of symlinking.** A release build on a branch no longer goes live
-  behind every session's hooks; only `make install` does. Re-run `make install` once to replace the
-  old symlink.
-- **A red Actions job points at its log, which you can read right away.** The pushed line used to
-  end in `gh pr checks`, whose next step, `gh run view --log-failed`, refuses until every job in the
-  run has finished — minutes after the one that failed. It now ends in `gh api … /actions/jobs/<id>/logs`,
-  which GitHub serves the moment the job ends. Checks from other apps still get `gh pr checks`.
-  `inkling events --json` rows carry the same `job`.
-- **A draft marked ready is no longer pushed.** `state draft → open` waits in `inkling events` like
-  `checks → pending` does: it starts review, and there is nothing to do about it. Ready then merge
-  now costs one push whether GitHub reports it in one poll or two.
-- **Events are kept for 72 hours, and watches last 72 hours by default**, up from 24. A session
+Two things to know when upgrading from 0.1.0: run `make install` once more, and watches now last
+72 hours unless you say otherwise.
+
+- **`make install` copies the binary instead of symlinking it — re-run it once after upgrading.** A
+  release build on a branch used to go live behind every session's hooks; now only `make install`
+  does. The first install replaces the old symlink. The server already running is 0.1.0's and
+  doesn't know to step aside: it keeps serving the old code until it goes idle or reaches its 24h
+  cap, or until you stop it by the pid `inkling status` shows. Every install after that takes
+  effect within seconds (below).
+- **Watches last 72 hours by default, and events are kept for 72 hours**, up from 24. A session
   resumed after a weekend still reads what moved on Friday. `--ttl` still sets a watch's own
-  deadline; existing watches keep the deadline they were given.
-- **`wait --until checks` right after a push waits for the checks instead of reporting none.** A new
-  head has no checks for a few seconds, which read as "this repository runs no CI" and exited 3 at 0s.
-  Now that only happens when none of the repository's last five pull requests had checks, so a repo
-  without CI still answers at once. In a repo with CI, a PR whose checks never start (`[skip ci]`, a
-  path filter) now times out (exit 4) rather than exiting 3. Watches see such a head as `pending`
-  rather than `none`.
-- **A quiet watch is read less often, and the resident server sleeps between readings.** A watch is
-  read at 1/24 of how long it has been quiet — every minute while it moves, hourly after a day of
-  nothing — instead of every minute for its whole 72 hours (~170 reads rather than 4,320). Touching it
-  again (`gh pr …`, a `git push` naming it, `inkling watch`) puts it back on every minute, so new CI
-  on an old PR is still caught fast. The server sleeps until the next watch is due rather than waking
-  every 15s, and registering a watch wakes it. The cost: news on a PR nobody has touched for a day can
-  be up to an hour late. `events --refresh` is now a floor under that schedule, not a schedule of its
-  own. `inkling status` counts upstream reads beside transitions.
-- **`make install` takes effect without waiting a day.** The resident server stands down when a new
-  build is installed over the binary it was started from, and the next hook starts the new one. It
-  used to keep running the old code until its 24-hour lifetime ran out.
+  deadline; existing watches keep the one they were given.
+- **A `git push` to an existing pull request now watches it.** The push prints no URL, so the
+  `post-tool` hook used to register nothing. It now takes the repository and branch git reports and
+  watches every open pull request whose head is exactly that — upstream of a fork included, never a
+  stranger's branch of the same name. `git -C <dir> push` counts too. A branch the session already
+  watches is picked up without asking GitHub; otherwise the hook looks once, capped at 10s, and
+  that is its only network call. If you wired `PostToolUse` from the README rather than the
+  plugin, add `"async": true` to it.
+- **Installing a new build takes over within seconds, with no gap in polling.** The resident server
+  now notices a new build installed over the one it runs, starts it as its successor, and exits;
+  `make install` wakes it so this happens at once rather than at its next reading. It hands off the
+  same way at its 24h cap if anyone is still watching — before, nothing polled until a hook
+  happened to start a server, and an idle session waiting on CI fires none.
+- **Quiet watches are read less often, and the server sleeps between readings.** A watch is read at
+  1/24 of how long it has been quiet, between once a minute and once an hour: every minute while
+  it moves, hourly after a day of nothing. Touching it again (`gh pr …`, a `git push` to it,
+  `inkling watch`) puts it back on every minute, so new CI on an old PR is still caught fast. The
+  server sleeps until the next watch is due instead of ticking every 15s, and registering a watch
+  wakes it. The cost: news on a PR nobody has touched for a day can be up to an hour late.
+  `events --refresh` is now a floor under that schedule, not a schedule of its own, and
+  `inkling status` has an `upstream` line counting reads against transitions.
+- **`inkling wait --until checks` straight after a push waits for your commit's checks.** Two things
+  used to cut it short: for a second or two GitHub still reports the commit you replaced, and a new
+  head has no checks for a few seconds, which read as "this repository runs no CI" and exited 3 at
+  once. Every wait now holds off 5s before its first reading, even one already satisfied, and "no
+  CI" now means none of the repository's last five pull requests had checks, so a repo without CI
+  still answers after the hold. In a repo with CI, a PR whose checks never start (`[skip ci]`, a
+  path filter) now times out (exit 4) rather than exiting 3, and watches see such a head as
+  `pending` rather than `none`.
+- **A red Actions job points at its log, and a draft marked ready is no longer pushed.** The red
+  line used to end in `gh pr checks`, whose next step, `gh run view --log-failed`, refuses until
+  every job in the run has finished — minutes after the one that failed. It now ends in
+  `gh api … /actions/jobs/<id>/logs`, which GitHub serves the moment the job ends; checks from other
+  apps still get `gh pr checks`. `inkling events --json` rows carry the same `job`.
+  `state draft → open` now waits in `inkling events` like `checks → pending` does: it starts
+  review, and there is nothing to do about it.
 
 ## 0.1.0 — 2026-09-20
 
