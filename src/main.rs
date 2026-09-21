@@ -867,6 +867,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 until: *until,
                 timeout: *timeout,
                 interval: *interval,
+                settle: inkling::wait::SETTLE,
                 observer: &shared,
                 clock: &clock,
                 sleeper: &inkling::ports::RealSleeper,

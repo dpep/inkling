@@ -14,6 +14,12 @@ use std::time::Duration;
 /// persistent one shouldn't be waited out either.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
+/// For a second or two after a push GitHub still reports the replaced head and
+/// its checks, so a wait begun right after one would judge the old commit —
+/// and could answer `met` for CI that never ran. Measured at 0–2s; see
+/// docs/waiting.md.
+pub const SETTLE: Duration = Duration::from_secs(5);
+
 /// How a wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -78,6 +84,8 @@ pub struct Wait<'a> {
     pub until: Until,
     pub timeout: Duration,
     pub interval: Duration,
+    /// How long to hold off before the first reading. `SETTLE` in use.
+    pub settle: Duration,
     pub observer: &'a dyn Observer,
     pub clock: &'a dyn Clock,
     pub sleeper: &'a dyn Sleeper,
@@ -94,6 +102,8 @@ impl Wait<'_> {
         // Where this wait started, set by the first complete reading.
         // `--until changed` measures against it; nothing else looks.
         let mut baseline = None;
+
+        self.sleeper.sleep(self.settle.min(self.timeout));
 
         loop {
             polls += 1;
@@ -293,12 +303,33 @@ mod tests {
             until,
             timeout,
             interval: Duration::from_secs(15),
+            settle: Duration::ZERO,
             observer: script,
             clock: &clock,
             sleeper: &sleeper,
         }
         .execute()
         .expect("wait ran")
+    }
+
+    #[test]
+    fn the_first_reading_waits_for_a_fresh_push_to_settle() {
+        let clock = FixedClock::at("2026-08-25T12:00:00Z");
+        let sleeper = Fast(&clock);
+        let report = Wait {
+            references: vec![reference(1)],
+            until: Until::Reached(State::Merged),
+            timeout: Duration::from_secs(1800),
+            interval: Duration::from_secs(15),
+            settle: SETTLE,
+            observer: &Script::always(State::Merged),
+            clock: &clock,
+            sleeper: &sleeper,
+        }
+        .execute()
+        .expect("wait ran");
+        assert_eq!(report.polls, 1);
+        assert_eq!(report.waited, SETTLE, "read only after settling");
     }
 
     #[test]
@@ -420,6 +451,7 @@ mod tests {
             until: Until::Reached(State::Merged),
             timeout: Duration::from_secs(1800),
             interval: Duration::from_secs(15),
+            settle: Duration::ZERO,
             observer: &script,
             clock: &clock,
             sleeper: &sleeper,
@@ -483,6 +515,7 @@ mod tests {
             until: Until::Reached(State::Merged),
             timeout: Duration::from_secs(45),
             interval: Duration::from_secs(15),
+            settle: Duration::ZERO,
             observer: &script,
             clock: &clock,
             sleeper: &sleeper,

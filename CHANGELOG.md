@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`inkling wait` holds off 5s before its first reading.** For a second or two after a push GitHub
+  still reports the commit that was replaced, so a wait started straight after `git push` could judge
+  CI that never ran on your commit. Every wait is now 5s slower to answer, including one that is
+  already satisfied.
 - **`make install` copies instead of symlinking.** A release build on a branch no longer goes live
   behind every session's hooks; only `make install` does. Re-run `make install` once to replace the
   old symlink.

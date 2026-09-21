@@ -38,7 +38,8 @@ fixed, say where and leave the line.
   answered `precluded, checks failure` about the commit just replaced —
   installed build and fix alike. Expected an answer about what I pushed.
   A green old head would be a false `met`. Nothing GitHub returns tells the
-  two apart; only the caller knows the new sha. Open.
+  two apart; only the caller knows the new sha. Fixed on `wait-settle`:
+  a wait holds off 5s before its first reading.
 - Codecov and Claude check suites sit `QUEUED` with no runs on every commit
   of every dpep repo, CI or not, and never make a rollup. So "the head has
   check suites" can't tell a repo without CI from a fresh push.

@@ -295,9 +295,20 @@ PLAN.md's rules apply: each lands independently, tree green, changelog entry.
   (`[skip ci]`, a path filter, an ancient pre-CI PR) now waits for the
   timeout and exits 4 instead of 3. That's the honest answer — nothing
   decided — and a false "precluded" is the worse error, since a caller stops
-  waiting on it. Not fixed: for a second or two after a push GitHub still
-  serves the *previous* head, whose rollup can be settled; nothing in the
-  response tells that apart, and only the caller knows the new sha.
+  waiting on it.
+- **A wait holds off 5s before its first reading** (`SETTLE` in
+  `src/wait.rs`). For 0–2s after a push GitHub still serves the *previous*
+  head, whose rollup can be settled — a wait started then answered
+  `precluded` about the commit just replaced, and a green one would have
+  been a false `met`. Nothing in the response tells the two apart. This is a
+  grace window, which the rejection above argues against, but a different
+  one: fixed at 5s (2.5× the worst seen) rather than sized to a CI queue, so
+  it costs every wait 5s, not every CI-less repository up to a minute. Rejected for now:
+  - *checking the head sha against what was pushed* — exact, but only the
+    caller knows the sha, so it means a `--sha` flag callers forget, or the
+    post-tool hook parsing `git push` output and keeping per-PR state.
+    Revisit if a wait is ever seen judging a replaced head despite the
+    settle, e.g. on a slower GitHub day than the one measured.
 - **A waiter's identity carries a counter**, not just pid and timestamp — two
   observers constructed in the same millisecond otherwise collide, and each
   would think it already held the other's lease.
