@@ -353,5 +353,5 @@ block — an account-linked OAuth connector can't be named this way, and
 
 ```sh
 make check     # test + fmt + clippy
-make install   # symlink both binaries into ~/.claude/bin
+make install   # build, then copy both binaries into ~/.claude/bin
 ```

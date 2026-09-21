@@ -7,8 +7,8 @@ BINARIES := inkling slackmcp
 help:
 	@echo "make build      build both binaries in release mode"
 	@echo "make check      fmt + clippy + tests, the pre-push gate"
-	@echo "make install    build, then symlink into $(BIN_DIR)"
-	@echo "make uninstall  remove those symlinks"
+	@echo "make install    build, then copy into $(BIN_DIR)"
+	@echo "make uninstall  remove them"
 
 build:
 	cargo build --release
@@ -25,13 +25,16 @@ lint:
 # Everything that must pass before pushing.
 check: test fmt lint
 
-# Symlink rather than copy, so a rebuild is live immediately — the same
-# pattern as the other tools in ~/.claude/bin.
+# Copy rather than symlink, so a release build on a branch doesn't go live
+# behind every session's hooks. Copy-then-rename: overwriting a running
+# binary in place gets it SIGKILLed on macOS (its code signature no longer
+# matches the pages already mapped).
 install: build
 	@mkdir -p $(BIN_DIR)
 	@for bin in $(BINARIES); do \
-		ln -sf $(RELEASE)/$$bin $(BIN_DIR)/$$bin; \
-		echo "$(BIN_DIR)/$$bin -> $(RELEASE)/$$bin"; \
+		cp $(RELEASE)/$$bin $(BIN_DIR)/.$$bin.tmp && \
+		mv -f $(BIN_DIR)/.$$bin.tmp $(BIN_DIR)/$$bin && \
+		echo "installed $(BIN_DIR)/$$bin"; \
 	done
 
 uninstall:

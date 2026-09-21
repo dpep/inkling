@@ -10,8 +10,7 @@ fixed, say where and leave the line.
   `inkling` is a symlink into `target/release`, so every session's hooks ran
   ten unmerged commits for half an hour, and a repro of a bug "on the installed
   build" silently tested the fix instead. Expected installing to be something
-  you do, not something a build does. Open — CLAUDE.md now says to build
-  branches in debug; a copy instead of a symlink would close it.
+  you do, not something a build does. Fixed: `make install` now copies.
 - First pushed failure, on another repo (myclaude#3): `checks pending →
   failure: contextdb-mcp stdio smoke (gh pr checks 3 --repo …)`. It named the
   job, and the job turned out to have been red on that repo's main for three
