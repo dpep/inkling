@@ -282,7 +282,7 @@ pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<En
             drop(lock);
             let pid = spawn_detached(&std::env::current_exe()?, args)?;
             tracing::info!(pid, %reason, "spawned a server");
-            if !claimed(&config.status, pid, &RealSleeper) {
+            if !claimed(&config.status, pid, TAKEOFF_LOOKS, &RealSleeper) {
                 // Not a failure. Either the child is slower than the window,
                 // or it lost the lock race and stood down — in which case the
                 // winner is already serving.
@@ -304,14 +304,18 @@ pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<En
 const TAKEOFF_LOOKS: u32 = 25;
 const TAKEOFF_LOOK: Duration = Duration::from_millis(10);
 
-/// Whether the server at `pid` has claimed the lock yet.
+/// 5s, for a successor. Nobody waits on a server that is leaving, and the first
+/// exec of a just-installed binary costs about a second while macOS assesses it.
+const HANDOFF_LOOKS: u32 = 500;
+
+/// Whether the server at `pid` has claimed the lock within `looks`.
 ///
 /// Reads the status file rather than probing the lock, because probing *takes*
 /// the lock when it is free — which in this window would lock out the very
 /// child being waited for. A server writes its record as its first act after
 /// acquiring, so the record naming the pid is the arrival signal.
-fn claimed(status: &Path, pid: u32, sleeper: &dyn Sleeper) -> bool {
-    for _ in 0..TAKEOFF_LOOKS {
+fn claimed(status: &Path, pid: u32, looks: u32, sleeper: &dyn Sleeper) -> bool {
+    for _ in 0..looks {
         if read_record(status).is_some_and(|record| record.pid == pid) {
             return true;
         }
@@ -687,7 +691,7 @@ fn hand_off(
 ) -> Result<u32, ServeError> {
     let from = std::process::id();
     let pid = spawn_detached(exe, args)?;
-    match claimed(&config.status, pid, &RealSleeper) {
+    match claimed(&config.status, pid, HANDOFF_LOOKS, &RealSleeper) {
         true => {
             tracing::info!(from, to = pid, reason = reason.as_str(), executable = %exe.display(), "handed off to a new server")
         }
@@ -1112,7 +1116,7 @@ mod tests {
         let scratch = Scratch::new("takeoff");
         let config = scratch.config();
         assert!(
-            !claimed(&config.status, 4242, &Unslept),
+            !claimed(&config.status, 4242, TAKEOFF_LOOKS, &Unslept),
             "nothing has claimed anything"
         );
 
@@ -1129,9 +1133,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(claimed(&config.status, 4242, &Unslept));
+        assert!(claimed(&config.status, 4242, TAKEOFF_LOOKS, &Unslept));
         assert!(
-            !claimed(&config.status, 9999, &Unslept),
+            !claimed(&config.status, 9999, TAKEOFF_LOOKS, &Unslept),
             "and a record left by an earlier server is not this one arriving"
         );
     }
