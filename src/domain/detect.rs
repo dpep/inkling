@@ -201,7 +201,7 @@ const OUTPUT_LIMIT: usize = 64 * 1024;
 /// registered 1,586 watches, which the next poll turned into a 481KiB GraphQL
 /// query that GitHub will refuse — and one refused batch is every watch on the
 /// machine going unread, because a poll asks about all of them at once.
-const MAX_REFERENCES: usize = 8;
+pub const MAX_REFERENCES: usize = 8;
 
 /// Whether a command is worth reading at all.
 ///
@@ -210,7 +210,7 @@ const MAX_REFERENCES: usize = 8;
 /// a pull request or an issue stops here, before any parsing and before the
 /// store is opened.
 pub fn worth_reading(command: &str) -> bool {
-    command.contains("git push")
+    is_push(command)
         || command.contains(BROWSE)
         || command.contains(ISSUE_COMMAND)
         || PULL_COMMANDS.iter().any(|verb| command.contains(verb))
@@ -224,13 +224,7 @@ pub fn worth_reading(command: &str) -> bool {
 /// from a key-shaped word in arbitrary output: `UTF-8`, `SHA-256` and
 /// `CVE-2024` are all issue keys as far as the shape goes.
 pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference, &'static str)> {
-    // On a character boundary, so a cap in the middle of a multi-byte glyph
-    // shortens the slice rather than panicking.
-    let limit = (0..=OUTPUT_LIMIT.min(output.len()))
-        .rev()
-        .find(|n| output.is_char_boundary(*n))
-        .unwrap_or(0);
-    let output = &output[..limit];
+    let output = capped(output);
     let mut found: Vec<(Reference, &'static str)> = Vec::new();
     let mut add = |reference: Reference, why: &'static str| {
         if found.len() < MAX_REFERENCES && !found.iter().any(|(seen, _)| *seen == reference) {
@@ -246,12 +240,10 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
             add(reference, verb);
         }
     }
-    if command.contains("git push") {
+    if is_push(command) {
         // Only the output: a push command never carries the pull request's
-        // URL, and some remotes print it. When none does there is nothing to
-        // watch, and nothing here goes and looks one up — a hook runs on
-        // every tool call, and a network round trip is not something to spend
-        // there.
+        // URL, and some remotes print it. When none does, `pushed` names the
+        // branch and the hook looks it up.
         for reference in detect(output, hosts) {
             add(reference, "git push");
         }
@@ -271,6 +263,134 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
         }
     }
     found
+}
+
+/// A branch a `git push` updated, and where it went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pushed {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub branch: String,
+    /// GitHub offered to create a pull request for it — so there isn't one.
+    pub invited: bool,
+}
+
+impl Pushed {
+    /// `owner/name`, the spelling a pull request's head repository uses.
+    pub fn repository(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+}
+
+/// Whether a command runs `git push`, however `git` was pointed at a repo.
+fn is_push(command: &str) -> bool {
+    command.contains("git push")
+        || command
+            .split_whitespace()
+            .skip_while(|word| *word != "git")
+            .any(|word| word == "push")
+}
+
+/// The branches a `git push`'s output says it updated on a GitHub host.
+///
+/// Read from git's own report — a `To <remote>` line, then one line per ref —
+/// rather than from the command, which names a local refspec and a remote
+/// alias, not a repository. Only lines git marks as landed count: a
+/// fast-forward, a forced update, a new branch. A tag, a deletion or a
+/// rejection changed no pull request.
+pub fn pushed(command: &str, output: &str, hosts: &[String]) -> Vec<Pushed> {
+    if !is_push(command) {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    // GitHub's offer arrives as `remote:` lines before the `To` they belong to.
+    let mut offered = Vec::new();
+    let mut remote: Option<(String, String, String)> = None;
+    let mut invited = Vec::new();
+    for line in capped(output).lines() {
+        let line = line.trim_end();
+        if let Some((_, rest)) = line.split_once("Create a pull request for '")
+            && let Some((branch, _)) = rest.split_once('\'')
+        {
+            offered.push(branch.to_string());
+        } else if let Some(url) = line.strip_prefix("To ") {
+            remote = github_remote(url, hosts);
+            invited = std::mem::take(&mut offered);
+        } else if let Some((host, owner, repo)) = &remote
+            && let Some(branch) = landed(line)
+            && found.len() < MAX_REFERENCES
+        {
+            found.push(Pushed {
+                host: host.clone(),
+                owner: owner.clone(),
+                repo: repo.clone(),
+                invited: invited.contains(&branch),
+                branch,
+            });
+        }
+    }
+    found
+}
+
+/// The remote branch a ref line of `git push` output updated, if it did.
+///
+/// ` <flag> <summary> <from> -> <to> [(<reason>)]`, where the flag is ` ` for
+/// a fast-forward, `+` forced, `*` new.
+fn landed(line: &str) -> Option<String> {
+    let rest = match line
+        .strip_prefix("   ")
+        .or_else(|| line.strip_prefix(" + "))
+    {
+        // The summary is a commit range; anything else indented is not a ref.
+        Some(rest) if rest.split_whitespace().next()?.contains("..") => rest,
+        Some(_) => return None,
+        None => line.strip_prefix(" * [new branch]")?,
+    };
+    let (_, to) = rest.split_once(" -> ")?;
+    let to = to.split_whitespace().next()?;
+    let branch = match to.strip_prefix("refs/") {
+        Some(qualified) => qualified.strip_prefix("heads/")?,
+        None => to,
+    };
+    Some(branch.to_string())
+}
+
+/// `(host, owner, repo)` for a remote on a configured GitHub host.
+///
+/// git prints the remote as configured, minus any credentials: scp-style
+/// `host:owner/repo.git`, or a URL with a scheme.
+fn github_remote(url: &str, hosts: &[String]) -> Option<(String, String, String)> {
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        None => url.split_once(':')?,
+    };
+    let host = authority
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_lowercase();
+    if !hosts.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((host, owner.to_string(), repo.to_string()))
+}
+
+/// At most `OUTPUT_LIMIT` bytes, cut on a character boundary so a cap in the
+/// middle of a multi-byte glyph shortens the slice rather than panicking.
+fn capped(output: &str) -> &str {
+    let limit = (0..=OUTPUT_LIMIT.min(output.len()))
+        .rev()
+        .find(|n| output.is_char_boundary(*n))
+        .unwrap_or(0);
+    &output[..limit]
 }
 
 fn as_pull_request(iri: &iriq::Identifier, hosts: &[String]) -> Option<Reference> {
@@ -724,6 +844,143 @@ mod touched_tests {
         let mut output = "x".repeat(OUTPUT_LIMIT + 10);
         output.push_str("https://github.com/dpep/inkling/pull/7");
         assert!(names("git push", &output).is_empty());
+    }
+
+    fn pushes(command: &str, output: &str) -> Vec<String> {
+        pushed(command, output, &hosts())
+            .into_iter()
+            .map(|p| {
+                let invited = if p.invited { " (invited)" } else { "" };
+                format!("{}/{}:{}{invited}", p.host, p.repository(), p.branch)
+            })
+            .collect()
+    }
+
+    // Recorded from git 2.54 against github.com, stderr and all.
+    const UPDATE: &str =
+        "To github.com:dpep/inkling.git\n   9f40601..a9b720d  push-watch -> push-watch\n";
+    const NEW_BRANCH: &str = "remote: \nremote: Create a pull request for 'push-watch' on GitHub by visiting:        \nremote:      https://github.com/dpep/inkling/pull/new/push-watch        \nremote: \nTo github.com:dpep/inkling.git\n * [new branch]      push-watch -> push-watch\nbranch 'push-watch' set up to track 'origin/push-watch'.\n";
+    const FORCED: &str = "To https://github.com/dpep/inkling.git\n + a9b720d...9f40601 HEAD -> push-watch (forced update)\n";
+
+    #[test]
+    fn an_update_to_an_existing_branch_names_the_branch_and_repository() {
+        assert_eq!(
+            pushes("git push", UPDATE),
+            ["github.com/dpep/inkling:push-watch"]
+        );
+    }
+
+    #[test]
+    fn a_new_branch_github_offers_a_pull_request_for_has_none() {
+        assert_eq!(
+            pushes("git push -u origin HEAD", NEW_BRANCH),
+            ["github.com/dpep/inkling:push-watch (invited)"]
+        );
+    }
+
+    #[test]
+    fn a_forced_push_names_the_remote_side_not_the_local_one() {
+        assert_eq!(
+            pushes("git push -f", FORCED),
+            ["github.com/dpep/inkling:push-watch"]
+        );
+    }
+
+    #[test]
+    fn every_way_of_spelling_a_github_remote_is_understood() {
+        for remote in [
+            "github.com:dpep/inkling.git",
+            "git@github.com:dpep/inkling.git",
+            "ssh://git@github.com/dpep/inkling.git",
+            "ssh://git@github.com:22/dpep/inkling",
+            "https://github.com/dpep/inkling",
+            "https://github.com/dpep/inkling.git/",
+            "https://x-access-token@GitHub.com/dpep/inkling.git",
+        ] {
+            let output = format!("To {remote}\n   1111111..2222222  main -> push-watch\n");
+            assert_eq!(
+                pushes("git push", &output),
+                ["github.com/dpep/inkling:push-watch"],
+                "{remote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_that_is_not_github_is_ignored() {
+        for remote in [
+            "git@gitlab.com:dpep/inkling.git",
+            "https://github.com.evil.example/dpep/inkling.git",
+            "/tmp/bare-repo.git",
+            "https://github.com/dpep",
+            "https://github.com/dpep/inkling/extra",
+        ] {
+            let output = format!("To {remote}\n   1111111..2222222  main -> main\n");
+            assert!(pushes("git push", &output).is_empty(), "{remote}");
+        }
+    }
+
+    #[test]
+    fn several_refs_are_each_a_branch_and_the_rest_of_the_table_is_not() {
+        let output = "To github.com:dpep/inkling.git\n\
+             \x20  1111111..2222222  one -> one\n\
+             \x20+ 3333333...4444444 two -> feature/two (forced update)\n\
+             \x20* [new branch]      three -> refs/heads/three\n\
+             \x20* [new tag]         v1.0 -> v1.0\n\
+             \x20- [deleted]         gone\n\
+             \x20! [rejected]        stale -> stale (fetch first)\n\
+             \x20= [up to date]      same -> same\n\
+             \x20* [new reference]   HEAD -> refs/notes/commits\n";
+        assert_eq!(
+            pushes("git push --all", output),
+            [
+                "github.com/dpep/inkling:one",
+                "github.com/dpep/inkling:feature/two",
+                "github.com/dpep/inkling:three",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hint_belongs_to_the_remote_it_was_printed_for() {
+        // Two push URLs on one remote: the second repository already has the
+        // branch, and GitHub's offer for the first says nothing about it.
+        let output = format!(
+            "{NEW_BRANCH}To github.com:dpep/mirror.git\n   1111111..2222222  push-watch -> push-watch\n"
+        );
+        assert_eq!(
+            pushes("git push", &output),
+            [
+                "github.com/dpep/inkling:push-watch (invited)",
+                "github.com/dpep/mirror:push-watch",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_push_spelled_with_dash_c_is_still_a_push() {
+        let command = "git -C /code/inkling push";
+        assert!(worth_reading(command));
+        assert_eq!(
+            pushes(command, UPDATE),
+            ["github.com/dpep/inkling:push-watch"]
+        );
+    }
+
+    #[test]
+    fn only_a_push_is_read_for_pushed_branches() {
+        assert!(pushes("git fetch", UPDATE).is_empty());
+        assert!(pushes("gh pr view 7", UPDATE).is_empty());
+        assert!(pushes("git push", "Everything up-to-date\n").is_empty());
+    }
+
+    #[test]
+    fn a_push_of_every_branch_is_about_none_of_them_past_the_cap() {
+        let mut output = String::from("To github.com:dpep/inkling.git\n");
+        for n in 0..20 {
+            output.push_str(&format!("   1111111..2222222  b{n} -> b{n}\n"));
+        }
+        assert_eq!(pushes("git push --all", &output).len(), MAX_REFERENCES);
     }
 
     #[test]

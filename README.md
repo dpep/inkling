@@ -149,7 +149,7 @@ whether one is up.
 
 A watch is read at 1/24 of how long it has been quiet — every minute while it
 is moving, hourly once it has sat still for a day — and back to every minute
-the moment a session touches it again (`gh pr …`, a `git push` naming it). The
+the moment a session touches it again (`gh pr …`, a `git push` to its branch). The
 server sleeps until the next watch is due, and registering one wakes it.
 `inkling status` counts the upstream reads beside the transitions they caught.
 
@@ -171,7 +171,7 @@ In `settings.json`:
     "SessionStart":     [{ "hooks": [{ "type": "command", "command": "inkling hook session-start" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "inkling hook session-end" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "inkling hook prompt" }] }],
-    "PostToolUse":      [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "inkling hook post-tool" }] }]
+    "PostToolUse":      [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "inkling hook post-tool", "async": true }] }]
   }
 }
 ```
@@ -190,18 +190,24 @@ about, so you never run `inkling watch` at all.
 
 It is deliberately narrow, because the cost of being wrong is a session told
 about something nobody asked for. It reads `gh pr create|view|checks|ready|
-merge|edit|comment` and `git push`, takes references only from URLs — in the
-command or in its output — and takes a Jira key only where it was an
-argument to `acli jira workitem`. Never a key-shaped word in output, where
-`UTF-8`, `SHA-256` and `CVE-2024` all qualify. `gh pr list` is not read at
-all: it names everybody's.
+merge|edit|comment`, taking references only from URLs — in the command or in
+its output — and takes a Jira key only where it was an argument to `acli jira
+workitem`. Never a key-shaped word in output, where `UTF-8`, `SHA-256` and
+`CVE-2024` all qualify. `gh pr list` is not read at all: it names everybody's.
+
+A `git push` watches every open pull request whose head is exactly the
+repository and branch git reports it pushed to — a fork's pull request
+upstream included, a stranger's branch of the same name never. A branch one of
+the session's watches already knows is touched without asking; a new branch
+GitHub offers to open a pull request for is skipped; anything else costs one
+GitHub request (~0.5s, capped at 10s). That lookup is the hook's only network
+call, which is why the `PostToolUse` entry is best marked `"async": true`.
 
 Cost, measured over 50 runs each: **0.2ms** over the process itself for a
 command that isn't a candidate, and **3ms** when it is and the store has to
 be written. The process itself is 5.5ms, which is what any command hook
-costs. Nothing here makes a network call — the first reading is left to the
-resident server, which the hook wakes — so a `git push` whose output carries no pull
-request URL watches nothing rather than going to look one up.
+costs. The first reading is left to the resident server, which the hook
+wakes.
 
 Running the same command again refreshes the deadline and says nothing.
 Something already merged, closed or Done is dropped at that first reading

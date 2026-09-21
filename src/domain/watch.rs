@@ -108,12 +108,35 @@ pub struct FailedCheck {
     pub job: Option<u64>,
 }
 
+/// Where a pull request's commits come from: the repository and branch a
+/// `git push` has to name for the push to be to this pull request.
+///
+/// The repository matters as much as the branch. `main` or `fix` from a
+/// stranger's fork is a different pull request with the same branch name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Head {
+    /// `owner/name`, as GitHub spells `nameWithOwner`.
+    pub repo: String,
+    pub branch: String,
+}
+
+impl Head {
+    /// Owners and repository names are case-insensitive on GitHub; branch
+    /// names are not.
+    pub fn is(&self, repo: &str, branch: &str) -> bool {
+        self.repo.eq_ignore_ascii_case(repo) && self.branch == branch
+    }
+}
+
 /// One reading of one reference, as a poll hands it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sighting {
     pub standing: Standing,
     /// What the thing is called, so an event reads without a second lookup.
     pub title: String,
+    /// A pull request's head, when the provider could name it. Remembered on
+    /// the watch so a later push to it is recognised without asking.
+    pub head: Option<Head>,
     /// Which check is red, when one is and the provider could name it.
     ///
     /// Deliberately outside `Standing`: a different job failing is the same
@@ -364,6 +387,7 @@ mod tests {
             standing: Standing::PullRequest { state, checks },
             title: "Add inkling wait".into(),
             failing: None,
+            head: None,
         }
     }
 
@@ -375,6 +399,7 @@ mod tests {
             },
             title: "Try the watch feature".into(),
             failing: None,
+            head: None,
         }
     }
 

@@ -32,6 +32,7 @@ fn main() {
             checks: checks.first().map(|c| parse_checks(c)),
         },
         title: "a title nobody should see in a pushed message".into(),
+        head: None,
         failing: match checks.first().map(String::as_str) {
             Some("failure") => Some(FailedCheck {
                 name: "test / build".into(),

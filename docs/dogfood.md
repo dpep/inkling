@@ -6,6 +6,22 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- `git push` to the branch of an open probe PR printed exactly `To
+  github.com:dpep/inkling-ci-probe.git` and `d14723a..4257bc8  lane-push-e2e
+  -> lane-push-e2e` — no URL, so the hook watched nothing. Every PR here had
+  been opened with `gh pr create`, which is why nobody hit it. Expected
+  updating a PR to watch it. Fixed on `push-watch`: the push's branch is
+  matched to the session's watches, or looked up once.
+- The post-tool gate only knew the spelling `git push`, so `git -C <dir>
+  push` — the one the global CLAUDE.md tells agents to use — was never read,
+  URL or not. Fixed on `push-watch`.
+- Matching a push by branch name alone would be wrong upstream: rust-lang/rust
+  has five open PRs whose head branch is `master`, all strangers' forks.
+  Expected `headRefName` to be enough; it isn't. The lookup keeps only PRs
+  whose head repository is the one pushed to.
+- The README's `PostToolUse` snippet had no `"async": true`, which the
+  plugin's hooks.json has. Harmless until the hook could make a network call;
+  added.
 - Stand-down on a new build worked live: after `make install` the server
   logged "a new build was installed; standing down" and exited
   `reason="replaced"`. Then nothing polled until some hook spawned a server,

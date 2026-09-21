@@ -6,7 +6,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Category, FailedCheck};
+use crate::domain::watch::{Category, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -121,6 +121,8 @@ pub struct RefStatus {
     /// A check that is red, when one is. "Checks went red" is most of a page
     /// of investigation; "checks went red: tidy" is a command.
     pub failing: Option<FailedCheck>,
+    /// The branch its commits come from, so a push to it can be recognised.
+    pub head: Option<Head>,
 }
 
 impl RefStatus {
@@ -131,6 +133,7 @@ impl RefStatus {
             title: String::new(),
             checks: None,
             failing: None,
+            head: None,
         }
     }
 }

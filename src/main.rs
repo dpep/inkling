@@ -1559,72 +1559,7 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             unsubscribe(&input.session_id, common)?;
             Ok(())
         }
-        HookEvent::PostTool => {
-            // Cheapest checks first, and in this order: this runs after every
-            // tool call, and the overwhelming majority of them have nothing
-            // to do with a pull request. Nothing below the gate is reached
-            // unless the command is plainly about one.
-            if input.tool_name != "Bash" {
-                return Ok(());
-            }
-            let command = field(&input.tool_input, "command");
-            if !inkling::domain::detect::worth_reading(command) {
-                return Ok(());
-            }
-            let output = format!(
-                "{}\n{}",
-                field(&input.tool_response, "stdout"),
-                field(&input.tool_response, "stderr")
-            );
-            let touched = inkling::domain::detect::touched(command, &output, &config.github.hosts);
-            if touched.is_empty() {
-                return Ok(());
-            }
-
-            // The session that will actually be pushed to, falling back to
-            // the one the payload names — never `cli`, since a watch made by
-            // a session belongs to it even if nothing is attached yet.
-            let owner = reader(None, &input.session_id, &watches.read());
-            let deadline =
-                (clock.now() + inkling::adapters::watches_json::WATCH_TTL).trunc_subsecs(0);
-            let fresh = watches
-                .update(clock.now(), |file| {
-                    let mut fresh = Vec::new();
-                    for (reference, why) in &touched {
-                        let known = file
-                            .watches
-                            .get(&reference.to_string())
-                            .is_some_and(|watch| watch.owners.contains(&owner));
-                        file.watch(reference, &owner, deadline, clock.now());
-                        if !known {
-                            fresh.push((reference.clone(), *why));
-                        }
-                    }
-                    fresh
-                })
-                .map_err(|e| e.to_string())?;
-
-            // Only what is new. The same command run in a loop refreshes a
-            // deadline and says nothing, or the log becomes the loop.
-            for (reference, why) in &fresh {
-                tracing::info!(
-                    %reference,
-                    owner,
-                    tool = "Bash",
-                    matched = why,
-                    deadline = stamp(deadline),
-                    "watch registered automatically"
-                );
-            }
-            // Deliberately no baseline read here: that is a GitHub round trip,
-            // and a hook that runs on every tool call may not make one. The
-            // server's next tick reads it — a watch that has never been read
-            // is due immediately — and if the reference turns out to be
-            // already merged, that first reading drops the watch without
-            // emitting anything.
-            ensure_serving(config, common, "post-tool");
-            Ok(())
-        }
+        HookEvent::PostTool => post_tool(&input, config, common),
         HookEvent::Prompt => {
             // The pull leg, and the reason push is allowed to be lossy: if a
             // message was held or refused, this is where it turns up.
@@ -1645,6 +1580,183 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
                 println!("{}", inkling::push::message(event));
             }
             Ok(())
+        }
+    }
+}
+
+/// How long the `post-tool` hook will wait on GitHub to say which pull
+/// requests a push updated. The hook runs async, so a session never waits on
+/// this; it is here so a hung `gh auth token` or request can't keep the
+/// process alive, like every other hook path.
+const PUSH_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Watch what a Bash command was about: a pull request named by URL, or one a
+/// `git push` just updated.
+///
+/// A push is matched against this session's own watches first, which costs
+/// nothing and is the common case — the second push to a branch. Only a
+/// branch none of them has, and that GitHub didn't just offer to open a pull
+/// request for, is looked up.
+fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), String> {
+    use inkling::domain::detect;
+    // Cheapest checks first, and in this order: this runs after every tool
+    // call, and the overwhelming majority of them have nothing to do with a
+    // pull request. Nothing below the gate is reached unless the command is
+    // plainly about one.
+    if input.tool_name != "Bash" {
+        return Ok(());
+    }
+    let command = field(&input.tool_input, "command");
+    if !detect::worth_reading(command) {
+        return Ok(());
+    }
+    let output = format!(
+        "{}\n{}",
+        field(&input.tool_response, "stdout"),
+        field(&input.tool_response, "stderr")
+    );
+    let touched = detect::touched(command, &output, &config.github.hosts);
+    let pushed = detect::pushed(command, &output, &config.github.hosts);
+    if touched.is_empty() && pushed.is_empty() {
+        return Ok(());
+    }
+
+    let clock = SystemClock;
+    let watches = watch_store(common);
+    // The session that will actually be pushed to, falling back to the one
+    // the payload names — never `cli`, since a watch made by a session
+    // belongs to it even if nothing is attached yet.
+    let owner = reader(None, &input.session_id, &watches.read());
+    let deadline = (clock.now() + inkling::adapters::watches_json::WATCH_TTL).trunc_subsecs(0);
+    let (mut fresh, stirred, unknown) = watches
+        .update(clock.now(), |file| {
+            let mut fresh = Vec::new();
+            for (reference, why) in &touched {
+                let known = file
+                    .watches
+                    .get(&reference.to_string())
+                    .is_some_and(|watch| watch.owners.contains(&owner));
+                file.watch(reference, &owner, deadline, clock.now());
+                if !known {
+                    fresh.push((reference.clone(), *why));
+                }
+            }
+            let (stirred, unknown) = file.stir_pushed(&pushed, &owner, deadline, clock.now());
+            (fresh, stirred, unknown)
+        })
+        .map_err(|e| e.to_string())?;
+    for (reference, branch) in &stirred {
+        tracing::info!(%reference, owner, branch, "watch stirred by a push");
+    }
+    for push in pushed.iter().filter(|push| push.invited) {
+        tracing::info!(
+            repo = push.repository(),
+            branch = push.branch,
+            "push has no pull request yet; nothing to watch"
+        );
+    }
+
+    // Found by asking, so bounded by what one tool call may register.
+    let room = detect::MAX_REFERENCES.saturating_sub(touched.len());
+    let found: Vec<_> = look_up_pushes(config, unknown)
+        .into_iter()
+        .take(room)
+        .collect();
+    if !found.is_empty() {
+        let looked_up = watches
+            .update(clock.now(), |file| {
+                let mut new = Vec::new();
+                for (reference, head) in &found {
+                    let known = file
+                        .watches
+                        .get(&reference.to_string())
+                        .is_some_and(|watch| watch.owners.contains(&owner));
+                    file.watch(reference, &owner, deadline, clock.now());
+                    file.remember_head(reference, head.clone());
+                    if !known {
+                        new.push((reference.clone(), "git push"));
+                    }
+                }
+                new
+            })
+            .map_err(|e| e.to_string())?;
+        fresh.extend(looked_up);
+    }
+
+    // Only what is new. The same command run in a loop refreshes a deadline
+    // and says nothing, or the log becomes the loop.
+    for (reference, why) in &fresh {
+        tracing::info!(
+            %reference,
+            owner,
+            tool = "Bash",
+            matched = why,
+            deadline = stamp(deadline),
+            "watch registered automatically"
+        );
+    }
+    if touched.is_empty() && stirred.is_empty() && found.is_empty() {
+        return Ok(());
+    }
+    // Deliberately no baseline read here: the server's next tick reads it — a
+    // watch that has never been read is due immediately — and if the
+    // reference turns out to be already merged, that first reading drops the
+    // watch without emitting anything.
+    ensure_serving(config, common, "post-tool");
+    Ok(())
+}
+
+/// The open pull requests these pushes updated, asked of GitHub in one
+/// request, or nothing within `PUSH_LOOKUP_BUDGET`. Failures are logged: a
+/// push nobody could look up watches nothing, as it did before.
+fn look_up_pushes(
+    config: &Config,
+    pushes: Vec<inkling::domain::detect::Pushed>,
+) -> Vec<(
+    inkling::domain::model::Reference,
+    inkling::domain::watch::Head,
+)> {
+    if pushes.is_empty() {
+        return Vec::new();
+    }
+    let started = std::time::Instant::now();
+    let github = config.github.clone();
+    let branches: Vec<String> = pushes
+        .iter()
+        .map(|push| format!("{}:{}", push.repository(), push.branch))
+        .collect();
+    let asked = within(PUSH_LOOKUP_BUDGET, move || {
+        let token = Secret::resolve(github.token_env.as_deref(), github.token_command.as_deref())
+            .map_err(|e| e.to_string())?;
+        GitHubProvider::new(&github.api_url, token)
+            .pushed_to(&pushes)
+            .map_err(|e| e.to_string())
+    });
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match asked {
+        Some(Ok(found)) => {
+            tracing::info!(
+                branches = branches.join(","),
+                found = found.len(),
+                elapsed_ms,
+                "looked up the pull requests a push updated"
+            );
+            found
+                .into_iter()
+                .map(|(_, reference, head)| (reference, head))
+                .collect()
+        }
+        Some(Err(error)) => {
+            tracing::warn!(branches = branches.join(","), %error, "could not look up a push");
+            Vec::new()
+        }
+        None => {
+            tracing::warn!(
+                branches = branches.join(","),
+                budget_ms = PUSH_LOOKUP_BUDGET.as_millis() as u64,
+                "gave up looking up a push"
+            );
+            Vec::new()
         }
     }
 }
@@ -2537,6 +2649,7 @@ mod tests {
                 },
                 title: "Add the serve lifecycle".into(),
                 failing: None,
+                head: None,
             },
         )
     }
