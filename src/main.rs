@@ -405,6 +405,14 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             return logs(&directory, *lines, grep.as_deref(), *follow);
         }
+        // Before the config load, so a config that won't parse is this hook's
+        // failure rather than the session's — see `swallowing`.
+        Command::Hook { event } => {
+            return Ok(swallowing(*event, || {
+                let config = Config::load(&path).map_err(|e| e.to_string())?;
+                hook(*event, &config, &cli.common)
+            }));
+        }
         Command::Config {
             action: Some(ConfigAction::Get { key }),
         } => {
@@ -528,15 +536,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             Ok(0)
         }
-        Command::Hook { event } => {
-            // A hook runs inside somebody's session, on a short timeout, and
-            // its failure is their failure. So: whatever went wrong, it goes
-            // to the log and this exits 0 having said nothing.
-            if let Err(error) = hook(*event, &config, &cli.common) {
-                tracing::warn!(event = event.as_str(), error, "hook failed");
-            }
-            Ok(0)
-        }
+        // Handled above, before the config load it must not depend on.
+        Command::Hook { .. } => unreachable!(),
         Command::Serve => {
             let token = Secret::resolve(
                 config.github.token_env.as_deref(),
@@ -1435,6 +1436,31 @@ fn payload<R: std::io::Read + Send + 'static>(
     }
 }
 
+/// Run a hook, and cost the calling session nothing whatever happens.
+///
+/// A hook's exit code is a decision in Claude Code's protocol, not a status: 2
+/// on `UserPromptSubmit` erases the user's prompt, and 2 on `SessionStart`
+/// blocks the session. So the answer is always 0, and that has to hold for the
+/// failures the body below never gets to see — a config that won't parse, and a
+/// panic.
+fn swallowing(event: HookEvent, run: impl FnOnce() -> Result<(), String>) -> i32 {
+    // The default hook writes to stderr, which is noise in somebody's
+    // transcript; whoever is debugging this is reading the log.
+    std::panic::set_hook(Box::new(|panicked| {
+        tracing::error!(%panicked, "panicked");
+    }));
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    let _ = std::panic::take_hook();
+
+    match ran {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(event = event.as_str(), error, "hook failed"),
+        // The panic itself was logged by the hook above.
+        Err(_) => tracing::error!(event = event.as_str(), "hook panicked"),
+    }
+    0
+}
+
 /// Do what a hook asks, or say why not. The caller swallows the error.
 fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String> {
     let raw = payload(std::io::stdin(), PAYLOAD_TIMEOUT)?;
@@ -2218,7 +2244,8 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, ellipsize, finished_already, payload, wait_targets, watch_target, watch_targets,
+        HookEvent, classify, ellipsize, finished_already, payload, swallowing, wait_targets,
+        watch_target, watch_targets,
     };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
@@ -2361,6 +2388,25 @@ mod tests {
 
         let error = payload(Silent, std::time::Duration::from_millis(20)).unwrap_err();
         assert!(error.contains("within 20ms"), "{error}");
+    }
+
+    #[test]
+    fn a_hook_that_fails_costs_the_session_nothing() {
+        // Exit codes are decisions in the hook protocol: 2 on
+        // UserPromptSubmit erases the prompt, 2 on SessionStart blocks the
+        // session. Nothing inkling can get wrong is worth either.
+        assert_eq!(
+            swallowing(HookEvent::Prompt, || Err("the config won't parse".into())),
+            0
+        );
+    }
+
+    #[test]
+    fn a_hook_that_panics_costs_the_session_nothing() {
+        assert_eq!(
+            swallowing(HookEvent::Prompt, || panic!("somewhere deep")),
+            0
+        );
     }
 
     #[test]
