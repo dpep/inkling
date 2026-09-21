@@ -10,6 +10,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -59,11 +60,8 @@ impl FileLock {
         }
     }
 
-    /// Take the lock, waiting as long as it takes.
-    ///
-    /// Used for the short load-modify-save critical sections, where the hold
-    /// time is a few milliseconds of JSON and blocking is simpler than any
-    /// retry loop that would replace it.
+    /// Take the lock, waiting as long as it takes. For a foreground command
+    /// that owns its own patience — never anything a session is waiting on.
     pub fn acquire(path: &Path) -> Result<Self, LockError> {
         let file = open(path)?;
         flock(&file, libc::LOCK_EX).map_err(|source| LockError::Lock {
@@ -72,7 +70,30 @@ impl FileLock {
         })?;
         Ok(Self { _file: file })
     }
+
+    /// Take the lock, or give up once `budget` has passed.
+    ///
+    /// A poll rather than a blocking `flock`: the deadline is the point, and
+    /// interrupting a blocked `flock` needs a signal and a handler, which is
+    /// more machinery than the wait is worth. The gap is short enough that the
+    /// usual case — a lock held for a couple of milliseconds of JSON — still
+    /// costs one nap.
+    pub fn acquire_within(path: &Path, budget: Duration) -> Result<Option<Self>, LockError> {
+        let deadline = Instant::now() + budget;
+        loop {
+            if let Some(held) = Self::try_acquire(path)? {
+                return Ok(Some(held));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(LOOK.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
 }
+
+/// How often to look again while waiting. Shorter than any hold worth having.
+const LOOK: Duration = Duration::from_millis(5);
 
 fn open(path: &Path) -> Result<File, LockError> {
     if let Some(parent) = path.parent() {
@@ -103,6 +124,7 @@ fn flock(file: &File, operation: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("inkling-lock-{}-{name}", std::process::id()));
@@ -124,6 +146,38 @@ mod tests {
         assert!(
             FileLock::try_acquire(&path).unwrap().is_none(),
             "the second is refused rather than made to wait"
+        );
+    }
+
+    #[test]
+    fn waiting_for_a_held_lock_gives_up_rather_than_queueing_forever() {
+        // What a hook needs: the lock or an answer, never an open-ended wait.
+        let path = FileLock::path_for(&temp("patience"));
+        let _held = FileLock::try_acquire(&path).unwrap().unwrap();
+
+        let started = std::time::Instant::now();
+        let waited = FileLock::acquire_within(&path, Duration::from_millis(80)).unwrap();
+
+        assert!(waited.is_none(), "the holder never let go");
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert!(
+            started.elapsed() < Duration::from_millis(800),
+            "and it did not keep waiting"
+        );
+    }
+
+    #[test]
+    fn a_free_lock_is_taken_without_waiting() {
+        let path = FileLock::path_for(&temp("prompt"));
+        let started = std::time::Instant::now();
+        assert!(
+            FileLock::acquire_within(&path, Duration::from_secs(30))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "the budget is a cap, not a cost"
         );
     }
 

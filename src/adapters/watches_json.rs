@@ -50,6 +50,13 @@ pub const RETENTION: TimeDelta = TimeDelta::hours(24);
 /// returns to.
 pub const SUBSCRIBER_RETENTION: TimeDelta = TimeDelta::days(7);
 
+/// How long a writer waits for the lock before giving up.
+///
+/// The critical section is a small file read, a tidy and a rename — measured
+/// at 2ms. This is a hundred times that, and still short enough that nobody
+/// watching a session notice it.
+const PATIENCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watches {
     pub version: u32,
@@ -542,13 +549,23 @@ impl WatchStore {
 
     /// Load, tidy, change, save — all under the lock, which is the only way
     /// anything in here is written.
+    ///
+    /// The wait for the lock is capped at `PATIENCE`, and a caller that loses
+    /// is told so rather than queued. Every hook Claude Code runs comes through
+    /// here, and a hook that waits on a lock is a session waiting on a lock;
+    /// giving up costs one notification, which is the price this whole tool is
+    /// allowed to charge.
     pub fn update<T>(
         &self,
         now: DateTime<Utc>,
         change: impl FnOnce(&mut Watches) -> T,
     ) -> Result<T, StoreError> {
         let lock_path = FileLock::path_for(&self.path);
-        let _lock = FileLock::acquire(&lock_path).map_err(|e| StoreError::Write(e.to_string()))?;
+        let _lock = FileLock::acquire_within(&lock_path, PATIENCE)
+            .map_err(|e| StoreError::Write(e.to_string()))?
+            .ok_or(StoreError::Busy {
+                waited_ms: PATIENCE.as_millis() as u64,
+            })?;
 
         let mut watches = self.load()?;
         let pruned = watches.collect_garbage(now, RETENTION);
@@ -1229,5 +1246,30 @@ mod tests {
         std::fs::write(&path, r#"{"version": 99}"#).unwrap();
         let store = WatchStore::new(&path);
         assert!(store.update(now(), |_| ()).is_err());
+    }
+
+    #[test]
+    fn a_writer_gives_up_on_a_held_lock_rather_than_queueing() {
+        // Every hook Claude Code runs writes through here. Whatever is holding
+        // the lock — a stopped process, a store on a stalled filesystem — the
+        // hook has to come back, and the cost is one missed notification.
+        let path = scratch("busy");
+        let store = WatchStore::new(&path);
+        let _held = FileLock::try_acquire(&FileLock::path_for(&path))
+            .unwrap()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let refused = store.update(now(), |w| w.watch(&pr(3), "s-1", forever(), now()));
+
+        assert!(
+            matches!(refused, Err(StoreError::Busy { .. })),
+            "{refused:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?} is not a bound a prompt can pay",
+            started.elapsed()
+        );
     }
 }
