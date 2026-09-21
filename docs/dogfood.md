@@ -6,11 +6,19 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- Off a TTY, as Claude Code runs Bash, `gh pr merge 3 --repo …` prints
+  nothing and `gh pr ready 3` prints `owner/repo#3`, not a URL — so the
+  post-tool hook can't name the PR for either unless the session typed a
+  URL. Expected the commands that change a PR to be the easiest to read.
+  It's why self-caused pushes weren't suppressed (watching.md).
 - Marking #14 ready pushed `state draft → open`, and merging it pushed
   `open → merged` — both news of what this session had just done itself.
   Expected a push to be something I didn't already know. Earlier PRs didn't
   show it only because ready and merge fell in one tick (`draft → merged`).
-  Open: tell a session its own actions only through `events`, or not at all.
+  Fixed on `self-push`, by neither: out of draft is a start, so it waits
+  in `events` like `→ pending`, and ready+merge is one push in one tick or
+  two. The self-merge line stays — the hook can't tell which PR `gh pr merge
+  3` was about. See watching.md, "Your own actions".
 - The probe's deliberately red CI was pushed to the parent session twice. A
   subagent's Bash calls register watches on the parent's session, and the
   post-tool hook registered the probe PR before any scratch `--watches` path

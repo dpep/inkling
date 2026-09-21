@@ -126,7 +126,8 @@ enum Command {
         /// browse URL.
         targets: Vec<String>,
         /// Stop watching after this long, e.g. 2h, 24h, 7d.
-        #[arg(long, default_value = "24h", value_parser = humantime::parse_duration)]
+        // Must equal watches_json::WATCH_TTL; a test holds them together.
+        #[arg(long, default_value = "72h", value_parser = humantime::parse_duration)]
         ttl: std::time::Duration,
         /// Emit the watch list as JSON.
         #[arg(long)]
@@ -1567,7 +1568,8 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             // the one the payload names — never `cli`, since a watch made by
             // a session belongs to it even if nothing is attached yet.
             let owner = reader(None, &input.session_id, &watches.read());
-            let deadline = (clock.now() + TimeDelta::hours(24)).trunc_subsecs(0);
+            let deadline =
+                (clock.now() + inkling::adapters::watches_json::WATCH_TTL).trunc_subsecs(0);
             let fresh = watches
                 .update(clock.now(), |file| {
                     let mut fresh = Vec::new();
@@ -2370,6 +2372,20 @@ mod tests {
                 classify(&one, &hosts(), &snapshot).map(|(_, references)| names(references)),
             ),
         ]
+    }
+
+    #[test]
+    fn a_watch_lasts_as_long_as_its_events_are_kept_however_it_was_made() {
+        // `inkling watch` takes its default from clap, the post-tool hook from
+        // the constant: two spellings of one number.
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["inkling", "watch", "42"]).unwrap();
+        let super::Command::Watch { ttl, .. } = cli.command else {
+            unreachable!()
+        };
+        let default = inkling::adapters::watches_json::WATCH_TTL;
+        assert_eq!(ttl, default.to_std().unwrap());
+        assert!(default <= inkling::adapters::watches_json::RETENTION);
     }
 
     #[test]
