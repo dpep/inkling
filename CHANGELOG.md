@@ -10,6 +10,9 @@
   run has finished — minutes after the one that failed. It now ends in `gh api … /actions/jobs/<id>/logs`,
   which GitHub serves the moment the job ends. Checks from other apps still get `gh pr checks`.
   `inkling events --json` rows carry the same `job`.
+- **A draft marked ready is no longer pushed.** `state draft → open` waits in `inkling events` like
+  `checks → pending` does: it starts review, and there is nothing to do about it. Ready then merge
+  now costs one push whether GitHub reports it in one poll or two.
 
 ## 0.1.0 — 2026-09-20
 

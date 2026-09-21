@@ -26,7 +26,7 @@
 
 use crate::adapters::session_socket::{DeliverError, SessionAddress, Written};
 use crate::adapters::watches_json::Watches;
-use crate::domain::model::Reference;
+use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use crate::domain::watch::{Axis, Event, addressed};
 use crate::ports::Clock;
@@ -84,12 +84,18 @@ fn more(event: &Event) -> Option<String> {
 
 /// Whether a transition is worth starting a turn over.
 ///
-/// A push costs the session a turn; a pull costs nothing. A suite that has
-/// only started leaves nothing to do, so it waits in the feed for the next
-/// prompt, and the verdict that follows passes over it. One rule rather than
-/// a setting — see docs/watching.md for what would change that.
+/// A push costs the session a turn; a pull costs nothing. A start — a suite
+/// beginning, a draft marked ready — leaves nothing to do, so it waits in the
+/// feed for the next prompt, and the verdict that follows passes over it. One
+/// rule rather than a setting — see docs/watching.md for what would change
+/// that, and for why who caused a transition is not part of it.
 fn worth_a_turn(event: &Event) -> bool {
-    !(event.axis == Axis::Checks && event.to == CheckState::Pending.as_str())
+    let started = match event.axis {
+        Axis::Checks => event.to == CheckState::Pending.as_str(),
+        Axis::State => event.from == State::Draft.as_str() && event.to == State::Open.as_str(),
+        Axis::Status => false,
+    };
+    !started
 }
 
 /// Where a session's inbox is reached. A seam rather than an abstraction: it
@@ -319,7 +325,7 @@ impl Work for Tick<'_> {
 mod tests {
     use super::*;
     use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
-    use crate::domain::model::State;
+
     use crate::domain::watch::{FailedCheck, Sighting, Standing};
     use crate::secret::Secret;
     use crate::testing::FixedClock;
@@ -534,6 +540,68 @@ mod tests {
             watches.take("s", now()).is_empty(),
             "the verdict passes over the start; a prompt doesn't dig it back up"
         );
+    }
+
+    /// A draft, baselined, watched by `s` with an address.
+    fn drafted() -> Watches {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s", forever(), now());
+        watches.record(&[(pr(3), sighting(State::Draft, None))], now());
+        watches.attach("s", address("/tmp/a"), now());
+        watches
+    }
+
+    #[test]
+    fn a_draft_marked_ready_waits_for_the_next_prompt() {
+        // Dogfooded on #14: `gh pr ready` woke the session that ran it. Out of
+        // draft is a start, like a suite starting; review is what follows.
+        let mut watches = drafted();
+        moved(&mut watches, State::Open);
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+
+        assert!(sessions.texts().is_empty(), "{:?}", sessions.texts());
+        assert_eq!(
+            watches.take("s", now()).len(),
+            1,
+            "still there to be pulled"
+        );
+    }
+
+    #[test]
+    fn ready_then_merged_costs_one_push_whichever_tick_it_lands_in() {
+        // Ready and merge in one tick read `draft → merged`; in two, they read
+        // `draft → open`, `open → merged`. What arrives shouldn't depend on it.
+        for split in [false, true] {
+            let mut watches = drafted();
+            if split {
+                moved(&mut watches, State::Open);
+            }
+            moved(&mut watches, State::Merged);
+
+            let sessions = FakeSessions::default();
+            deliver(&sessions, &mut watches);
+
+            let texts = sessions.texts();
+            assert_eq!(texts.len(), 1, "split={split}: {texts:?}");
+            assert!(texts[0].ends_with("→ merged"), "{texts:?}");
+            assert!(watches.take("s", now()).is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn a_pull_request_sent_back_to_draft_is_still_pushed() {
+        // Only leaving draft is a start. Going back to it is somebody saying
+        // the work isn't ready, which is something to know.
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now());
+        moved(&mut watches, State::Draft);
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+
+        assert_eq!(sessions.texts().len(), 1, "{:?}", sessions.texts());
     }
 
     #[test]

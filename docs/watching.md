@@ -46,12 +46,10 @@ Two more have since joined it, each one sentence long:
   that runs no checks; one reading cannot tell them apart. So once a rollup
   has been seen, a reading without one keeps the rollup it had. See below.
 - **A transition is news even to the reader that caused it.** A session that
-  merges a pull request is told `draft → merged` seconds later, and that is
-  kept on purpose: `gh pr merge` returns before GitHub has finished, so the
-  event is the confirmation that it landed. Inkling knows what changed, not
-  who changed it, and working that out means modelling the caller — which is
-  the opposite of DESIGN §1. It costs one line, once: the finished watch then
-  removes itself.
+  merges a pull request is told `open → merged` seconds later. Inkling knows
+  what changed, not who changed it, and it costs one line, once: the finished
+  watch then removes itself. Revisited against the dogfood log and kept — see
+  [Your own actions](#your-own-actions-arrive-as-news-and-that-stays).
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
   deadline (`--ttl`, 24h), and a finished reference — merged, closed, Done —
   drops its watch after its last event. There is no reaper.
@@ -280,6 +278,61 @@ verdict that follows is pushed and the cursor passes over the start. A push
 to a PR therefore costs one message, the result. This is one rule in
 `push::worth_a_turn`, not a setting, and the feed itself is still complete.
 
+The same rule covers a draft marked ready: `state draft → open` is a start
+too — review is what follows, and nothing about it is actionable. Leaving
+draft for anything else (`draft → merged`, `draft → closed`) is a verdict and
+is pushed, and so is going *back* to draft, which is somebody saying the work
+isn't ready.
+
+### Your own actions arrive as news, and that stays
+
+Dogfooded 2026-09-20 on #14: `gh pr ready` pushed `draft → open` into the
+session that ran it, and `gh pr merge` pushed `open → merged` fifteen seconds
+later. Two turns spent telling a session what it had just done. Earlier PRs
+cost one, only because ready and merge had landed in the same tick and read
+`draft → merged`.
+
+That last point is the real defect, and the start rule above is the fix:
+what arrives no longer depends on where a poll happened to land — the same
+property the no-rollup gap was fixed for. Ready-then-merge now costs one push
+in one tick or in two (`push::tests::ready_then_merged_costs_one_push_…`).
+
+Withholding a push from the session that *caused* the transition was
+considered and rejected:
+
+- **The hook can't name the pull request for the usual spelling.** Measured on
+  the probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
+  runs it: `gh pr merge 3 --repo …` prints **nothing** and exits 0, and `gh pr
+  ready 3` prints `✓ Pull request dpep/inkling-ci-probe#3 is marked as "ready
+  for review"`, which is not a URL. `post-tool` reads references only from
+  URLs, so it would recognise a self-merge only when the session happened to
+  paste one. A suppression that fires depending on how a command was spelled
+  is one nobody can predict; making it reliable is the look-it-up lookup under
+  [Not built](#not-built-and-what-would-change-that), a network call on every
+  matching tool call.
+- **It is new durable state with its own failure semantics.** "Session S did
+  A on R" has to be recorded per reader, matched to one axis and one target,
+  expire, and not swallow a later real transition when A failed (a merge that
+  was blocked, then a person merging ten minutes on). Every one of those is a
+  guess about the caller.
+- **What's left is bounded at one line per pull request.** After the start
+  rule, a session that merges its own PR is told once, and the watch is gone.
+  For `gh pr merge --auto` and merge queues that line is the most useful push
+  there is — the merge happens later, when nobody is looking — and the hook
+  couldn't tell those apart from a direct merge without parsing flags.
+- **Subagents would have made "self" wrong anyway.** A subagent shares its
+  parent's session id, so a merge a subagent ran would be withheld from a
+  parent that may not know it happened.
+
+`gh pr merge` does not return early, contrary to what this document used to
+say: the second `merge` in the measurement above answered `already merged`.
+The confirmation argument was wrong; the decision survives without it.
+
+What would change this: the dogfood log still showing sessions told about
+their own actions once the start rule is in — `gh pr close`, say, or a
+self-merge line that someone calls noise rather than a receipt — *and* the
+hook able to name the pull request those commands were about.
+
 **What advancing on a successful push costs, stated plainly.** The socket
 sends no ack, so `Written` means the bytes reached a live socket and nothing
 more. A session that *held* or *refused* the message — `crossSessionInbound`
@@ -372,7 +425,9 @@ of noise.
   guess until the dogfood log shows two people wanting different answers, or
   one rule that is right for PRs and wrong for Jira. What would change this:
   lines in docs/dogfood.md that say "woke me for nothing" or "didn't wake me
-  and should have" that one rule can't settle both ways.
+  and should have" that one rule can't settle both ways. The first "woke me
+  for nothing" (#14, ready and merge) was settled by the one rule, not by a
+  knob.
 - **An ack.** Everything push gives up follows from the socket not having
   one. If Claude Code ever reports that a message was accepted, a cursor
   could advance on *that* rather than on the write, and the cost above
