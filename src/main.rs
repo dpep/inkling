@@ -2070,6 +2070,20 @@ fn serve_out(status: &inkling::serve::Status) {
 /// spread across a hook, a resident server and a terminal, and only the log
 /// sees all three. This is the one place that adds them up. Every line here
 /// names the `inkling logs -g` that shows the detail behind it.
+/// What each transition caught cost upstream — the number that says whether
+/// the reading schedule is too eager. Two significant figures at most: it is a
+/// ratio of two daily counts.
+fn per_transition(reads: usize, transitions: usize) -> String {
+    if transitions == 0 {
+        return String::new();
+    }
+    let ratio = reads as f64 / transitions as f64;
+    match ratio >= 10.0 {
+        true => format!(" — {ratio:.0} reads per transition"),
+        false => format!(" — {ratio:.1} reads per transition"),
+    }
+}
+
 fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
     let from = (now - TimeDelta::hours(24))
         .format("%Y-%m-%dT%H:%M:%S")
@@ -2085,6 +2099,16 @@ fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
     println!(
         "  delivered {} pushed, {} withheld, {} pulled",
         tally.pushed, tally.withheld, tally.pulls
+    );
+    println!(
+        "  upstream  {} pull requests in {} github queries, {} jira issues{}",
+        tally.pull_requests_read,
+        tally.github_queries,
+        tally.issues_read,
+        per_transition(
+            tally.pull_requests_read + tally.issues_read,
+            tally.transitions
+        )
     );
     println!(
         "  trouble   {} hook failures, {} references unread, {} errors",
@@ -2344,6 +2368,14 @@ mod tests {
 
     fn hosts() -> Vec<String> {
         vec!["github.com".to_string()]
+    }
+
+    #[test]
+    fn reads_per_transition_claims_no_more_precision_than_it_has() {
+        use super::per_transition;
+        assert_eq!(per_transition(120, 0), "", "nothing caught, no ratio");
+        assert_eq!(per_transition(1000, 3), " — 333 reads per transition");
+        assert_eq!(per_transition(20, 3), " — 6.7 reads per transition");
     }
 
     /// One argument, put through every command that takes a reference.

@@ -269,6 +269,17 @@ pub struct Tally {
     pub hook_failures: usize,
     pub unread: usize,
     pub errors: usize,
+    /// Upstream reads, from `polled watches`: what the reading schedule costs.
+    pub github_queries: usize,
+    pub pull_requests_read: usize,
+    pub issues_read: usize,
+}
+
+/// The number after ` name=` on a line, or 0.
+fn count(line: &str, name: &str) -> usize {
+    line.split_once(&format!(" {name}="))
+        .and_then(|(_, rest)| rest.split(' ').next()?.parse().ok())
+        .unwrap_or(0)
 }
 
 impl Tally {
@@ -294,6 +305,12 @@ impl Tally {
             ];
             for (count, matched) in counts {
                 *count += usize::from(matched);
+            }
+            if line.contains("polled watches ") {
+                let pulls = count(line, "github");
+                tally.github_queries += usize::from(pulls > 0);
+                tally.pull_requests_read += pulls;
+                tally.issues_read += count(line, "jira");
             }
         }
         tally
@@ -452,6 +469,8 @@ mod tests {
 2026-09-21T00:38:01.508Z  INFO inkling: subscribed subscriber=\"sess-a\" socket=/tmp/a.sock reattached=false
 2026-09-21T00:38:01.509Z  INFO inkling: unsubscribed subscriber=\"sess-b\" detached=true
 2026-09-21T00:38:02.000Z  INFO inkling: watch registered automatically reference=x#9 owner=\"s\" tool=\"Bash\" matched=\"gh pr view\"
+2026-09-21T00:38:03.000Z  INFO inkling::watch: polled watches why=\"serve\" watched=3 github=2 jira=1 read=3 events=1 failures=0 elapsed_ms=412
+2026-09-21T00:38:03.100Z  INFO inkling::watch: polled watches why=\"prompt\" watched=1 github=0 jira=1 read=1 events=0 failures=0 elapsed_ms=900
 2026-09-21T00:38:03.515Z  INFO inkling::adapters::watches_json: transition reference=x#9 axis=\"state\" from=\"open\" to=\"approved\" seq=1 audience=1
 2026-09-21T00:38:03.516Z  INFO inkling::push: pushed subscriber=\"sess-a\" seq=1 outcome=\"written\" elapsed_ms=0 advanced=true
 2026-09-21T00:38:05.000Z  INFO inkling::push: pushed subscriber=\"sess-a\" seq=2 outcome=\"gone\" elapsed_ms=0 advanced=false
@@ -477,6 +496,10 @@ mod tests {
                 hook_failures: 1,
                 unread: 1,
                 errors: 1,
+                // Pull requests go in one batched query; issues one apiece.
+                github_queries: 1,
+                pull_requests_read: 2,
+                issues_read: 2,
             }
         );
     }

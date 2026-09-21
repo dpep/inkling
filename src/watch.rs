@@ -83,6 +83,10 @@ impl Poller<'_> {
             });
         }
 
+        let pulls = references
+            .iter()
+            .filter(|r| matches!(r, Reference::GitHubPullRequest { .. }))
+            .count();
         let mut failures = Vec::new();
         let sightings = self.sightings(&references, &mut failures);
         let elapsed = (self.clock.now() - observed_at).num_milliseconds();
@@ -94,6 +98,10 @@ impl Poller<'_> {
         tracing::info!(
             why,
             watched = references.len(),
+            // Split by provider because they cost differently: pull requests
+            // are one batched query, issues one `acli` apiece.
+            github = pulls,
+            jira = references.len() - pulls,
             read = sightings.len(),
             events = events.len(),
             failures = failures.len(),
