@@ -178,6 +178,7 @@ impl Poller<'_> {
                                     },
                                     title: status.title,
                                     failing: status.failing,
+                                    head: status.head,
                                 },
                             )),
                             Err(error) => {
@@ -216,6 +217,7 @@ impl Poller<'_> {
                                     },
                                     title: status.summary,
                                     failing: None,
+                                    head: None,
                                 },
                             )),
                             Err(error) => {

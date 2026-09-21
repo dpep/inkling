@@ -181,6 +181,7 @@ impl Waits {
                         // Not persisted: a wait reports that checks went red,
                         // not which job did.
                         failing: None,
+                        head: None,
                     }),
                     Seen::NotFound => Err(RefError::NotFound),
                     Seen::Failed { message } => Err(RefError::Other(message.clone())),

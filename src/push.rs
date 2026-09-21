@@ -414,6 +414,7 @@ mod tests {
             standing: Standing::PullRequest { state, checks },
             title: "Add the session socket sink".into(),
             failing: None,
+            head: None,
         }
     }
 
@@ -863,6 +864,7 @@ mod tests {
             },
             title: "Try the watch feature".into(),
             failing: None,
+            head: None,
         };
         watches.record(&[(key.clone(), issue("To Do"))], now());
         watches.record(&[(key, issue("In Review"))], now());

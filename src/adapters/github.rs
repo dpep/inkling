@@ -5,9 +5,10 @@
 //! one repo is unreadable, and still resolves the rest — which is exactly the
 //! in-band failure the port asks for.
 
+use crate::domain::detect::Pushed;
 use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::FailedCheck;
+use crate::domain::watch::{FailedCheck, Head};
 use crate::ports::{Lookup, ProviderError, RefError, RefStatus, StatusProvider};
 use crate::secret::Secret;
 use serde::Deserialize;
@@ -29,7 +30,7 @@ impl GitHubProvider {
         }
     }
 
-    fn post(&self, query: &str) -> Result<Response, ProviderError> {
+    fn post<T: serde::de::DeserializeOwned>(&self, query: &str) -> Result<T, ProviderError> {
         let body = serde_json::json!({ "query": query });
         let response = ureq::post(&self.api_url)
             .config()
@@ -42,7 +43,7 @@ impl GitHubProvider {
         match response {
             Ok(mut ok) => ok
                 .body_mut()
-                .read_json::<Response>()
+                .read_json::<T>()
                 .map_err(|e| ProviderError::Transport(format!("malformed response: {e}"))),
             // The message is GitHub's, but the token must never ride along in
             // an error string, so only the status is reported.
@@ -51,6 +52,113 @@ impl GitHubProvider {
             }
             Err(e) => Err(ProviderError::Transport(e.to_string())),
         }
+    }
+
+    /// The open pull requests each push updated, as `(index into pushes,
+    /// pull request, its head)`. One request for all of them.
+    ///
+    /// A pull request counts only if its head is exactly the repository and
+    /// branch that were pushed. Asked of the pushed repository and of its
+    /// parent, because a fork's pull requests live upstream — where anybody
+    /// else's fork may have a branch of the same name.
+    pub fn pushed_to(
+        &self,
+        pushes: &[Pushed],
+    ) -> Result<Vec<(usize, Reference, Head)>, ProviderError> {
+        if pushes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let response: PushResponse = self.post(&push_query(pushes))?;
+        Ok(pushed_pulls(pushes, &response))
+    }
+}
+
+fn push_query(pushes: &[Pushed]) -> String {
+    let mut query = String::from("query {");
+    for (i, push) in pushes.iter().enumerate() {
+        // `headRefName` can't be narrowed to one fork, and upstream `master`
+        // is every stranger's branch too — recorded: five open ones on
+        // rust-lang/rust. A page of 100 keeps yours from falling off the end;
+        // past that a push watches nothing, never the wrong one.
+        let pulls = format!(
+            "nameWithOwner pullRequests(headRefName: {}, states: OPEN, first: 100) {{ nodes {{ number headRefName headRepository {{ nameWithOwner }} }} }}",
+            quote(&push.branch)
+        );
+        query.push_str(&format!(
+            " p{i}: repository(owner: {}, name: {}) {{ {pulls} parent {{ {pulls} }} }}",
+            quote(&push.owner),
+            quote(&push.repo),
+        ));
+    }
+    query.push_str(" }");
+    query
+}
+
+fn pushed_pulls(pushes: &[Pushed], response: &PushResponse) -> Vec<(usize, Reference, Head)> {
+    let mut found = Vec::new();
+    for (i, push) in pushes.iter().enumerate() {
+        let Some(Some(pushed)) = response.data.get(&format!("p{i}")) else {
+            continue;
+        };
+        for base in std::iter::once(pushed).chain(pushed.parent.as_deref()) {
+            let Some((owner, repo)) = base.name_with_owner.split_once('/') else {
+                continue;
+            };
+            for pull in &base.pull_requests.nodes {
+                let Some(head) = pull.head() else { continue };
+                if !head.is(&push.repository(), &push.branch) {
+                    continue;
+                }
+                let reference = Reference::GitHubPullRequest {
+                    host: push.host.clone(),
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                    number: pull.number,
+                };
+                found.push((i, reference, head));
+            }
+        }
+    }
+    found
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PushResponse {
+    #[serde(default)]
+    data: HashMap<String, Option<PushedRepository>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushedRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+    #[serde(default, rename = "pullRequests")]
+    pull_requests: HeadedPulls,
+    #[serde(default)]
+    parent: Option<Box<PushedRepository>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HeadedPulls {
+    #[serde(default)]
+    nodes: Vec<HeadedPull>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeadedPull {
+    number: u64,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(default, rename = "headRepository")]
+    head_repository: Option<NamedRepository>,
+}
+
+impl HeadedPull {
+    fn head(&self) -> Option<Head> {
+        Some(Head {
+            repo: self.head_repository.as_ref()?.name_with_owner.clone(),
+            branch: self.head_ref_name.clone(),
+        })
     }
 }
 
@@ -88,7 +196,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 20) {{ nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} }} }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 20) {{ nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} }} }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -166,6 +274,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                             .checks()
                             .or_else(|| runs_checks(reference).then_some(CheckState::Pending)),
                         failing: pr.failing(),
+                        head: pr.head(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -235,8 +344,19 @@ struct PullRequest {
     author: Option<Author>,
     #[serde(default)]
     title: String,
+    #[serde(default, rename = "headRefName")]
+    head_ref_name: Option<String>,
+    /// Null once a fork is deleted, and then nothing can be pushed to it.
+    #[serde(default, rename = "headRepository")]
+    head_repository: Option<NamedRepository>,
     #[serde(default)]
     commits: Commits,
+}
+
+#[derive(Debug, Deserialize)]
+struct NamedRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
 }
 
 /// Checks hang off the head commit, so the rollup arrives down this shaft
@@ -364,6 +484,13 @@ impl PullRequest {
         Some(FailedCheck {
             name,
             job: context.job(),
+        })
+    }
+
+    fn head(&self) -> Option<Head> {
+        Some(Head {
+            repo: self.head_repository.as_ref()?.name_with_owner.clone(),
+            branch: self.head_ref_name.clone()?,
         })
     }
 
@@ -797,6 +924,99 @@ mod tests {
             query.contains(r#"e1: repository(owner: "dpep", name: "polyid")"#),
             "{query}"
         );
+    }
+
+    #[test]
+    fn a_reading_names_the_branch_a_pull_request_comes_from() {
+        assert!(
+            build_query(&[pr("x", 1)]).contains("headRefName headRepository { nameWithOwner }")
+        );
+        let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":null,
+            "headRefName":"push-watch","headRepository":{"nameWithOwner":"dpep/inkling"}}}}}"#;
+        let status = interpret(&[pr("x", 1)], &parse(json))[0].1.clone().unwrap();
+        assert_eq!(
+            status.head,
+            Some(Head {
+                repo: "dpep/inkling".into(),
+                branch: "push-watch".into()
+            })
+        );
+    }
+
+    fn push(owner: &str, repo: &str, branch: &str) -> Pushed {
+        Pushed {
+            host: "github.com".into(),
+            owner: owner.into(),
+            repo: repo.into(),
+            branch: branch.into(),
+            invited: false,
+        }
+    }
+
+    fn found(pushes: &[Pushed], json: &str) -> Vec<(usize, String, String)> {
+        let response: PushResponse = serde_json::from_str(json).unwrap();
+        pushed_pulls(pushes, &response)
+            .into_iter()
+            .map(|(i, reference, head)| (i, reference.to_string(), head.branch))
+            .collect()
+    }
+
+    /// Recorded 2026-09-20. `p0` is a fork whose pull request lives upstream;
+    /// `p1` is five strangers' forks whose branch is also called `master`.
+    const PUSHED: &str = r#"{"data":{"p0":{"nameWithOwner":"notriddle/rust","pullRequests":{"nodes":[]},"parent":{"nameWithOwner":"rust-lang/rust","pullRequests":{"nodes":[{"number":163058,"headRefName":"rustdoc/separate-parsing","headRepository":{"nameWithOwner":"notriddle/rust"}}]}}},"p1":{"nameWithOwner":"rust-lang/rust","pullRequests":{"nodes":[{"number":131340,"headRefName":"master","headRepository":{"nameWithOwner":"eduardorittner/rust"}},{"number":140640,"headRefName":"master","headRepository":{"nameWithOwner":"kstrafe/rust"}}]},"parent":null}}}"#;
+
+    #[test]
+    fn a_push_to_a_fork_finds_its_pull_request_upstream() {
+        let pushes = [
+            push("notriddle", "rust", "rustdoc/separate-parsing"),
+            push("rust-lang", "rust", "master"),
+        ];
+        assert_eq!(
+            found(&pushes, PUSHED),
+            [(
+                0,
+                "github.com/rust-lang/rust#163058".into(),
+                "rustdoc/separate-parsing".into()
+            )],
+            "and not one of the strangers whose branch is also master"
+        );
+    }
+
+    #[test]
+    fn every_open_pull_request_from_the_pushed_branch_is_found() {
+        // One branch, two bases: the push changed both.
+        let json = r#"{"data":{"p0":{"nameWithOwner":"dpep/inkling","pullRequests":{"nodes":[
+            {"number":7,"headRefName":"fix","headRepository":{"nameWithOwner":"dpep/inkling"}},
+            {"number":9,"headRefName":"fix","headRepository":{"nameWithOwner":"dpep/inkling"}}]},"parent":null}}}"#;
+        let refs: Vec<String> = found(&[push("dpep", "inkling", "fix")], json)
+            .into_iter()
+            .map(|(_, reference, _)| reference)
+            .collect();
+        assert_eq!(
+            refs,
+            ["github.com/dpep/inkling#7", "github.com/dpep/inkling#9"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_repository_or_a_deleted_fork_finds_nothing() {
+        // Recorded: the null alias GitHub returns for a repository it can't resolve.
+        let missing = r#"{"data":{"p0":null},"errors":[{"type":"NOT_FOUND","path":["p0"],"message":"Could not resolve to a Repository with the name 'dpep/does-not-exist-xyz'."}]}"#;
+        assert!(found(&[push("dpep", "does-not-exist-xyz", "x")], missing).is_empty());
+        let orphan = r#"{"data":{"p0":{"nameWithOwner":"dpep/inkling","pullRequests":{"nodes":[
+            {"number":7,"headRefName":"fix","headRepository":null}]}}}}"#;
+        assert!(found(&[push("dpep", "inkling", "fix")], orphan).is_empty());
+    }
+
+    #[test]
+    fn the_push_query_asks_the_repository_and_its_parent_with_names_escaped() {
+        let query = push_query(&[push("dpep", "inkling", r#"x") { y } #"#)]);
+        assert!(
+            query.contains(r#"p0: repository(owner: "dpep", name: "inkling")"#),
+            "{query}"
+        );
+        assert!(query.contains(r#"headRefName: "x\")"#), "{query}");
+        assert_eq!(query.matches("states: OPEN").count(), 2, "{query}");
     }
 
     #[test]

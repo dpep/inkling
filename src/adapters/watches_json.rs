@@ -17,8 +17,9 @@
 
 use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
+use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
-use crate::domain::watch::{Event, Sighting, Standing, reading};
+use crate::domain::watch::{Event, Head, Sighting, Standing, reading};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,12 @@ pub struct Watch {
     /// schedule counts quiet from. Absent in files that predate the schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stirred_at: Option<DateTime<Utc>>,
+    /// The branch a pull request's commits come from, once a reading or a
+    /// lookup has named it. Kept on the watch rather than in a map of its own
+    /// so it can't outlive the pull request it describes: a branch reused for
+    /// a new pull request after this one's watch expires is looked up afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Head>,
 }
 
 impl Watch {
@@ -238,10 +245,73 @@ impl Watches {
                 seen: None,
                 owners: BTreeSet::new(),
                 stirred_at: None,
+                head: None,
             });
         entry.deadline = entry.deadline.max(deadline);
         entry.owners.insert(owner.to_string());
         entry.stirred_at = Some(now);
+    }
+
+    /// `owner`'s live watches on pull requests whose head is `branch` of
+    /// `repo` on `host` — what a push there just changed.
+    pub fn pushed_to(
+        &self,
+        owner: &str,
+        host: &str,
+        repo: &str,
+        branch: &str,
+        now: DateTime<Utc>,
+    ) -> Vec<Reference> {
+        self.watches
+            .values()
+            .filter(|watch| watch.deadline > now && watch.owners.contains(owner))
+            .filter(|watch| {
+                watch
+                    .head
+                    .as_ref()
+                    .is_some_and(|head| head.is(repo, branch))
+            })
+            .filter(|watch| {
+                matches!(&watch.reference, Reference::GitHubPullRequest { host: h, .. }
+                    if h.eq_ignore_ascii_case(host))
+            })
+            .map(|watch| watch.reference.clone())
+            .collect()
+    }
+
+    /// Touch `owner`'s watches on what a push updated, and return what was
+    /// touched with the pushes nothing here knows about — the ones worth
+    /// asking GitHub about.
+    ///
+    /// A branch GitHub offered to open a pull request for has none, so it is
+    /// neither touched nor worth asking about.
+    pub fn stir_pushed(
+        &mut self,
+        pushes: &[Pushed],
+        owner: &str,
+        deadline: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> (Vec<(Reference, String)>, Vec<Pushed>) {
+        let mut stirred = Vec::new();
+        let mut unknown = Vec::new();
+        for push in pushes.iter().filter(|push| !push.invited) {
+            let mine = self.pushed_to(owner, &push.host, &push.repository(), &push.branch, now);
+            if mine.is_empty() {
+                unknown.push(push.clone());
+            }
+            for reference in mine {
+                self.watch(&reference, owner, deadline, now);
+                stirred.push((reference, push.branch.clone()));
+            }
+        }
+        (stirred, unknown)
+    }
+
+    /// Note where a watched pull request's commits come from.
+    pub fn remember_head(&mut self, reference: &Reference, head: Head) {
+        if let Some(watch) = self.watches.get_mut(&reference.to_string()) {
+            watch.head = Some(head);
+        }
     }
 
     /// Withdraw `owner`'s interest, and remove the watch once nobody is left.
@@ -429,6 +499,9 @@ impl Watches {
                     job: moved.job,
                     audience: audience.clone(),
                 });
+            }
+            if sighting.head.is_some() {
+                watch.head = sighting.head.clone();
             }
             let finished = read.standing.is_finished();
             watch.seen = Some(Seen {
@@ -799,6 +872,7 @@ mod tests {
             standing: Standing::PullRequest { state, checks },
             title: "Add inkling wait".into(),
             failing: None,
+            head: None,
         }
     }
 
@@ -810,6 +884,7 @@ mod tests {
             },
             title: "Try the watch feature".into(),
             failing: None,
+            head: None,
         }
     }
 
@@ -1196,6 +1271,142 @@ mod tests {
         let later = now() + TimeDelta::minutes(2);
         assert!(watches.due(later, TimeDelta::zero()));
         assert!(!watches.due(later, TimeDelta::minutes(5)));
+    }
+
+    fn head(repo: &str, branch: &str) -> Head {
+        Head {
+            repo: repo.into(),
+            branch: branch.into(),
+        }
+    }
+
+    #[test]
+    fn a_reading_remembers_where_a_pull_requests_commits_come_from() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        let sighting = Sighting {
+            head: Some(head("dpep/inkling", "push-watch")),
+            ..seen_pull(State::Open, None)
+        };
+        watches.record(&[(pr(3), sighting)], now());
+        assert_eq!(
+            watches.pushed_to("s-1", "github.com", "dpep/inkling", "push-watch", now()),
+            [pr(3)]
+        );
+
+        // A reading that can't name it (a deleted fork) forgets nothing.
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+        assert!(watches.watches["github.com/dpep/inkling#3"].head.is_some());
+    }
+
+    #[test]
+    fn a_push_matches_only_this_readers_live_watch_on_that_exact_head() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        watches.remember_head(&pr(3), head("dpep/inkling", "push-watch"));
+        let matches = |owner: &str, host: &str, repo: &str, branch: &str, t| {
+            watches.pushed_to(owner, host, repo, branch, t)
+        };
+
+        assert_eq!(
+            matches("s-1", "github.com", "DPEP/Inkling", "push-watch", now()),
+            [pr(3)]
+        );
+        for (owner, host, repo, branch, t, why) in [
+            (
+                "s-2",
+                "github.com",
+                "dpep/inkling",
+                "push-watch",
+                now(),
+                "another session's",
+            ),
+            (
+                "s-1",
+                "github.com",
+                "stranger/inkling",
+                "push-watch",
+                now(),
+                "a fork's branch of the same name",
+            ),
+            (
+                "s-1",
+                "github.com",
+                "dpep/inkling",
+                "Push-Watch",
+                now(),
+                "branches are case-sensitive",
+            ),
+            (
+                "s-1",
+                "github.example.com",
+                "dpep/inkling",
+                "push-watch",
+                now(),
+                "another host",
+            ),
+            (
+                "s-1",
+                "github.com",
+                "dpep/inkling",
+                "push-watch",
+                forever(),
+                "expired",
+            ),
+        ] {
+            assert!(matches(owner, host, repo, branch, t).is_empty(), "{why}");
+        }
+    }
+
+    fn pushed(branch: &str, invited: bool) -> Pushed {
+        Pushed {
+            host: "github.com".into(),
+            owner: "dpep".into(),
+            repo: "inkling".into(),
+            branch: branch.into(),
+            invited,
+        }
+    }
+
+    #[test]
+    fn a_push_to_a_watched_head_touches_it_and_anything_else_is_left_to_ask_about() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", now() + TimeDelta::hours(8), now());
+        watches.remember_head(&pr(3), head("dpep/inkling", "known"));
+        let later = now() + TimeDelta::hours(6);
+
+        let (stirred, unknown) = watches.stir_pushed(
+            &[
+                pushed("known", false),
+                pushed("other", false),
+                pushed("brand-new", true),
+            ],
+            "s-1",
+            forever(),
+            later,
+        );
+        assert_eq!(stirred, [(pr(3), "known".to_string())]);
+        let watch = &watches.watches["github.com/dpep/inkling#3"];
+        assert_eq!(watch.stirred_at, Some(later), "back on one-minute readings");
+        assert_eq!(watch.deadline, forever(), "and its deadline extended");
+        assert_eq!(
+            unknown,
+            [pushed("other", false)],
+            "GitHub's offer to open one means there is none to look up"
+        );
+    }
+
+    #[test]
+    fn a_watch_from_before_heads_were_kept_still_loads() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        let raw = serde_json::to_value(&watches.watches["github.com/dpep/inkling#3"]).unwrap();
+        assert!(
+            raw.get("head").is_none(),
+            "nothing written until it is known"
+        );
+        let watch: Watch = serde_json::from_value(raw).unwrap();
+        assert_eq!(watch.head, None);
     }
 
     #[test]
