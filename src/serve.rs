@@ -577,7 +577,8 @@ impl Sleeper for Doorbell {
             events: libc::POLLIN,
             revents: 0,
         };
-        let millis = duration.as_millis().min(i32::MAX as u128) as i32;
+        // Rounded up: waking just before a watch is due finds nothing due.
+        let millis = duration.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
         if unsafe { libc::poll(&mut ready, 1, millis) } > 0 {
             // Several rings during one nap are one wake-up.
             let mut rung = [0u8; 64];
@@ -1069,6 +1070,18 @@ mod tests {
             started.elapsed() >= Duration::from_millis(50),
             "one ring wakes it once"
         );
+    }
+
+    #[test]
+    fn a_nap_is_never_rounded_short() {
+        // Found live: waking a fraction of a millisecond before a watch was
+        // due found nothing due, and cost a whole interval.
+        let scratch = Scratch::new("rounding");
+        let bell = Doorbell::install(&scratch.config().doorbell, Duration::from_secs(60));
+        let nap = Duration::from_micros(1900);
+        let started = std::time::Instant::now();
+        bell.sleep(nap);
+        assert!(started.elapsed() >= nap, "{:?}", started.elapsed());
     }
 
     #[test]
