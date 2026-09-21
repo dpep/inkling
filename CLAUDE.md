@@ -42,12 +42,9 @@ don't wait for a retro.
 ## Process
 
 - `make check` (test + fmt + clippy) green before every commit.
-- `make install` after merging — `~/.claude/bin/inkling` is a symlink into
-  `target/release`, so a stale build means dogfooding last week's tool.
-- **A release build IS an install.** Because of that symlink, `cargo build
-  --release` on a branch puts unmerged code behind every session's hooks on
-  this machine. On a branch, build and test in debug (`target/debug/inkling`)
-  against a scratch state dir; build release only when you mean to go live.
+- `make install` after merging — `~/.claude/bin/inkling` is a copy, so
+  nothing you build is live until you install it, and a stale install means
+  dogfooding last week's tool.
 - The hooks run in every Claude Code session here. Test against scratch paths
   (`--config`, `--state`, `--watches`, `--log-dir`), never `~/.local/state/inkling`,
   and never kill a server you didn't start.

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`make install` copies instead of symlinking.** A release build on a branch no longer goes live
+  behind every session's hooks; only `make install` does. Re-run `make install` once to replace the
+  old symlink.
+
 ## 0.1.0 — 2026-09-20
 
 First tagged release. Private: install with `git clone` + `make install`; there is no Homebrew
