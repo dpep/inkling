@@ -266,6 +266,38 @@ PLAN.md's rules apply: each lands independently, tree green, changelog entry.
   as one that failed, for someone waiting to respond. Any unrecognized rollup
   state reads as pending, so an unfamiliar value makes a wait keep waiting
   rather than announce a result GitHub didn't give.
+- **"No rollup" is not "no checks" on its own.** The design read a null
+  rollup as a repository without CI. It is also what a repository *with* CI
+  reports for the few seconds after a push, before its first check run
+  exists, so a wait started then precluded at 0s (dpep/inkling#13). Measured
+  on the probe repository: after a push the head had no rollup for 2–4s, then
+  `PENDING`; across 52 PR openings in dpep repos the Actions suite appeared
+  2–7s after, with one at 54s. The discriminator is the repository's history:
+  each batch asks every repository once for its last five pull requests'
+  head rollups, and a null rollup reads as pending if any of them had one.
+  A repository without CI still answers on the first poll. Asked once per
+  repository rather than per reference because it's free that way — 40
+  references over five repositories stayed at 1 point, where asking per
+  reference cost 3. Rejected:
+  - *the PR's previous commit* — a force-pushed single-commit PR has none;
+  - *the base branch's head* — repos whose CI runs only on `pull_request`
+    (the probe) have no rollup on main;
+  - *check suites on the head* — Codecov and Claude park a `QUEUED` suite on
+    every commit, CI or not;
+  - *`.github/workflows`* — misses non-Actions CI, and a path filter means
+    a workflow exists that won't run;
+  - *a grace window* — costs every repository without CI its length, and a
+    window sized to the typical 2–7s would still preclude falsely on a slow
+    queue;
+  - *the head commit's age* — an old commit pushed now looks settled.
+
+  What this costs: a CI repository where this PR's checks will never run
+  (`[skip ci]`, a path filter, an ancient pre-CI PR) now waits for the
+  timeout and exits 4 instead of 3. That's the honest answer — nothing
+  decided — and a false "precluded" is the worse error, since a caller stops
+  waiting on it. Not fixed: for a second or two after a push GitHub still
+  serves the *previous* head, whose rollup can be settled; nothing in the
+  response tells that apart, and only the caller knows the new sha.
 - **A waiter's identity carries a counter**, not just pid and timestamp — two
   observers constructed in the same millisecond otherwise collide, and each
   would think it already held the other's lease.

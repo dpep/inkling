@@ -16,6 +16,12 @@
 - **Events are kept for 72 hours, and watches last 72 hours by default**, up from 24. A session
   resumed after a weekend still reads what moved on Friday. `--ttl` still sets a watch's own
   deadline; existing watches keep the deadline they were given.
+- **`wait --until checks` right after a push waits for the checks instead of reporting none.** A new
+  head has no checks for a few seconds, which read as "this repository runs no CI" and exited 3 at 0s.
+  Now that only happens when none of the repository's last five pull requests had checks, so a repo
+  without CI still answers at once. In a repo with CI, a PR whose checks never start (`[skip ci]`, a
+  path filter) now times out (exit 4) rather than exiting 3. Watches see such a head as `pending`
+  rather than `none`.
 
 ## 0.1.0 — 2026-09-20
 

@@ -93,8 +93,29 @@ fn build_query(references: &[Reference]) -> String {
             quote(repo),
         ));
     }
+    for (j, (owner, repo)) in repositories(references).into_iter().enumerate() {
+        query.push_str(&format!(
+            r#" e{j}: repository(owner: {}, name: {}) {{ pullRequests(last: 5) {{ nodes {{ commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }} }}"#,
+            quote(owner),
+            quote(repo),
+        ));
+    }
     query.push_str(" }");
     query
+}
+
+/// Each repository once, in first-seen order — the order of the `e{j}` aliases.
+fn repositories(references: &[Reference]) -> Vec<(&str, &str)> {
+    let mut seen = Vec::new();
+    for reference in references {
+        if let Reference::GitHubPullRequest { owner, repo, .. } = reference {
+            let key = (owner.as_str(), repo.as_str());
+            if !seen.contains(&key) {
+                seen.push(key);
+            }
+        }
+    }
+    seen
 }
 
 /// GraphQL string literal. Owner and repo names come from a parsed URL, but
@@ -114,6 +135,22 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
         }
     }
 
+    // A head with no rollup is what a repository without CI reports, and also
+    // what one with CI reports for the seconds after a push. Its recent pull
+    // requests tell the two apart.
+    let repositories = repositories(references);
+    let runs_checks = |reference: &Reference| {
+        let Reference::GitHubPullRequest { owner, repo, .. } = reference else {
+            return false;
+        };
+        repositories
+            .iter()
+            .position(|&key| key == (owner.as_str(), repo.as_str()))
+            .and_then(|j| response.data.get(&format!("e{j}")))
+            .and_then(Option::as_ref)
+            .is_some_and(Repository::runs_checks)
+    };
+
     references
         .iter()
         .enumerate()
@@ -125,7 +162,9 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                         state: pr.state(),
                         author: pr.author.as_ref().map(Author::display).unwrap_or_default(),
                         title: pr.title.clone(),
-                        checks: pr.checks(),
+                        checks: pr
+                            .checks()
+                            .or_else(|| runs_checks(reference).then_some(CheckState::Pending)),
                         failing: pr.failing(),
                     }),
                     None => Err(RefError::NotFound),
@@ -152,8 +191,37 @@ struct Response {
 
 #[derive(Debug, Deserialize)]
 struct Repository {
-    #[serde(rename = "pullRequest")]
+    #[serde(default, rename = "pullRequest")]
     pull_request: Option<PullRequest>,
+    /// Only on the `e{j}` aliases.
+    #[serde(default, rename = "pullRequests")]
+    recent: Option<RecentPullRequests>,
+}
+
+impl Repository {
+    /// Whether any recent pull request's head had checks.
+    fn runs_checks(&self) -> bool {
+        let Some(recent) = &self.recent else {
+            return false;
+        };
+        recent
+            .nodes
+            .iter()
+            .flat_map(|pr| &pr.commits.nodes)
+            .any(|node| node.commit.status_check_rollup.is_some())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RecentPullRequests {
+    #[serde(default)]
+    nodes: Vec<RecentPullRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecentPullRequest {
+    #[serde(default)]
+    commits: Commits,
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,6 +587,43 @@ mod tests {
         }
     }
 
+    /// Recorded 2026-09-20 from dpep/inkling-ci-probe#2, one second after it
+    /// was opened: the head has no rollup yet — it got one two seconds later —
+    /// but the repository's recent pull requests show it runs checks.
+    fn fresh_push(recent: &str) -> String {
+        format!(
+            r#"{{"data":{{"r0":{{"pullRequest":{{"isDraft":true,"state":"OPEN","reviewDecision":null,
+            "commits":{{"nodes":[{{"commit":{{"statusCheckRollup":null}}}}]}}}}}},
+            "e0":{{"pullRequests":{{"nodes":[{recent}]}}}}}}}}"#
+        )
+    }
+
+    fn head(rollup: &str) -> String {
+        format!(r#"{{"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":{rollup}}}}}]}}}}"#)
+    }
+
+    #[test]
+    fn a_fresh_push_to_a_repository_that_runs_checks_reads_as_pending() {
+        // dpep/inkling#13: read as "no checks", this ended a wait at 0s.
+        let recent = [head(r#"{"state":"FAILURE"}"#), head("null")].join(",");
+        let status = interpret(&[pr("inkling-ci-probe", 2)], &parse(&fresh_push(&recent)))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Pending));
+    }
+
+    #[test]
+    fn a_repository_whose_recent_pull_requests_ran_nothing_has_no_checks() {
+        // The no-CI answer must stay immediate.
+        let recent = [head("null"), head("null")].join(",");
+        let status = interpret(&[pr("x", 1)], &parse(&fresh_push(&recent)))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, None);
+    }
+
     #[test]
     fn a_pull_request_with_no_commits_reports_no_checks() {
         // Not the same as no checks configured, but indistinguishable from
@@ -680,6 +785,18 @@ mod tests {
             "{query}"
         );
         assert!(query.contains("pullRequest(number: 43)"), "{query}");
+    }
+
+    #[test]
+    fn the_query_asks_each_repository_once_whether_it_runs_checks() {
+        // Measured: 40 references with a per-reference ask cost 3 points;
+        // asked once per repository, 1.
+        let query = build_query(&[pr("gqls", 1), pr("gqls", 2), pr("polyid", 43)]);
+        assert_eq!(query.matches("pullRequests(last: 5)").count(), 2, "{query}");
+        assert!(
+            query.contains(r#"e1: repository(owner: "dpep", name: "polyid")"#),
+            "{query}"
+        );
     }
 
     #[test]
