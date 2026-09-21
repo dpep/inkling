@@ -1411,29 +1411,43 @@ fn field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
 /// nothing.
 const PAYLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The hook payload, or nothing within `timeout`.
+/// Do `work`, or give up on it once `budget` has passed.
 ///
-/// Read on a thread rather than through a non-blocking descriptor: the process
-/// exits either way, so a reader still parked on a pipe nobody closed costs one
-/// thread until then, and stdin needs no special setup to be read normally.
+/// On a thread, because the alternative is bounding every step a poll is made
+/// of — a token subprocess, an HTTP request, one `acli` per issue — and the
+/// sum of those bounds is not a bound worth having. The process exits either
+/// way, so work still in flight costs one thread until then; abandoning a poll
+/// loses its own request and nothing else, since every write it might still
+/// make lands under the store's lock by rename.
+fn within<T: Send + 'static>(
+    budget: std::time::Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (done, waiting) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    waiting.recv_timeout(budget).ok()
+}
+
+/// The hook payload, or nothing within `timeout`.
 fn payload<R: std::io::Read + Send + 'static>(
     source: R,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let (done, waiting) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    within(timeout, move || {
         let mut raw = String::new();
         let mut source = source;
-        let read = std::io::Read::read_to_string(&mut source, &mut raw);
-        let _ = done.send(read.map(|_| raw).map_err(|e| e.to_string()));
-    });
-    match waiting.recv_timeout(timeout) {
-        Ok(read) => read,
-        Err(_) => Err(format!(
+        std::io::Read::read_to_string(&mut source, &mut raw)
+            .map(|_| raw)
+            .map_err(|e| e.to_string())
+    })
+    .unwrap_or_else(|| {
+        Err(format!(
             "no hook payload on stdin within {}",
             humantime::format_duration(timeout)
-        )),
-    }
+        ))
+    })
 }
 
 /// Run a hook, and cost the calling session nothing whatever happens.
@@ -1459,6 +1473,38 @@ fn swallowing(event: HookEvent, run: impl FnOnce() -> Result<(), String>) -> i32
         Err(_) => tracing::error!(event = event.as_str(), "hook panicked"),
     }
     0
+}
+
+/// How long a prompt hook will spend looking upstream before answering with
+/// what it already has.
+///
+/// A real poll of 14 references measured 1.65s (docs/watching.md), so this
+/// covers the honest case and cuts the pathological one: a `gh auth token`
+/// waiting on a keychain, an `acli` that never returns. Giving up costs a
+/// refresh, not a message — the feed is complete either way, and a resident
+/// server is what is supposed to be paying for this.
+const REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Look upstream on the prompt path, or don't, and say which.
+fn refresh_within(
+    budget: std::time::Duration,
+    config: Config,
+    path: &std::path::Path,
+    refresh: TimeDelta,
+) {
+    let path = path.to_path_buf();
+    let polled = within(budget, move || {
+        let store = inkling::adapters::watches_json::WatchStore::new(path);
+        poll(&config, &store, &SystemClock, Some(refresh), "prompt")
+    });
+    match polled {
+        Some(Ok(_)) => {}
+        Some(Err(error)) => tracing::warn!(%error, "could not refresh watches"),
+        None => tracing::warn!(
+            budget_ms = budget.as_millis() as u64,
+            "gave up refreshing watches; answering with what is already known"
+        ),
+    }
 }
 
 /// Do what a hook asks, or say why not. The caller swallows the error.
@@ -1549,10 +1595,8 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             // The pull leg, and the reason push is allowed to be lossy: if a
             // message was held or refused, this is where it turns up.
             let refresh = TimeDelta::seconds(60);
-            if watches.read().due(clock.now(), refresh)
-                && let Err(error) = poll(config, &watches, &clock, Some(refresh), "prompt")
-            {
-                tracing::warn!(%error, "could not refresh watches");
+            if watches.read().due(clock.now(), refresh) {
+                refresh_within(REFRESH_BUDGET, config.clone(), watches.path(), refresh);
             }
             let due = watches
                 .update(clock.now(), |file| {
@@ -2245,7 +2289,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 mod tests {
     use super::{
         HookEvent, classify, ellipsize, finished_already, payload, swallowing, wait_targets,
-        watch_target, watch_targets,
+        watch_target, watch_targets, within,
     };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
@@ -2388,6 +2432,29 @@ mod tests {
 
         let error = payload(Silent, std::time::Duration::from_millis(20)).unwrap_err();
         assert!(error.contains("within 20ms"), "{error}");
+    }
+
+    #[test]
+    fn work_that_overruns_its_budget_is_left_behind() {
+        // The refresh a prompt hook pays for: a `gh auth token` that never
+        // returns, or an `acli` that hangs, must cost the prompt the budget
+        // and not a second more.
+        let started = std::time::Instant::now();
+        let answer = within(std::time::Duration::from_millis(50), || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            "too late"
+        });
+
+        assert_eq!(answer, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn work_that_finishes_in_time_comes_back() {
+        assert_eq!(
+            within(std::time::Duration::from_secs(5), || "in time"),
+            Some("in time")
+        );
     }
 
     #[test]
