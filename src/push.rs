@@ -55,9 +55,12 @@ pub fn message(event: &Event) -> String {
 }
 
 /// The one command that says more, in the one case where there obviously is
-/// one. "Which job went red" is the next question every single time, and it is
-/// one command away; nothing else here has anything to add that the line
-/// doesn't already carry.
+/// one: checks went red, and the next question is always why.
+///
+/// For an Actions job that is its log, which GitHub serves the moment the job
+/// ends. Not `gh run view --log-failed`: it refuses until every job in the run
+/// has finished, so it can't answer at the moment this is pushed. Anything
+/// else gets the list of checks, which is the most that can be said for it.
 fn more(event: &Event) -> Option<String> {
     let Reference::GitHubPullRequest {
         host,
@@ -68,8 +71,15 @@ fn more(event: &Event) -> Option<String> {
     else {
         return None;
     };
-    (event.axis == Axis::Checks && event.to == CheckState::Failure.as_str())
-        .then(|| format!("gh pr checks {number} --repo {host}/{owner}/{repo}"))
+    if event.axis != Axis::Checks || event.to != CheckState::Failure.as_str() {
+        return None;
+    }
+    Some(match event.job {
+        Some(job) => {
+            format!("gh api --hostname {host} repos/{owner}/{repo}/actions/jobs/{job}/logs")
+        }
+        None => format!("gh pr checks {number} --repo {host}/{owner}/{repo}"),
+    })
 }
 
 /// Whether a transition is worth starting a turn over.
@@ -310,7 +320,7 @@ mod tests {
     use super::*;
     use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
     use crate::domain::model::State;
-    use crate::domain::watch::{Sighting, Standing};
+    use crate::domain::watch::{FailedCheck, Sighting, Standing};
     use crate::secret::Secret;
     use crate::testing::FixedClock;
     use std::cell::RefCell;
@@ -713,8 +723,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_red_suite_names_the_check_and_the_command_that_shows_it() {
+    fn went_red(job: Option<u64>) -> String {
         let mut watches = watching();
         watches.record(
             &[(pr(3), sighting(State::Open, Some(CheckState::Pending)))],
@@ -724,16 +733,31 @@ mod tests {
             &[(
                 pr(3),
                 Sighting {
-                    failing: Some("test / build".into()),
+                    failing: Some(FailedCheck {
+                        name: "test / build".into(),
+                        job,
+                    }),
                     ..sighting(State::Open, Some(CheckState::Failure))
                 },
             )],
             now(),
         );
+        message(watches.events.last().unwrap())
+    }
 
-        let text = message(watches.events.last().unwrap());
+    #[test]
+    fn a_red_actions_job_points_at_its_log_which_is_readable_before_the_run_ends() {
         assert_eq!(
-            text,
+            went_red(Some(106192233819)),
+            "inkling: github.com/dpep/inkling#3 checks pending → failure: test / build \
+             (gh api --hostname github.com repos/dpep/inkling/actions/jobs/106192233819/logs)"
+        );
+    }
+
+    #[test]
+    fn a_red_check_with_no_job_behind_it_points_at_the_list_of_checks() {
+        assert_eq!(
+            went_red(None),
             "inkling: github.com/dpep/inkling#3 checks pending → failure: test / build \
              (gh pr checks 3 --repo github.com/dpep/inkling)"
         );

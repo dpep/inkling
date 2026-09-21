@@ -6,7 +6,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::Category;
+use crate::domain::watch::{Category, FailedCheck};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -118,9 +118,9 @@ pub struct RefStatus {
     /// tracked snapshot: a finished suite can go back to pending on a push,
     /// and the snapshot's terminality means "stop polling forever".
     pub checks: Option<CheckState>,
-    /// The name of a check that is red, when one is. "Checks went red" is
-    /// most of a page of investigation; "checks went red: tidy" is a command.
-    pub failing: Option<String>,
+    /// A check that is red, when one is. "Checks went red" is most of a page
+    /// of investigation; "checks went red: tidy" is a command.
+    pub failing: Option<FailedCheck>,
 }
 
 impl RefStatus {

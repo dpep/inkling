@@ -1976,6 +1976,7 @@ fn events_out(
                     "to": event.to,
                     "title": event.title,
                     "detail": event.detail,
+                    "job": event.job,
                 })
             })
             .collect();

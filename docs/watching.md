@@ -99,6 +99,49 @@ spinning for the whole timeout. Nothing lies either — `inkling watch` shows
 the rollup the feed is diffing against, which is the one the reader was last
 told about.
 
+## Red arrives before its logs do — or seems to
+
+Dogfooded 2026-09-20 on myclaude#3: `checks pending → failure` was pushed the
+moment the first job went red, and the obvious next step, reading the log,
+had to wait on `gh run watch`. The two fixes on the table were to push red
+only once every check had finished, or to push at once and warn that the logs
+may not be ready. Measured before choosing, on a private scratch repository
+(one run with a job that fails in 8s beside a 150s job, and a second workflow
+with a 240s job):
+
+| | after the red job ended |
+| --- | --- |
+| rollup reads `FAILURE`, both other jobs still `IN_PROGRESS` | ≤2s (first poll) |
+| `gh api repos/…/actions/jobs/<id>/logs` returns the log | ≤2s (first try) |
+| `gh run view <run> --log-failed` stops refusing | 150s — when its run ended |
+| `gh run view --job <id> --log-failed` | refuses the same way |
+| every check final | 236s |
+
+So the premise was half wrong. GitHub serves a job's log the moment the job
+ends; it is `gh run view` that refuses until the whole *run* has finished,
+including for `--job`, which is the command gh itself suggests. Waiting for the
+rollup to be final would have held back news that was already actionable by
+2.5 to 4 minutes on a toy run — a real test suite makes that its own length —
+and a warning that logs may not be ready would have been false.
+
+**What was built: the push names the command that works now.** When the red
+check is an Actions job, the line ends in `gh api --hostname <host>
+repos/<owner>/<repo>/actions/jobs/<id>/logs` instead of `gh pr checks`. An
+Actions check run's id is its job's id, so this is two more fields in the
+existing query (`databaseId`, and the check suite's app) — measured at one
+rate-limit point for a three-reference batch with or without them. It is
+still an observation: inkling names where the log is and runs nothing.
+
+- **Only Actions gets a job.** A check run from any other app has an id that
+  is not a job's — rust-lang/rust's `Bors try build` is one — so the app's
+  slug has to be `github-actions`, and anything else keeps `gh pr checks`.
+- **"All checks final" is derivable without another query**, should it be
+  wanted: a running check run's `conclusion` is null. Not used, and only for
+  the first 20 contexts.
+- **The rest of the suite is still unreported.** The rollup stays `failure`
+  as later jobs finish, so no second event says whether the slow job passed.
+  `gh pr checks` answers that; the log is the more urgent question.
+
 ## Where the state lives
 
 Its own file, `watches.json`, and the reasoning cuts both ways.

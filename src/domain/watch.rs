@@ -99,6 +99,15 @@ impl fmt::Display for Axis {
     }
 }
 
+/// A check that is red, as a provider names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedCheck {
+    pub name: String,
+    /// The GitHub Actions job behind it, when it is one. Its log can be read
+    /// the moment the job ends; `gh run view` refuses until the whole run does.
+    pub job: Option<u64>,
+}
+
 /// One reading of one reference, as a poll hands it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sighting {
@@ -110,7 +119,7 @@ pub struct Sighting {
     /// Deliberately outside `Standing`: a different job failing is the same
     /// news, and including it in the comparison would emit an event every
     /// time the first red job changed name.
-    pub failing: Option<String>,
+    pub failing: Option<FailedCheck>,
 }
 
 /// A change worth telling somebody about.
@@ -121,6 +130,8 @@ pub struct Transition {
     pub to: String,
     /// Extra the axis alone doesn't carry — the name of the failing check.
     pub detail: Option<String>,
+    /// The Actions job behind that check, so its log is one command away.
+    pub job: Option<u64>,
 }
 
 /// A transition, once it has a place in the sequence.
@@ -138,6 +149,8 @@ pub struct Event {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<u64>,
     /// Who was watching this reference when it moved.
     ///
     /// Snapshotted rather than looked up later: a finished watch is removed,
@@ -194,6 +207,7 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                     from: was.as_str().into(),
                     to: now.as_str().into(),
                     detail: None,
+                    job: None,
                 });
             }
             if had != has {
@@ -201,7 +215,8 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                     axis: Axis::Checks,
                     from: checks_label(*had).into(),
                     to: checks_label(*has).into(),
-                    detail: after.failing.clone(),
+                    detail: after.failing.as_ref().map(|f| f.name.clone()),
+                    job: after.failing.as_ref().and_then(|f| f.job),
                 });
             }
             moved
@@ -214,6 +229,7 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                 from: was.clone(),
                 to: now.clone(),
                 detail: None,
+                job: None,
             }]
         }
         // Same status, or a reference that somehow changed kind — which it
@@ -436,11 +452,15 @@ mod tests {
             checks: Some(CheckState::Pending),
         };
         let after = Sighting {
-            failing: Some("test / build".into()),
+            failing: Some(FailedCheck {
+                name: "test / build".into(),
+                job: Some(7),
+            }),
             ..pull(State::Open, Some(CheckState::Failure))
         };
         let moved = changed(Some(&before), &after);
         assert_eq!(moved[0].detail.as_deref(), Some("test / build"));
+        assert_eq!(moved[0].job, Some(7));
     }
 
     #[test]
@@ -452,7 +472,10 @@ mod tests {
             checks: Some(CheckState::Failure),
         };
         let after = Sighting {
-            failing: Some("lint".into()),
+            failing: Some(FailedCheck {
+                name: "lint".into(),
+                job: None,
+            }),
             ..pull(State::Open, Some(CheckState::Failure))
         };
         assert!(changed(Some(&before), &after).is_empty());
@@ -584,6 +607,7 @@ mod tests {
                 to: "Done".into(),
                 title: String::new(),
                 detail: None,
+                job: None,
                 audience: BTreeSet::new(),
             })
             .collect()

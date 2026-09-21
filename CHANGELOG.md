@@ -5,6 +5,11 @@
 - **`make install` copies instead of symlinking.** A release build on a branch no longer goes live
   behind every session's hooks; only `make install` does. Re-run `make install` once to replace the
   old symlink.
+- **A red Actions job points at its log, which you can read right away.** The pushed line used to
+  end in `gh pr checks`, whose next step, `gh run view --log-failed`, refuses until every job in the
+  run has finished — minutes after the one that failed. It now ends in `gh api … /actions/jobs/<id>/logs`,
+  which GitHub serves the moment the job ends. Checks from other apps still get `gh pr checks`.
+  `inkling events --json` rows carry the same `job`.
 
 ## 0.1.0 — 2026-09-20
 
