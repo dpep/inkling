@@ -206,6 +206,43 @@ news, and costs little — this machine's live store, 2026-09-20, held about
 A watch's default `--ttl` is the same constant (`watches_json::WATCH_TTL`),
 so a watch never outlives what it reported.
 
+### A new build takes over
+
+The server stats the path it was launched as on every tick, and stands down
+when a different build is there (`Exit::Replaced`) or at its 24h cap
+(`Exit::MaxLifetime`). Standing down used to be the end of it, and the next
+hook spawned whatever was installed — but the session most in need of a server
+is an idle one waiting on CI, and it fires no hooks. So when either of those
+exits leaves somebody still to serve (the last tick was `Busy`, the same
+`should_serve` that keeps it alive), the server lets go of the lock, spawns
+the executable at its launch path with its own arguments, waits up to 5s for
+the successor's record, and exits. With nothing to serve it just exits, as
+before. `make install` rings the doorbell (`inkling serve --ring`) so the
+running server notices within a second rather than at its next wake.
+
+- **Spawn, not `exec`.** Exec would keep the pid, which nothing reads — the
+  record is rewritten either way. It would not keep the lock: the descriptor
+  is close-on-exec, so the gap is the same. And it would throw away the
+  non-blocking log writer's unflushed tail, which is the lines explaining the
+  handoff; an exec that failed after that flush would have nowhere to log.
+- **The gap is a race the lock already settles.** Between release and the
+  successor's claim (~40ms warm, ~1s for the first exec of a just-installed
+  binary while macOS assesses it), a hook may spawn a server of its own. Both
+  try the flock; the loser logs `already serving` and exits. That is the
+  arbitration `ensure_running` relies on, not a new case.
+- **Tried once.** A successor that can't be spawned is a warning and the old
+  exit; one that starts and dies is a warning that it never claimed the lock.
+  Neither is retried, so a broken build costs the silence we had before, never
+  a loop. A successor can't immediately hand off again: its build and its
+  start time are its own.
+
+```
+a new build was installed; standing down for it executable=…/inkling
+serve finished reason="replaced" uptime_seconds=3 ticks=2 …
+serving pid=73832 …
+handed off to a new server from=73320 to=73832 reason="replaced" executable=…/inkling
+```
+
 ## How often a watch is read
 
 > A watch is re-read at **1/24 of how long it has been quiet**, clamped to

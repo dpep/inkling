@@ -28,7 +28,8 @@ check: test fmt lint
 # Copy rather than symlink, so a release build on a branch doesn't go live
 # behind every session's hooks. Copy-then-rename: overwriting a running
 # binary in place gets it SIGKILLed on macOS (its code signature no longer
-# matches the pages already mapped).
+# matches the pages already mapped). Then ring the running server: it only
+# notices a new build when it wakes, which can be an hour away.
 install: build
 	@mkdir -p $(BIN_DIR)
 	@for bin in $(BINARIES); do \
@@ -36,6 +37,7 @@ install: build
 		mv -f $(BIN_DIR)/.$$bin.tmp $(BIN_DIR)/$$bin && \
 		echo "installed $(BIN_DIR)/$$bin"; \
 	done
+	@$(BIN_DIR)/inkling serve --ring 2>/dev/null || true
 
 uninstall:
 	@for bin in $(BINARIES); do \

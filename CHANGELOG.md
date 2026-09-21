@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Installing a new build no longer leaves nothing polling.** A server that sees a new build, or
+  reaches its 24h cap, while somebody is still watching now starts its successor before it exits;
+  before, nothing polled until a hook happened to start one, and an idle session waiting on CI
+  fires none. `make install` wakes the running server, so the new build takes over within a couple
+  of seconds instead of at its next wake (up to an hour). The install that brings this in is still
+  met by the old server, which stands down without a successor; run `inkling watch <pr>` once after
+  it if a session is waiting on something.
 - **`inkling wait` holds off 5s before its first reading.** For a second or two after a push GitHub
   still reports the commit that was replaced, so a wait started straight after `git push` could judge
   CI that never ran on your commit. Every wait is now 5s slower to answer, including one that is

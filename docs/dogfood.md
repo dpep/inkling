@@ -6,6 +6,17 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- Stand-down on a new build worked live: after `make install` the server
+  logged "a new build was installed; standing down" and exited
+  `reason="replaced"`. Then nothing polled until some hook spawned a server,
+  and an idle session waiting on CI fires no hooks. Expected the new build to
+  take over. Fixed on `hot-restart`: with somebody still to serve it spawns
+  its successor before exiting, and `make install` rings it awake.
+- The first handoff in the scratch run warned that the successor never
+  claimed the lock; it had, 1.07s later. A just-copied binary's first exec
+  costs ~1s on this machine (macOS assessing it) against a 250ms window.
+  Fixed on `hot-restart`: a handoff waits up to 5s — nobody waits on a
+  server that is leaving.
 - After `make install` of #16 at 20:08, the resident server started at
   20:05 kept running the old build and pushed `#17 state draft → open`,
   which #16 had stopped pushing. Expected an install to take effect; since

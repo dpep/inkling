@@ -16,6 +16,7 @@ use crate::adapters::lock::{FileLock, LockError};
 use crate::ports::{Clock, RealSleeper, Sleeper, SystemClock};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::ffi::{OsStr, OsString};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -125,8 +126,8 @@ pub struct Config {
     /// How long with nothing to do before standing down. Generous on purpose:
     /// a session that detaches and reattaches shouldn't cost a respawn.
     pub idle_after: Duration,
-    /// A cap, so a resident process eventually picks up a newer build. It
-    /// stands down; the next caller respawns whatever is installed then.
+    /// A cap, so a resident process eventually picks up a newer build. With
+    /// work left it hands off to whatever is installed now; see `hand_off`.
     pub max_lifetime: Duration,
     /// Held for the whole run. The kernel releases it on death, which is what
     /// makes "is a server running" a question anyone can answer.
@@ -136,7 +137,7 @@ pub struct Config {
     /// A FIFO that cuts a nap short: see `ring`.
     pub doorbell: PathBuf,
     /// The binary this server was started from. When a new build is renamed
-    /// over it, the server stands down so the next caller spawns the new one.
+    /// over it, the server stands down and hands off to the new one.
     pub executable: Option<PathBuf>,
 }
 
@@ -199,6 +200,17 @@ pub struct Report {
     /// Ticks that returned an error and were ridden out.
     pub failures: u32,
     pub longest_tick: Duration,
+    /// Whether the last tick still found somebody to serve.
+    pub busy: bool,
+}
+
+impl Report {
+    /// Whether to start a successor rather than leave it to the next hook.
+    /// Only for the exits that are about the process, not the work: an idle
+    /// session fires no hooks, so standing down with work left is a silence.
+    pub fn hands_off(&self) -> bool {
+        self.busy && matches!(self.exit, Exit::Replaced | Exit::MaxLifetime)
+    }
 }
 
 #[derive(Debug)]
@@ -270,7 +282,7 @@ pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<En
             drop(lock);
             let pid = spawn_detached(&std::env::current_exe()?, args)?;
             tracing::info!(pid, %reason, "spawned a server");
-            if !claimed(&config.status, pid, &RealSleeper) {
+            if !claimed(&config.status, pid, TAKEOFF_LOOKS, &RealSleeper) {
                 // Not a failure. Either the child is slower than the window,
                 // or it lost the lock race and stood down — in which case the
                 // winner is already serving.
@@ -292,14 +304,18 @@ pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<En
 const TAKEOFF_LOOKS: u32 = 25;
 const TAKEOFF_LOOK: Duration = Duration::from_millis(10);
 
-/// Whether the server at `pid` has claimed the lock yet.
+/// 5s, for a successor. Nobody waits on a server that is leaving, and the first
+/// exec of a just-installed binary costs about a second while macOS assesses it.
+const HANDOFF_LOOKS: u32 = 500;
+
+/// Whether the server at `pid` has claimed the lock within `looks`.
 ///
 /// Reads the status file rather than probing the lock, because probing *takes*
 /// the lock when it is free — which in this window would lock out the very
 /// child being waited for. A server writes its record as its first act after
 /// acquiring, so the record naming the pid is the arrival signal.
-fn claimed(status: &Path, pid: u32, sleeper: &dyn Sleeper) -> bool {
-    for _ in 0..TAKEOFF_LOOKS {
+fn claimed(status: &Path, pid: u32, looks: u32, sleeper: &dyn Sleeper) -> bool {
+    for _ in 0..looks {
         if read_record(status).is_some_and(|record| record.pid == pid) {
             return true;
         }
@@ -311,7 +327,7 @@ fn claimed(status: &Path, pid: u32, sleeper: &dyn Sleeper) -> bool {
 /// A new session with no controlling terminal, stdio discarded, cwd at the
 /// root — so closing the terminal that spawned it, or deleting the directory
 /// it was spawned from, can't take it down.
-fn spawn_detached(exe: &Path, args: &[&str]) -> std::io::Result<u32> {
+fn spawn_detached(exe: &Path, args: &[impl AsRef<OsStr>]) -> std::io::Result<u32> {
     let mut command = Command::new(exe);
     command
         .args(args)
@@ -462,6 +478,7 @@ impl Serve<'_> {
             ticks: record.ticks,
             failures: record.failures,
             longest_tick,
+            busy: idle_since.is_none(),
         };
         tracing::info!(
             reason = report.exit.as_str(),
@@ -633,14 +650,57 @@ pub fn run(mut config: Config, work: &dyn Work) -> Result<Outcome, ServeError> {
     // The path it was launched as: after a rename-over it names the new file.
     config.executable = config.executable.or_else(|| std::env::current_exe().ok());
     let doorbell = Doorbell::install(&config.doorbell, config.interval);
-    Serve {
-        config,
+    let outcome = Serve {
+        config: config.clone(),
         work,
         clock: &SystemClock,
         sleeper: &doorbell,
         shutdown: &Signals::install(),
     }
-    .run()
+    .run()?;
+
+    // After `run`, which has let go of the lock the successor needs.
+    if let Outcome::Served(report) = &outcome
+        && report.hands_off()
+        && let Some(exe) = &config.executable
+    {
+        // Its own arguments, so a scratch store survives the handoff.
+        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        if let Err(error) = hand_off(&config, exe, &args, report.exit) {
+            tracing::warn!(%error, executable = %exe.display(), "could not hand off; the next hook will start a server");
+        }
+    }
+    Ok(outcome)
+}
+
+/// Start the build now at `exe` as this server's successor.
+///
+/// Spawn-then-exit rather than `exec`. The lock goes either way — its
+/// descriptor is close-on-exec — so exec buys no gap-free handover, and it
+/// would discard the log writer's unflushed tail: the lines saying why. A hook
+/// that spawns a server in the gap just races the successor for the lock,
+/// which `Serve::run` already settles.
+///
+/// Tried once, and the caller exits whatever happens: a build that cannot
+/// start costs the old silence, never a loop.
+fn hand_off(
+    config: &Config,
+    exe: &Path,
+    args: &[impl AsRef<OsStr>],
+    reason: Exit,
+) -> Result<u32, ServeError> {
+    let from = std::process::id();
+    let pid = spawn_detached(exe, args)?;
+    match claimed(&config.status, pid, HANDOFF_LOOKS, &RealSleeper) {
+        true => {
+            tracing::info!(from, to = pid, reason = reason.as_str(), executable = %exe.display(), "handed off to a new server")
+        }
+        // Slow, beaten to the lock by a hook's server, or failed to start.
+        false => {
+            tracing::warn!(from, to = pid, reason = reason.as_str(), executable = %exe.display(), "handed off, but the new server has not claimed the lock")
+        }
+    }
+    Ok(pid)
 }
 
 #[cfg(test)]
@@ -788,6 +848,96 @@ mod tests {
 
         assert_eq!(report.exit, Exit::Replaced);
         assert_eq!(report.ticks, 3, "it noticed on the tick it happened");
+    }
+
+    #[test]
+    fn a_replaced_server_with_work_hands_off() {
+        // Found live: after `make install` the server stood down and nothing
+        // polled until a hook happened to fire — never, for an idle session
+        // waiting on CI.
+        let scratch = Scratch::new("handoff");
+        let exe = scratch.0.join("inkling");
+        std::fs::write(&exe, "old build").unwrap();
+        let config = Config {
+            executable: Some(exe.clone()),
+            ..scratch.config()
+        };
+        let report = serve(
+            config,
+            &(|| {
+                std::fs::write(scratch.0.join("inkling.new"), "new build").unwrap();
+                std::fs::rename(scratch.0.join("inkling.new"), &exe).unwrap();
+                Ok(Pulse::Busy.into())
+            }),
+        );
+
+        assert_eq!(report.exit, Exit::Replaced);
+        assert!(report.hands_off());
+    }
+
+    #[test]
+    fn a_replaced_server_with_nothing_to_do_just_stands_down() {
+        let scratch = Scratch::new("handoff-idle");
+        let exe = scratch.0.join("inkling");
+        std::fs::write(&exe, "old build").unwrap();
+        let config = Config {
+            executable: Some(exe.clone()),
+            ..scratch.config()
+        };
+        let report = serve(
+            config,
+            &(|| {
+                std::fs::write(scratch.0.join("inkling.new"), "new build").unwrap();
+                std::fs::rename(scratch.0.join("inkling.new"), &exe).unwrap();
+                Ok(Pulse::Idle.into())
+            }),
+        );
+
+        assert_eq!(report.exit, Exit::Replaced);
+        assert!(
+            !report.hands_off(),
+            "the next hook with a reason starts one"
+        );
+    }
+
+    #[test]
+    fn a_busy_server_at_its_lifetime_cap_hands_off() {
+        let scratch = Scratch::new("handoff-lifetime");
+        let config = Config {
+            max_lifetime: Duration::from_secs(60),
+            ..scratch.config()
+        };
+        let report = serve(config, &(|| Ok(Pulse::Busy.into())));
+
+        assert_eq!(report.exit, Exit::MaxLifetime);
+        assert!(report.hands_off());
+    }
+
+    #[test]
+    fn an_idle_or_signalled_server_does_not_hand_off() {
+        let scratch = Scratch::new("no-handoff");
+        let report = serve(scratch.config(), &(|| Ok(Pulse::Idle.into())));
+        assert_eq!(report.exit, Exit::Idle);
+        assert!(!report.hands_off());
+
+        let signalled = Report {
+            exit: Exit::Signalled,
+            busy: true,
+            ..report
+        };
+        assert!(!signalled.hands_off(), "somebody asked it to stop");
+    }
+
+    #[test]
+    fn a_handoff_to_a_build_that_cannot_run_fails_once() {
+        // The fallback is today's stand-down: an error to log, not a retry.
+        let scratch = Scratch::new("handoff-broken");
+        let exe = scratch.0.join("inkling");
+        std::fs::write(&exe, "not a program").unwrap();
+
+        let error =
+            hand_off(&scratch.config(), &exe, &["serve"], Exit::Replaced).expect_err("cannot run");
+        assert!(matches!(error, ServeError::Spawn(_)), "{error}");
     }
 
     #[test]
@@ -966,7 +1116,7 @@ mod tests {
         let scratch = Scratch::new("takeoff");
         let config = scratch.config();
         assert!(
-            !claimed(&config.status, 4242, &Unslept),
+            !claimed(&config.status, 4242, TAKEOFF_LOOKS, &Unslept),
             "nothing has claimed anything"
         );
 
@@ -983,9 +1133,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(claimed(&config.status, 4242, &Unslept));
+        assert!(claimed(&config.status, 4242, TAKEOFF_LOOKS, &Unslept));
         assert!(
-            !claimed(&config.status, 9999, &Unslept),
+            !claimed(&config.status, 9999, TAKEOFF_LOOKS, &Unslept),
             "and a record left by an earlier server is not this one arriving"
         );
     }
