@@ -13,6 +13,9 @@
 - **A draft marked ready is no longer pushed.** `state draft → open` waits in `inkling events` like
   `checks → pending` does: it starts review, and there is nothing to do about it. Ready then merge
   now costs one push whether GitHub reports it in one poll or two.
+- **Events are kept for 72 hours, and watches last 72 hours by default**, up from 24. A session
+  resumed after a weekend still reads what moved on Friday. `--ttl` still sets a watch's own
+  deadline; existing watches keep the deadline they were given.
 
 ## 0.1.0 — 2026-09-20
 

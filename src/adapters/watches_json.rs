@@ -32,13 +32,20 @@ pub const VERSION: u32 = 1;
 /// The file holds session tokens, so nobody else on the machine reads it.
 const OWNER_ONLY: u32 = 0o600;
 
-/// How long a transition stays readable, and how long a silent subscriber
-/// keeps its cursor.
+/// How long a transition stays readable.
 ///
 /// Age alone bounds the log: pruning only what every subscriber has passed
-/// would let one dead session pin it forever, and a transition nobody read in
-/// a day is not something to act on — the work moved on without it.
-pub const RETENTION: TimeDelta = TimeDelta::hours(24);
+/// would let one dead session pin it forever. Three days rather than one so a
+/// session resumed after a weekend still reads what moved on Friday; the log
+/// is small enough that the extra two days cost nothing worth measuring.
+pub const RETENTION: TimeDelta = TimeDelta::hours(72);
+
+/// How long a watch lasts unless `--ttl` says otherwise.
+///
+/// The same as `RETENTION`, so what a watch reported is readable for as long
+/// as the watch could have been reporting it — a longer watch would outlive
+/// its own early news.
+pub const WATCH_TTL: TimeDelta = RETENTION;
 
 /// How long a subscriber record outlives its last sign of life.
 ///
@@ -56,7 +63,7 @@ pub const SUBSCRIBER_RETENTION: TimeDelta = TimeDelta::days(7);
 /// cost one session however badly the thing it is watching behaves. Measured
 /// 2026-09-20: a pull request whose review decision oscillated produced one
 /// push per tick — seven in 13 seconds — and nothing stood between that and
-/// the session until the watch's deadline a day later. Five is more than any
+/// the session until the watch's deadline. Five is more than any
 /// five minutes of genuine news, and what it withholds stays in the feed for
 /// the next prompt.
 pub const PUSH_BUDGET: usize = 5;
@@ -1032,10 +1039,10 @@ mod tests {
         watches.record(&[(pr(3), seen_pull(State::Approved, None))], now());
         watches.take("quiet", now());
 
-        watches.collect_garbage(now() + TimeDelta::hours(25), RETENTION);
+        watches.collect_garbage(now() + RETENTION + TimeDelta::hours(1), RETENTION);
         assert!(
             watches.events.is_empty(),
-            "a day-old transition is not news"
+            "a transition older than the retention is not news"
         );
         assert_eq!(
             watches.subscribers.len(),

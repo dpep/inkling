@@ -68,7 +68,7 @@ returns, and you find out later what changed.
 
 ```sh
 inkling watch 42 AI-123        # a pull request and a Jira issue
-inkling watch 42 --ttl 2h      # default is 24h
+inkling watch 42 --ttl 2h      # default is 72h
 inkling watch                  # what's being watched
 inkling unwatch 42             # or --all
 inkling events                 # what's moved, and nothing when nothing has
@@ -151,7 +151,7 @@ Two things worth knowing. The session socket sends no acknowledgement, so a
 successful push means the message reached a live session and no more; if a
 session's configuration drops it, that transition won't reappear at the next
 prompt — `inkling events --since <cursor>` is where it stays recoverable for
-24 hours. And the wire format is read off Claude Code's debug log rather than
+72 hours. And the wire format is read off Claude Code's debug log rather than
 a published contract, so it may change; the pull feed is the guarantee.
 
 ### From Claude Code's hooks

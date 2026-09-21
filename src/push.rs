@@ -609,7 +609,7 @@ mod tests {
         // Measured 2026-09-20 against a live listener: a pull request whose
         // review decision oscillated put seven messages into one session in
         // 13 seconds, one per tick, and nothing was going to stop it until the
-        // watch's 24h deadline.
+        // watch's deadline.
         let mut watches = watching();
         watches.attach("s", address("/tmp/a"), now());
         let sessions = FakeSessions::default();
@@ -880,7 +880,7 @@ mod tests {
         let mut watches = watching();
         watches.attach("s", address("/tmp/a"), now());
 
-        watches.collect_garbage(now() + TimeDelta::hours(25), RETENTION);
+        watches.collect_garbage(now() + RETENTION + TimeDelta::hours(1), RETENTION);
         assert_eq!(watches.attached().len(), 1);
     }
 }

@@ -51,7 +51,7 @@ Two more have since joined it, each one sentence long:
   watch then removes itself. Revisited against the dogfood log and kept — see
   [Your own actions](#your-own-actions-arrive-as-news-and-that-stays).
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
-  deadline (`--ttl`, 24h), and a finished reference — merged, closed, Done —
+  deadline (`--ttl`, 72h), and a finished reference — merged, closed, Done —
   drops its watch after its last event. There is no reaper.
 - **The cursor is a stream and a place in it.** `events --since <owner>:<n>`
   returns everything after `n` that is addressed to `<owner>`; `--json` puts
@@ -79,7 +79,7 @@ What it costs, plainly:
 - **A rollup that disappears for good is never reported.** Deleting a
   repository's last workflow while a watch is live leaves the feed saying
   `success` forever. Nobody is waiting for that news and the watch expires
-  within a day.
+  within three days.
 - **`success → pending` after a push is still a message.** A push *is* a
   re-run, and the brief for `wait --until checks` is that a re-run is
   legitimate news, so it stays. Telling a push-triggered run apart from a
@@ -197,10 +197,13 @@ carry the time they were taken, so a slower poller's older answer can't land
 last and report a pull request moving backwards. The poll lock is left to the
 opportunistic caller, the only one that might be redundant.
 
-The event log is bounded by age (24h) rather than by what every live
-subscriber has passed: one dead session must not be able to pin it, and a
-transition nobody read in a day is not something to act on — the work moved
-on without it.
+The event log is bounded by age (72h) rather than by what every live
+subscriber has passed: one dead session must not be able to pin it. It was
+24h; three days lets a session resumed after a weekend still read Friday's
+news, and costs little — this machine's live store, 2026-09-20, held about
+50 events a day in a 26KB file.
+A watch's default `--ttl` is the same constant (`watches_json::WATCH_TTL`),
+so a watch never outlives what it reported.
 
 ## Where this departed from the brief
 
@@ -338,7 +341,7 @@ sends no ack, so `Written` means the bytes reached a live socket and nothing
 more. A session that *held* or *refused* the message — `crossSessionInbound`
 off, a bypass-permissions session — has its cursor advanced anyway, and that
 transition never appears at its next prompt. It is not lost: it is in the log
-for 24 hours, addressed to that reader, and `events --since <owner>:<seq>`
+for 72 hours, addressed to that reader, and `events --since <owner>:<seq>`
 returns it.
 
 The alternative was argued by the socket adapter's author: success must not
@@ -502,7 +505,7 @@ upstream at all, so theirs is 250ms plus the process.
 
 What that costs, plainly: a hook that gives up **skips a refresh, not a
 message**. The feed is complete either way — every transition is in the log for
-24 hours addressed to its readers — so the next prompt, or the server's next
+72 hours addressed to its readers — so the next prompt, or the server's next
 tick, picks up what this one didn't.
 
 The daemon's tick is bounded but not short: one `acli` per watched issue at 5s
@@ -556,7 +559,7 @@ pair disagrees says where it went:
 | `pushed … gone` then `address dropped` | the session had exited; the event is still pullable |
 
 - **`events` is always 0.** If watches expire without ever producing one, the
-  watched things move slower than a 24h TTL and the feature is answering a
+  watched things move slower than a 72h TTL and the feature is answering a
   question nobody has. Count events per watch registered.
 - **`why="events"` dominates and `elapsed_ms` is large.** The hook is paying
   for the poll on the prompt path. That is the case for the shared poller,
