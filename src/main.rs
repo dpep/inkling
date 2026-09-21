@@ -160,8 +160,10 @@ enum Command {
         /// A named cursor Inkling keeps, e.g. a session id.
         #[arg(long)]
         subscriber: Option<String>,
-        /// Look upstream first when the last reading is older than this.
-        /// Fresh readings cost nothing but a local file read.
+        /// Look upstream first for watches that are due a reading, but never
+        /// for one younger than this. A watch is due at 1/24 of how long it
+        /// has been quiet, between 1m and 60m. Fresh readings cost nothing
+        /// but a local file read.
         #[arg(long, default_value = "60s", value_parser = humantime::parse_duration)]
         refresh: std::time::Duration,
         /// Emit the events as a JSON array.
@@ -570,9 +572,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
                     clock: &clock,
                 },
                 sessions: &inkling::push::RealSessions,
-                // Its own interval: the server exists because a 60s refresh
-                // window is a minute of a session not knowing.
-                refresh: TimeDelta::from_std(config.serve.interval).unwrap_or(TimeDelta::zero()),
                 clock: &clock,
             };
 
@@ -1799,8 +1798,9 @@ fn watch_target(
     }
 }
 
-/// Bring the watches up to date. `refresh` polls only when the readings have
-/// aged past it; `None` polls regardless.
+/// Bring the watches up to date: whatever the schedule says is due, and with
+/// `refresh` nothing younger than it, under the poll lock. `None` is `watch`
+/// reading what it just registered, which must not lose to a lock.
 fn poll(
     config: &Config,
     store: &inkling::adapters::watches_json::WatchStore,
@@ -1822,7 +1822,7 @@ fn poll(
     };
     match refresh {
         Some(refresh) => poller.poll_if_stale(refresh, why),
-        None => poller.poll(why),
+        None => poller.poll(TimeDelta::zero(), why),
     }
     .map_err(|e| e.to_string())
 }

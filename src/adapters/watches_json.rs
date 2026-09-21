@@ -47,6 +47,21 @@ pub const RETENTION: TimeDelta = TimeDelta::hours(72);
 /// its own early news.
 pub const WATCH_TTL: TimeDelta = RETENTION;
 
+/// How often a watch is read: 1/`QUIET_SHARE` of how long it has been quiet,
+/// clamped to [`FASTEST_READ`, `SLOWEST_READ`].
+///
+/// A placeholder, and deliberately one pure function so retuning it is one
+/// edit — docs/deferred.md says what would change it. Quiet under 24 minutes
+/// reads every minute, six hours every quarter hour, a day or more hourly: a
+/// 72h watch that never moves costs ~170 reads rather than 4,320.
+pub const QUIET_SHARE: i32 = 24;
+pub const FASTEST_READ: TimeDelta = TimeDelta::minutes(1);
+pub const SLOWEST_READ: TimeDelta = TimeDelta::minutes(60);
+
+pub fn read_every(quiet: TimeDelta) -> TimeDelta {
+    (quiet / QUIET_SHARE).clamp(FASTEST_READ, SLOWEST_READ)
+}
+
 /// How long a subscriber record outlives its last sign of life.
 ///
 /// Deliberately longer than the event log, and counted in days rather than
@@ -112,6 +127,28 @@ pub struct Watch {
     /// and its transitions reach both.
     #[serde(default)]
     pub owners: BTreeSet<String>,
+    /// The last time a session touched this or it moved — what its reading
+    /// schedule counts quiet from. Absent in files that predate the schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stirred_at: Option<DateTime<Utc>>,
+}
+
+impl Watch {
+    pub fn quiet_since(&self) -> DateTime<Utc> {
+        self.stirred_at.unwrap_or(self.since)
+    }
+
+    /// When this is next worth reading, for a caller that won't pay for a
+    /// reading younger than `floor`. Never read means due since registration.
+    ///
+    /// Measured from the last reading rather than from now, so the answer is
+    /// a fixed instant a server can sleep until.
+    pub fn next_read(&self, floor: TimeDelta) -> DateTime<Utc> {
+        match &self.seen {
+            None => self.since,
+            Some(seen) => seen.at + read_every(seen.at - self.quiet_since()).max(floor),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,9 +237,11 @@ impl Watches {
                 deadline,
                 seen: None,
                 owners: BTreeSet::new(),
+                stirred_at: None,
             });
         entry.deadline = entry.deadline.max(deadline);
         entry.owners.insert(owner.to_string());
+        entry.stirred_at = Some(now);
     }
 
     /// Withdraw `owner`'s interest, and remove the watch once nobody is left.
@@ -296,19 +335,32 @@ impl Watches {
             .collect()
     }
 
-    /// Whether the readings have aged past `refresh`, i.e. whether the next
-    /// reader should pay for a poll before answering.
+    /// Whether any watch is due a reading, i.e. whether the next reader should
+    /// pay for a poll before answering. `floor` is the youngest reading the
+    /// caller will pay to replace; the schedule decides the rest.
     ///
     /// A watch never read is due immediately; with no active watches nothing
     /// is due, which is what keeps a hook that watches nothing free.
-    pub fn due(&self, now: DateTime<Utc>, refresh: TimeDelta) -> bool {
+    pub fn due(&self, now: DateTime<Utc>, floor: TimeDelta) -> bool {
+        !self.due_now(now, floor).is_empty()
+    }
+
+    /// The batch for a poll: every live watch whose reading has come due.
+    pub fn due_now(&self, now: DateTime<Utc>, floor: TimeDelta) -> Vec<Reference> {
         self.watches
             .values()
-            .filter(|watch| watch.deadline > now)
-            .any(|watch| match &watch.seen {
-                None => true,
-                Some(seen) => now - seen.at >= refresh,
-            })
+            .filter(|watch| watch.deadline > now && watch.next_read(floor) <= now)
+            .map(|watch| watch.reference.clone())
+            .collect()
+    }
+
+    /// When the next live watch comes due, which is how long a poller with
+    /// nothing else to do may sleep.
+    pub fn next_read(&self) -> Option<DateTime<Utc>> {
+        self.watches
+            .values()
+            .map(|watch| watch.next_read(TimeDelta::zero()))
+            .min()
     }
 
     /// Fold a poll's readings in, returning what changed.
@@ -351,6 +403,9 @@ impl Watches {
             // finished and its owners gone.
             let audience = watch.owners.clone();
             let read = reading(watch.seen.as_ref().map(|s| &s.standing), sighting);
+            if !read.moved.is_empty() {
+                watch.stirred_at = Some(observed_at);
+            }
             for moved in read.moved {
                 self.last_seq += 1;
                 tracing::info!(
@@ -1019,6 +1074,140 @@ mod tests {
             watches.due(now() + TimeDelta::seconds(60), TimeDelta::seconds(60)),
             "the reading aged out"
         );
+    }
+
+    #[test]
+    fn the_quieter_a_watch_the_less_often_it_is_read() {
+        let every = |hours: i64| read_every(TimeDelta::hours(hours));
+        assert_eq!(
+            read_every(TimeDelta::minutes(-5)),
+            FASTEST_READ,
+            "just touched"
+        );
+        assert_eq!(every(0), TimeDelta::minutes(1));
+        assert_eq!(
+            read_every(TimeDelta::minutes(24)),
+            FASTEST_READ,
+            "the floor lasts 24m"
+        );
+        assert_eq!(every(1), TimeDelta::seconds(150));
+        assert_eq!(every(6), TimeDelta::minutes(15));
+        assert_eq!(every(12), TimeDelta::minutes(30));
+        assert_eq!(every(24), TimeDelta::minutes(60));
+        assert_eq!(
+            every(72),
+            TimeDelta::minutes(60),
+            "and a day is the ceiling"
+        );
+    }
+
+    /// Registered at `now()`, then read quietly every time it came due for
+    /// `quiet`, so its last reading is as old as the schedule allows.
+    fn quiet_for(quiet: TimeDelta) -> Watches {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        let mut t = now();
+        while t < now() + quiet {
+            watches.record(&[(pr(3), seen_pull(State::Open, None))], t);
+            t = watches.next_read().unwrap();
+        }
+        watches
+    }
+
+    #[test]
+    fn a_watch_quiet_for_six_hours_is_read_every_quarter_hour() {
+        let watches = quiet_for(TimeDelta::hours(6));
+        let seen = watches.watches["github.com/dpep/inkling#3"]
+            .seen
+            .as_ref()
+            .unwrap()
+            .at;
+        let next = watches.next_read().unwrap();
+        assert!(next - seen >= TimeDelta::minutes(14), "{}", next - seen);
+        assert!(next - seen <= TimeDelta::minutes(16), "{}", next - seen);
+        assert!(!watches.due(next - TimeDelta::seconds(1), TimeDelta::zero()));
+        assert!(watches.due(next, TimeDelta::zero()));
+    }
+
+    #[test]
+    fn three_quiet_days_cost_under_two_hundred_reads_not_four_thousand() {
+        // The whole point, as a number: a once-a-minute schedule reads a 72h
+        // watch 4,320 times.
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        let mut reads = 0;
+        let mut t = now();
+        while t < now() + WATCH_TTL {
+            watches.record(&[(pr(3), seen_pull(State::Open, None))], t);
+            reads += 1;
+            t = watches.next_read().unwrap();
+        }
+        // 24 at the floor, 24·ln(60) ≈ 98 while backing off, then 48 hourly.
+        assert!((160..=180).contains(&reads), "{reads}");
+    }
+
+    #[test]
+    fn touching_a_quiet_watch_brings_it_back_to_every_minute() {
+        // A three-day-old pull request just pushed to: its new CI is the news,
+        // and hourly reads would deliver it up to an hour late.
+        let mut watches = quiet_for(TimeDelta::hours(70));
+        let t = watches.next_read().unwrap() - TimeDelta::minutes(30);
+        assert!(
+            !watches.due(t, TimeDelta::zero()),
+            "hourly, before the touch"
+        );
+
+        watches.watch(&pr(3), "s-1", forever(), t);
+        assert!(watches.due(t, TimeDelta::zero()), "due at once");
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], t);
+        assert_eq!(watches.next_read(), Some(t + FASTEST_READ));
+    }
+
+    #[test]
+    fn a_transition_resets_the_quiet() {
+        let mut watches = quiet_for(TimeDelta::hours(30));
+        let t = watches.next_read().unwrap();
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], t);
+        assert_eq!(watches.next_read(), Some(t + FASTEST_READ));
+    }
+
+    #[test]
+    fn only_the_watches_that_are_due_are_read() {
+        let mut watches = quiet_for(TimeDelta::hours(30));
+        let t = watches.watches["github.com/dpep/inkling#3"]
+            .seen
+            .as_ref()
+            .unwrap()
+            .at
+            + TimeDelta::minutes(5);
+        watches.watch(&pr(4), "s-1", forever(), t);
+
+        assert_eq!(watches.due_now(t, TimeDelta::zero()), [pr(4)]);
+    }
+
+    #[test]
+    fn a_caller_may_ask_for_readings_no_fresher_than_it_needs() {
+        // `events --refresh 5m`: the schedule says a minute, the caller says
+        // it doesn't want to pay for anything younger than five.
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+
+        let later = now() + TimeDelta::minutes(2);
+        assert!(watches.due(later, TimeDelta::zero()));
+        assert!(!watches.due(later, TimeDelta::minutes(5)));
+    }
+
+    #[test]
+    fn a_watch_from_before_the_schedule_is_quiet_since_it_was_registered() {
+        // Files written before `stirred_at` existed.
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), at("2026-09-19T12:00:00Z"));
+        let mut raw = serde_json::to_value(&watches.watches["github.com/dpep/inkling#3"]).unwrap();
+        raw.as_object_mut().unwrap().remove("stirred_at");
+
+        let watch: Watch = serde_json::from_value(raw).unwrap();
+        assert_eq!(watch.quiet_since(), at("2026-09-19T12:00:00Z"));
     }
 
     #[test]

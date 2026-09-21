@@ -271,18 +271,15 @@ pub fn should_serve(watches: &Watches, now: DateTime<Utc>) -> bool {
 pub struct Tick<'a> {
     pub poller: Poller<'a>,
     pub sessions: &'a dyn Sessions,
-    /// Don't look upstream again if the readings are fresher than this. Set to
-    /// the server's own interval, so in practice it polls every tick; the
-    /// window is what keeps it from repeating a poll a prompt hook just paid
-    /// for.
-    pub refresh: TimeDelta,
     pub clock: &'a dyn Clock,
 }
 
 impl Work for Tick<'_> {
     fn tick(&self) -> Ticked {
         let started = self.clock.now();
-        let polled = self.poller.poll_if_stale(self.refresh, "serve")?;
+        // The schedule alone decides: a watch a prompt hook just read is not
+        // due again, so there is no refresh window to keep.
+        let polled = self.poller.poll_if_stale(TimeDelta::zero(), "serve")?;
 
         // Delivery happens between the two store operations rather than
         // inside one: a connect is bounded in seconds, and the data lock is

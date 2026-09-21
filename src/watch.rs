@@ -63,18 +63,20 @@ fn name(so_far: &[String], reference: &Reference, error: &impl std::fmt::Display
 }
 
 impl Poller<'_> {
-    /// Read every live watch and record what moved.
+    /// Read every live watch that is due and record what moved. `floor` is
+    /// the youngest reading this caller will pay to replace; the schedule in
+    /// `watches_json::read_every` decides the rest.
     ///
     /// Takes no lock of its own. Correctness is the store's: `record` runs
     /// inside the data lock and compares against the baseline it finds there,
     /// so two pollers racing produce one set of events, not two. The poll
     /// lock below exists only to save a redundant request, which is why it
     /// belongs to the caller that might be redundant rather than to this.
-    pub fn poll(&self, why: &str) -> Result<Polled, StoreError> {
+    pub fn poll(&self, floor: TimeDelta, why: &str) -> Result<Polled, StoreError> {
         let observed_at = self.clock.now();
-        let references = self.store.read().active(observed_at);
+        let references = self.store.read().due_now(observed_at, floor);
         if references.is_empty() {
-            tracing::debug!(why, "nothing is being watched");
+            tracing::debug!(why, "nothing is due");
             return Ok(Polled {
                 skipped: true,
                 ..Polled::default()
@@ -107,16 +109,16 @@ impl Poller<'_> {
         })
     }
 
-    /// Poll only if the readings have aged past `refresh`, and only if
-    /// nobody else is already doing it.
+    /// Poll only if something is due, and only if nobody else is already
+    /// doing it.
     ///
     /// This is the hook's path, run on every prompt, so the common case has
     /// to be the cheap one: a single small file read, no lock, no network.
     /// The lock is non-blocking — a caller that finds somebody mid-request
     /// has better things to do than queue for a result it can read a moment
     /// later.
-    pub fn poll_if_stale(&self, refresh: TimeDelta, why: &str) -> Result<Polled, StoreError> {
-        if !self.store.read().due(self.clock.now(), refresh) {
+    pub fn poll_if_stale(&self, floor: TimeDelta, why: &str) -> Result<Polled, StoreError> {
+        if !self.store.read().due(self.clock.now(), floor) {
             tracing::debug!(why, "readings are fresh");
             return Ok(Polled {
                 skipped: true,
@@ -134,7 +136,7 @@ impl Poller<'_> {
                 ..Polled::default()
             });
         };
-        self.poll(why)
+        self.poll(floor, why)
     }
 
     /// Ask each provider about the references it answers for.
@@ -229,7 +231,7 @@ impl Poller<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::watches_json::RETENTION;
+    use crate::adapters::watches_json::{FASTEST_READ, RETENTION};
     use crate::domain::model::State;
     use crate::domain::wait::CheckState;
     use crate::domain::watch::{Axis, Category};
@@ -335,6 +337,14 @@ mod tests {
             }
         }
 
+        /// Poll whatever is due, then let a reading's worth of time pass so
+        /// the next call finds everything due again.
+        fn poll(&self) -> Polled {
+            let polled = self.poller().poll(TimeDelta::zero(), "test").unwrap();
+            self.clock.advance(FASTEST_READ);
+            polled
+        }
+
         fn watch(&self, reference: &Reference) {
             let deadline = self.clock.now() + TimeDelta::hours(24);
             self.store
@@ -351,10 +361,10 @@ mod tests {
         h.github.set(&pr(3), State::Open);
         h.watch(&pr(3));
 
-        assert!(h.poller().poll("test").unwrap().events.is_empty());
+        assert!(h.poll().events.is_empty());
 
         h.github.set(&pr(3), State::Approved);
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert_eq!(polled.events.len(), 1);
         assert_eq!(polled.events[0].axis, Axis::State);
         assert_eq!(polled.events[0].to, "approved");
@@ -369,12 +379,12 @@ mod tests {
         h.watch(&pr(3));
         h.watch(&issue("AI-1"));
 
-        h.poller().poll("test").unwrap();
+        h.poll();
         h.github
             .set_checks(&pr(3), State::Open, CheckState::Failure);
         h.jira.set("AI-1", "In Progress", Category::Indeterminate);
 
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert_eq!(polled.watched, 2);
         let axes: Vec<_> = polled.events.iter().map(|e| e.axis).collect();
         assert!(axes.contains(&Axis::Checks), "{axes:?}");
@@ -387,31 +397,48 @@ mod tests {
         let h = Harness::new("fresh");
         h.github.set(&pr(3), State::Open);
         h.watch(&pr(3));
-        h.poller().poll("test").unwrap();
+        h.poller().poll(TimeDelta::zero(), "test").unwrap();
         let after_first = h.github.calls();
-
-        assert!(
-            h.poller()
-                .poll_if_stale(TimeDelta::seconds(60), "test")
-                .unwrap()
-                .skipped
-        );
-        assert_eq!(h.github.calls(), after_first, "no second request");
-
-        h.clock.advance(TimeDelta::seconds(60));
-        assert!(
+        let stale = |h: &Harness| {
             !h.poller()
                 .poll_if_stale(TimeDelta::seconds(60), "test")
                 .unwrap()
                 .skipped
-        );
+        };
+
+        h.clock.advance(TimeDelta::seconds(59));
+        assert!(!stale(&h));
+        assert_eq!(h.github.calls(), after_first, "no second request");
+
+        h.clock.advance(TimeDelta::seconds(1));
+        assert!(stale(&h));
         assert_eq!(h.github.calls(), after_first + 1);
+    }
+
+    #[test]
+    fn a_quiet_watch_is_left_alone_between_its_readings() {
+        // A day of nothing: the prompt path's 60s floor no longer means every
+        // prompt a minute apart pays for a request.
+        let h = Harness::new("quiet");
+        h.github.set(&pr(3), State::Open);
+        h.watch(&pr(3));
+        h.clock.advance(TimeDelta::hours(24));
+        h.poller().poll(TimeDelta::zero(), "test").unwrap();
+        let calls = h.github.calls();
+
+        h.clock.advance(TimeDelta::minutes(59));
+        let polled = h
+            .poller()
+            .poll_if_stale(TimeDelta::seconds(60), "test")
+            .unwrap();
+        assert!(polled.skipped);
+        assert_eq!(h.github.calls(), calls);
     }
 
     #[test]
     fn watching_nothing_asks_nothing() {
         let h = Harness::new("empty");
-        assert!(h.poller().poll("test").unwrap().skipped);
+        assert!(h.poll().skipped);
         assert_eq!(h.github.calls(), 0);
     }
 
@@ -451,7 +478,7 @@ mod tests {
         h.watch(&issue("AI-2")); // never set, so not found
         h.watch(&issue("AI-1"));
 
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert_eq!(polled.failures.len(), 1, "{:?}", polled.failures);
         assert!(polled.failures[0].contains("AI-2"));
 
@@ -471,7 +498,7 @@ mod tests {
         h.watch(&issue("AI-1"));
         h.jira.unreachable.set(true);
 
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert!(polled.events.is_empty());
         assert_eq!(polled.failures.len(), 1);
         assert!(!polled.skipped, "it tried");
@@ -482,16 +509,13 @@ mod tests {
         let h = Harness::new("finished");
         h.github.set(&pr(3), State::Open);
         h.watch(&pr(3));
-        h.poller().poll("test").unwrap();
+        h.poll();
 
         h.github.set(&pr(3), State::Merged);
-        assert_eq!(h.poller().poll("test").unwrap().events.len(), 1);
+        assert_eq!(h.poll().events.len(), 1);
 
         let calls = h.github.calls();
-        assert!(
-            h.poller().poll("test").unwrap().skipped,
-            "nothing left to watch"
-        );
+        assert!(h.poll().skipped, "nothing left to watch");
         assert_eq!(h.github.calls(), calls);
     }
 
@@ -502,9 +526,9 @@ mod tests {
         let h = Harness::new("durable");
         h.github.set(&pr(3), State::Open);
         h.watch(&pr(3));
-        h.poller().poll("test").unwrap();
+        h.poll();
         h.github.set(&pr(3), State::Approved);
-        h.poller().poll("test").unwrap();
+        h.poll();
 
         let reread = WatchStore::new(h.store.path());
         let events = reread
@@ -526,7 +550,7 @@ mod tests {
         h.jira.set("AI-1", "To Do", Category::New);
         h.watch(&issue("AI-1"));
 
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert!(polled.failures.is_empty(), "{:?}", polled.failures);
         assert_eq!(h.github.calls(), 0, "no pull requests, no github request");
     }
@@ -537,10 +561,10 @@ mod tests {
         h.github
             .set_checks(&pr(3), State::Open, CheckState::Pending);
         h.watch(&pr(3));
-        h.poller().poll("test").unwrap();
+        h.poll();
 
         h.github.fail_check(&pr(3), State::Open, "test / build");
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert_eq!(polled.events[0].detail.as_deref(), Some("test / build"));
     }
 
@@ -551,13 +575,13 @@ mod tests {
         let h = Harness::new("blip");
         h.github.set(&pr(3), State::Open);
         h.watch(&pr(3));
-        h.poller().poll("test").unwrap();
+        h.poll();
 
         h.github.fail(&pr(3), RefError::Other("HTTP 502".into()));
-        h.poller().poll("test").unwrap();
+        h.poll();
 
         h.github.set(&pr(3), State::Merged);
-        let polled = h.poller().poll("test").unwrap();
+        let polled = h.poll();
         assert_eq!(polled.events.len(), 1, "open → merged, not swallowed");
         assert_eq!(polled.events[0].from, "open");
     }
@@ -568,7 +592,7 @@ mod tests {
         h.watch(&pr(3));
         h.github.fail(&pr(3), RefError::NotFound);
 
-        h.poller().poll("test").unwrap();
+        h.poll();
         assert!(
             h.store.read().watches["github.com/dpep/inkling#3"]
                 .seen
