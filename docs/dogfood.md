@@ -6,6 +6,18 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- Marking #14 ready pushed `state draft → open`, and merging it pushed
+  `open → merged` — both news of what this session had just done itself.
+  Expected a push to be something I didn't already know. Earlier PRs didn't
+  show it only because ready and merge fell in one tick (`draft → merged`).
+  Open: tell a session its own actions only through `events`, or not at all.
+- The probe's deliberately red CI was pushed to the parent session twice. A
+  subagent's Bash calls register watches on the parent's session, and the
+  post-tool hook registered the probe PR before any scratch `--watches` path
+  could keep it out. Now in the skill: unwatch a PR opened only to test.
+- A subagent can read the feed without spending the parent's cursor: `events
+  --since <session>:<n>` returned the same four events twice and left the
+  stored cursor where it was. Good — needed no code, only the skill saying so.
 - `wait --until checks` on #13, started right after a force-push, exited 3
   at 0s: `no checks … precluded after 0s (1 poll)`. The new head had no
   rollup yet; `gh pr checks` showed `test pending` seconds later. Expected it
