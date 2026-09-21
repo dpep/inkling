@@ -23,7 +23,19 @@ fixed, say where and leave the line.
   weeks — found and fixed the same hour. Good. But the push came when the
   first job went red, and GitHub doesn't serve a job's log until the whole run
   finishes, so the next step had to wait on `gh run watch`. Open: push red
-  when the rollup is final, or say the logs may not be ready.
+  when the rollup is final, or say the logs may not be ready. Fixed on
+  `push-red-when-readable`, neither way: measured, the job's log is served
+  within 2s of the job ending and it's `gh run view` that waits for the run,
+  so a red Actions job's push now names its log endpoint. See watching.md.
+- `gh run view --job <id>` on a finished job in an unfinished run prints "To
+  see the logs for the failed steps, try: gh run view --log-failed
+  --job=<id>" — and that command refuses, run still in progress. The obvious
+  next step is a dead end by gh's own suggestion.
+- Watches registered by a subagent's Bash calls land on the parent session:
+  a subagent shares its session id, so the parent was pushed `checks none →
+  failure: lint` for a scratch repo only the subagent was probing. Expected
+  a subagent's own work to stay with the subagent, or at least to be told
+  apart; nothing in the hook payload currently distinguishes them.
 - Watching PRs in a second repo needed nothing: the hook registered them, the
   server polled both repos in one query, and each result arrived once.
 
