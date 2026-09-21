@@ -1353,13 +1353,17 @@ fn serve_config(config: &Config, common: &Common) -> inkling::serve::Config {
     }
 }
 
-/// Start a server if there is now a reason for one.
+/// Wake the running server, or start one if there is now a reason for one.
 ///
 /// The reason is the same predicate a running server uses to decide whether
 /// to stay, so one is never spawned only to stand straight back down, and
 /// never missing while there is something to deliver. Failing to start one
 /// is a log line: the pull feed still works.
 fn ensure_serving(config: &Config, common: &Common, why: &str) {
+    // First, and whether or not this caller has a reason to start one: the
+    // watch list just changed, and a running server may be asleep until an
+    // hour from now on a plan that predates it.
+    inkling::serve::ring(&serve_config(config, common).doorbell);
     let store = watch_store(common);
     if !inkling::push::should_serve(&store.read(), Utc::now()) {
         return;

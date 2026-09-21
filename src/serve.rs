@@ -256,12 +256,7 @@ pub enum Ensured {
 /// is the arbitration, not a case to guard against.
 pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<Ensured, ServeError> {
     match FileLock::try_acquire(&config.lock)? {
-        None => {
-            // Whatever brought us here may be due now, and the running server
-            // may be asleep until an hour from now.
-            ring(&config.doorbell);
-            Ok(Ensured::AlreadyRunning)
-        }
+        None => Ok(Ensured::AlreadyRunning),
         Some(lock) => {
             // Released before spawning, or the child we just started would be
             // locked out by its own parent.
