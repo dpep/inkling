@@ -78,6 +78,25 @@ both belong to an attention axis rather than the merge ladder — a PR can be
 approved *and* have unaddressed comments. They also want retraction to stay
 honest, so they arrive together with it. See DESIGN.md §2.
 
+## Going public: Homebrew and crates.io
+
+**Deferred, 2026-09-20.** 0.1.0 is a git tag and a GitHub release on a private
+repo; other machines `git clone` and `make install`.
+
+- **Homebrew** needs a public repo — the tap formula pins a release tarball,
+  and brew can't fetch one from a private repo. `release` (the house script)
+  also finds a tool *through* its tap formula, so until there is one a release
+  is cut by hand. History still holds two Slack channel IDs and a workspace
+  name (no tokens; scanned). Going public means either accepting that or
+  rewriting history, which breaks every SHA and PR permalink.
+- **crates.io** has an unrelated `inkling` (an Ink markup library). Publishing
+  means a different package name with the binary still called `inkling` — a
+  name is permanent once published, so pick it deliberately, not at release
+  time.
+
+**Revisit when** a machine that can't clone the repo needs it, or someone
+else wants to try it.
+
 ## Becoming a real Slack app
 
 **The big one.** See [slack-app-roadmap.md](slack-app-roadmap.md). Stage 1 —

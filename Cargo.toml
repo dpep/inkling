@@ -2,7 +2,7 @@
 name = "inkling"
 version = "0.1.0"
 edition = "2024"
-description = "Annotates Slack messages with the current state of the things they link to."
+description = "Tells agents and people when a pull request or Jira issue they care about changes."
 license = "MIT"
 repository = "https://github.com/dpep/inkling"
 
