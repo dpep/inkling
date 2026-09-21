@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A suite that has only started is no longer pushed into a session.** A push costs a turn, and
+  `checks … → pending` leaves nothing to do. It stays in `inkling events`, where a prompt made while
+  CI runs still sees it; otherwise the verdict is pushed and passes over it.
 - **A push no longer costs you two useless events.** The head commit briefly has no check rollup,
   and a reading without one now keeps the rollup it had instead of reporting `checks success → none`
   and `none → pending` ahead of the `pending → success` that was the news. A first rollup is still

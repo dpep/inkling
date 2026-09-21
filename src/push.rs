@@ -72,6 +72,16 @@ fn more(event: &Event) -> Option<String> {
         .then(|| format!("gh pr checks {number} --repo {host}/{owner}/{repo}"))
 }
 
+/// Whether a transition is worth starting a turn over.
+///
+/// A push costs the session a turn; a pull costs nothing. A suite that has
+/// only started leaves nothing to do, so it waits in the feed for the next
+/// prompt, and the verdict that follows passes over it. One rule rather than
+/// a setting — see docs/watching.md for what would change that.
+fn worth_a_turn(event: &Event) -> bool {
+    !(event.axis == Axis::Checks && event.to == CheckState::Pending.as_str())
+}
+
 /// Where a session's inbox is reached. A seam rather than an abstraction: it
 /// exists so the fan-out below — who is told what, whose cursor moves, whose
 /// address is dropped — is decided in a test without binding a socket.
@@ -138,7 +148,10 @@ pub fn round(sessions: &dyn Sessions, watches: &Watches, clock: &dyn Clock) -> V
             // Addressed, not merely newer: a session hears about the things
             // it is watching and nothing else, however many others are
             // running on this machine.
-            let due = addressed(&watches.events, cursor, subscriber);
+            let due: Vec<&Event> = addressed(&watches.events, cursor, subscriber)
+                .into_iter()
+                .filter(|event| worth_a_turn(event))
+                .collect();
             match due.is_empty() {
                 true => probe(sessions, subscriber, address),
                 false => push(sessions, subscriber, address, &due, clock),
@@ -452,6 +465,50 @@ mod tests {
         assert!(
             watches.take("s", now()).is_empty(),
             "the prompt hook has nothing left to say"
+        );
+    }
+
+    fn checked(watches: &mut Watches, checks: CheckState) {
+        watches.record(&[(pr(3), sighting(State::Open, Some(checks)))], now());
+    }
+
+    #[test]
+    fn a_suite_that_has_only_started_waits_for_the_next_prompt() {
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now());
+        checked(&mut watches, CheckState::Pending);
+
+        let sessions = FakeSessions::default();
+        let outcomes = deliver(&sessions, &mut watches);
+
+        assert!(sessions.texts().is_empty(), "{:?}", sessions.texts());
+        assert!(
+            outcomes[0].probed,
+            "silence is still a reason to ask after it"
+        );
+        assert_eq!(
+            watches.take("s", now()).len(),
+            1,
+            "still there to be pulled"
+        );
+    }
+
+    #[test]
+    fn a_verdict_is_pushed_without_the_start_that_led_to_it() {
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now());
+        checked(&mut watches, CheckState::Pending);
+        checked(&mut watches, CheckState::Success);
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+
+        let texts = sessions.texts();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("pending → success"), "{texts:?}");
+        assert!(
+            watches.take("s", now()).is_empty(),
+            "the verdict passes over the start; a prompt doesn't dig it back up"
         );
     }
 

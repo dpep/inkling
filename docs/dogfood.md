@@ -6,6 +6,16 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- #8 was the first PR watched with no inkling command typed: the PostToolUse
+  hook saw `gh pr create`, registered the watch for the right session, and
+  spawned the server (`reason=post-tool`); `status` said `serving yes` at
+  once. The result arrived by push, `gh pr checks` agreed, and `draft →
+  merged` confirmed the merge. Good — this is the loop working.
+- The same PR woke its idle session for `checks none → pending`: CI has
+  started, nothing to do. The auto-watch registers before a PR's first check
+  exists, so this would have cost a turn on every `gh pr create`. Expected a
+  push to be something to act on. Fixed in `push::worth_a_turn`: a transition
+  into pending is never pushed, and stays in `events`.
 - All four hooks installed globally; pushes arrive mid-turn as well as when
   idle, and both read naturally.
 - The PostToolUse hook fired live: `gh pr view 3` auto-watched #3 with the

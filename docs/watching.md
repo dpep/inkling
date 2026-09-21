@@ -223,9 +223,19 @@ settled first, and what each one settled as:
   forwards by whichever got there first. A successful push advances it, so
   the next prompt doesn't repeat what the session was already told.
 - **Whether this crosses DESIGN §1.** The argument, made rather than assumed:
-  inkling says what changed and stops. It runs nothing, decides nothing, and
-  filters nothing. DESIGN §1 now names delivering news into a session that
-  asked as the furthest this goes.
+  inkling says what changed and stops. It runs nothing and decides nothing,
+  and the feed leaves nothing out. DESIGN §1 now names delivering news into a
+  session that asked as the furthest this goes.
+
+**A push is for something you can act on.** A push costs the session a turn;
+a pull costs nothing. Dogfooding #8 showed the difference: the auto-watch
+registers before a PR's first check exists, so every `gh pr create` woke its
+session for `checks none → pending` — CI has started, nothing to do. So a
+transition *into* pending is never pushed. It stays in the feed, where a
+prompt that happens while CI runs picks it up as context; if none does, the
+verdict that follows is pushed and the cursor passes over the start. A push
+to a PR therefore costs one message, the result. This is one rule in
+`push::worth_a_turn`, not a setting, and the feed itself is still complete.
 
 **What advancing on a successful push costs, stated plainly.** The socket
 sends no ack, so `Written` means the bytes reached a live socket and nothing
@@ -313,6 +323,13 @@ of noise.
 - **Tools other than Bash.** An Edit that writes a PR number, an MCP call to
   GitHub. Bash is where references appear today; the gate is one string
   comparison, so a second tool is a small change when one earns it.
+- **Choosing which events push, or are recorded at all.** One hardcoded rule
+  decides what is worth a turn. A `[push]` table naming axes or transitions
+  is the obvious next step and is deliberately not here: every knob is a
+  guess until the dogfood log shows two people wanting different answers, or
+  one rule that is right for PRs and wrong for Jira. What would change this:
+  lines in docs/dogfood.md that say "woke me for nothing" or "didn't wake me
+  and should have" that one rule can't settle both ways.
 - **An ack.** Everything push gives up follows from the socket not having
   one. If Claude Code ever reports that a message was accepted, a cursor
   could advance on *that* rather than on the write, and the cost above
