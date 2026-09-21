@@ -50,6 +50,18 @@ pub const RETENTION: TimeDelta = TimeDelta::hours(24);
 /// returns to.
 pub const SUBSCRIBER_RETENTION: TimeDelta = TimeDelta::days(7);
 
+/// How many messages one session may be sent in `PUSH_WINDOW`.
+///
+/// A push costs the session a turn, so this is a ceiling on what inkling can
+/// cost one session however badly the thing it is watching behaves. Measured
+/// 2026-09-20: a pull request whose review decision oscillated produced one
+/// push per tick — seven in 13 seconds — and nothing stood between that and
+/// the session until the watch's deadline a day later. Five is more than any
+/// five minutes of genuine news, and what it withholds stays in the feed for
+/// the next prompt.
+pub const PUSH_BUDGET: usize = 5;
+pub const PUSH_WINDOW: TimeDelta = TimeDelta::minutes(5);
+
 /// How long a writer waits for the lock before giving up.
 ///
 /// The critical section is a small file read, a tidy and a rename — measured
@@ -148,6 +160,10 @@ pub struct Subscriber {
     /// and every session that has since ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<SessionAddress>,
+    /// When messages were pushed here, oldest first, kept only for
+    /// `PUSH_WINDOW`. What `allowance` counts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pushes: Vec<DateTime<Utc>>,
 }
 
 impl Watches {
@@ -422,6 +438,7 @@ impl Watches {
                 cursor: head,
                 seen_at: now,
                 address: None,
+                pushes: Vec::new(),
             });
         entry.seen_at = now;
         entry
@@ -474,11 +491,28 @@ impl Watches {
     /// Forwards only. A prompt that pulled while the push was in flight has
     /// already moved it, and winding it back would tell that session the same
     /// thing twice — which is the one promise this feed makes.
-    pub fn pushed(&mut self, subscriber: &str, seq: u64, now: DateTime<Utc>) {
+    pub fn pushed(&mut self, subscriber: &str, seq: u64, sent: usize, now: DateTime<Utc>) {
         if let Some(entry) = self.subscribers.get_mut(subscriber) {
             entry.cursor = entry.cursor.max(seq);
             entry.seen_at = now;
+            entry.pushes.retain(|at| now - *at < PUSH_WINDOW);
+            entry.pushes.extend(std::iter::repeat_n(now, sent));
         }
+    }
+
+    /// How many more messages this session may be sent right now.
+    ///
+    /// Zero is not a failure and nothing is dropped: the transitions stay in
+    /// the feed, addressed to this reader, and the next prompt takes them.
+    pub fn allowance(&self, subscriber: &str, now: DateTime<Utc>) -> usize {
+        let recent = self.subscribers.get(subscriber).map_or(0, |entry| {
+            entry
+                .pushes
+                .iter()
+                .filter(|at| now - **at < PUSH_WINDOW)
+                .count()
+        });
+        PUSH_BUDGET.saturating_sub(recent)
     }
 
     /// Drop what has aged out: expired watches, events past retention, and
@@ -1075,7 +1109,7 @@ mod tests {
         let pushed = watches.attached()[0].2;
         let due = crate::domain::watch::since(&watches.events, pushed).to_vec();
         assert_eq!(due.len(), 1);
-        watches.pushed("s-1", due[0].seq, now());
+        watches.pushed("s-1", due[0].seq, 1, now());
 
         assert!(
             watches.take("s-1", now()).is_empty(),
@@ -1092,7 +1126,7 @@ mod tests {
         watches.record(&[(pr(3), seen_pull(State::Merged, None))], now());
 
         assert_eq!(watches.take("s-1", now()).len(), 2, "pulled both");
-        watches.pushed("s-1", 1, now());
+        watches.pushed("s-1", 1, 1, now());
         assert!(
             watches.take("s-1", now()).is_empty(),
             "the second event must not come round again"

@@ -128,7 +128,7 @@ impl Outcome {
     /// itself happens outside it: a wedged session must not hold up a prompt.
     pub fn apply(&self, watches: &mut Watches, now: DateTime<Utc>) {
         if let Some(seq) = self.cursor {
-            watches.pushed(&self.subscriber, seq, now);
+            watches.pushed(&self.subscriber, seq, self.written, now);
         }
         if self.detach {
             watches.detach(&self.subscriber);
@@ -148,10 +148,24 @@ pub fn round(sessions: &dyn Sessions, watches: &Watches, clock: &dyn Clock) -> V
             // Addressed, not merely newer: a session hears about the things
             // it is watching and nothing else, however many others are
             // running on this machine.
-            let due: Vec<&Event> = addressed(&watches.events, cursor, subscriber)
+            let owed: Vec<&Event> = addressed(&watches.events, cursor, subscriber)
                 .into_iter()
                 .filter(|event| worth_a_turn(event))
                 .collect();
+            // A session is only ever told so much. What the budget withholds
+            // stays in the feed for the next prompt, so this caps the turns
+            // inkling can cost without dropping anything.
+            let allowance = watches.allowance(subscriber, clock.now());
+            if owed.len() > allowance {
+                tracing::info!(
+                    subscriber,
+                    owed = owed.len(),
+                    allowance,
+                    window_minutes = crate::adapters::watches_json::PUSH_WINDOW.num_minutes(),
+                    "withheld; the rest waits for a prompt"
+                );
+            }
+            let due: Vec<&Event> = owed.into_iter().take(allowance).collect();
             match due.is_empty() {
                 true => probe(sessions, subscriber, address),
                 false => push(sessions, subscriber, address, &due, clock),
@@ -294,7 +308,7 @@ impl Work for Tick<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::watches_json::RETENTION;
+    use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
     use crate::domain::model::State;
     use crate::domain::watch::{Sighting, Standing};
     use crate::secret::Secret;
@@ -510,6 +524,62 @@ mod tests {
             watches.take("s", now()).is_empty(),
             "the verdict passes over the start; a prompt doesn't dig it back up"
         );
+    }
+
+    #[test]
+    fn a_reference_that_flaps_stops_being_pushed() {
+        // Measured 2026-09-20 against a live listener: a pull request whose
+        // review decision oscillated put seven messages into one session in
+        // 13 seconds, one per tick, and nothing was going to stop it until the
+        // watch's 24h deadline.
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now());
+        let sessions = FakeSessions::default();
+
+        for turn in 0..12 {
+            moved(
+                &mut watches,
+                match turn % 2 {
+                    0 => State::Approved,
+                    _ => State::Open,
+                },
+            );
+            deliver(&sessions, &mut watches);
+        }
+
+        assert_eq!(
+            sessions.texts().len(),
+            PUSH_BUDGET,
+            "{:?}",
+            sessions.texts()
+        );
+        assert!(
+            !watches.take("s", now()).is_empty(),
+            "and what was withheld is still there to be pulled"
+        );
+    }
+
+    #[test]
+    fn the_budget_comes_back_once_the_window_has_passed() {
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now());
+        let sessions = FakeSessions::default();
+
+        for _ in 0..PUSH_BUDGET {
+            moved(&mut watches, State::Approved);
+            moved(&mut watches, State::Open);
+            deliver(&sessions, &mut watches);
+        }
+        assert_eq!(sessions.texts().len(), PUSH_BUDGET);
+
+        // A window later the session can be told things again — and still no
+        // more than a budget's worth of them.
+        let later = now() + PUSH_WINDOW + TimeDelta::seconds(1);
+        let clock = FixedClock::at("2026-09-20T12:06:00Z");
+        for outcome in round(&sessions, &watches, &clock) {
+            outcome.apply(&mut watches, later);
+        }
+        assert_eq!(sessions.texts().len(), PUSH_BUDGET * 2);
     }
 
     #[test]
