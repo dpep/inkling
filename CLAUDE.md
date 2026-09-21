@@ -48,10 +48,13 @@ don't wait for a retro.
 - The hooks run in every Claude Code session here. Test against scratch paths
   (`--config`, `--state`, `--watches`, `--log-dir`), never `~/.local/state/inkling`,
   and never kill a server you didn't start.
-- [dpep/inkling-ci-probe](https://github.com/dpep/inkling-ci-probe) is a
-  private scratch repo for live CI experiments (a fast failing job beside slow
-  passing ones). Use it rather than pushing red CI anywhere real, and delete it
-  (`gh repo delete dpep/inkling-ci-probe --yes`) once red-CI work is settled.
+- Two private scratch repos exist for live experiments — use them rather than
+  pushing red CI anywhere real, and delete them (`gh repo delete <repo> --yes`)
+  once CI-timing work is settled:
+  - [dpep/inkling-ci-probe](https://github.com/dpep/inkling-ci-probe): a fast
+    failing job beside slow passing ones.
+  - [dpep/inkling-no-ci-probe](https://github.com/dpep/inkling-no-ci-probe): no
+    CI at all, for the "answers at once" case.
 - Design reasoning lives in `docs/` (`waiting.md`, `watching.md`, `deferred.md`).
   Read the relevant one before changing its subject; record departures there.
 - Inkling observes; it does not act. No `--then`, no rules, no callbacks
