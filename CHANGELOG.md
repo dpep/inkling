@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-09-20
+
+First tagged release. Private: install with `git clone` + `make install`; there is no Homebrew
+formula and nothing on crates.io. The Claude Code side ships as `inkling@myclaude`.
 
 - **A hook can no longer cost you a prompt.** If `config.toml` didn't parse, every hook exited 2 —
   which on `UserPromptSubmit` erases the prompt you just typed and on `SessionStart` blocks the
