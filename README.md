@@ -126,8 +126,12 @@ A subscribed session has each transition pushed into it the moment a poll
 finds it, as one line starting `inkling:`:
 
 ```
-inkling: github.com/dpep/inkling#7 checks pending → failure: test / build (gh pr checks 7 --repo github.com/dpep/inkling)
+inkling: github.com/dpep/inkling#7 checks pending → failure: test / build (gh api --hostname github.com repos/dpep/inkling/actions/jobs/106193645679/logs)
 ```
+
+A red Actions job ends in the command for its log, which GitHub serves as soon
+as that job ends — `gh run view --log-failed` waits for the whole run. A check
+from any other app ends in `gh pr checks` instead.
 
 Built only from what Inkling itself decided — the reference, what moved, and
 which check went red. Never the pull request's title or the Jira summary:

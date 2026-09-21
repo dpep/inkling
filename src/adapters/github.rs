@@ -7,6 +7,7 @@
 
 use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
+use crate::domain::watch::FailedCheck;
 use crate::ports::{Lookup, ProviderError, RefError, RefStatus, StatusProvider};
 use crate::secret::Secret;
 use serde::Deserialize;
@@ -87,7 +88,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 20) {{ nodes {{ __typename ... on CheckRun {{ name conclusion }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 20) {{ nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} }} }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -214,6 +215,30 @@ struct Context {
     name: Option<String>,
     #[serde(default)]
     conclusion: Option<String>,
+    #[serde(default, rename = "databaseId")]
+    database_id: Option<u64>,
+    #[serde(default, rename = "checkSuite")]
+    check_suite: Option<CheckSuite>,
+}
+
+impl Context {
+    /// An Actions check run's id is its job's id. Any other app's is not —
+    /// rust-lang/rust's `Bors try build` is a check run with no job behind it.
+    fn job(&self) -> Option<u64> {
+        let slug = self.check_suite.as_ref()?.app.as_ref()?.slug.as_str();
+        (slug == "github-actions").then_some(self.database_id?)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckSuite {
+    #[serde(default)]
+    app: Option<App>,
+}
+
+#[derive(Debug, Deserialize)]
+struct App {
+    slug: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,19 +282,21 @@ impl PullRequest {
     /// Not "the first one that isn't green": recorded from rust-lang/rust the
     /// list runs successes, then a `SKIPPED`, then the failure — so anything
     /// looser names a job that did nothing wrong.
-    fn failing(&self) -> Option<String> {
-        self.rollup()?
-            .contexts
-            .nodes
-            .iter()
-            .find(|context| {
-                matches!(
-                    context.conclusion.as_deref(),
-                    Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE")
-                )
-            })
-            .and_then(|context| context.name.clone())
-            .filter(|name| !name.trim().is_empty())
+    fn failing(&self) -> Option<FailedCheck> {
+        let context = self.rollup()?.contexts.nodes.iter().find(|context| {
+            matches!(
+                context.conclusion.as_deref(),
+                Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE")
+            )
+        })?;
+        let name = context
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())?;
+        Some(FailedCheck {
+            name,
+            job: context.job(),
+        })
     }
 
     fn checks(&self) -> Option<CheckState> {
@@ -544,10 +571,56 @@ mod tests {
             .unwrap();
         assert_eq!(status.checks, Some(CheckState::Failure));
         assert_eq!(
-            status.failing.as_deref(),
+            status.failing.map(|f| f.name).as_deref(),
             Some("Bors auto build"),
             "the first job that failed, not the first that isn't green — a \
              SKIPPED job sits in between"
+        );
+    }
+
+    /// Recorded 2026-09-20 from a scratch repository, mid-run: `lint` has
+    /// failed while `test` is still going. `Bors try build` is from
+    /// rust-lang/rust, a check run whose app is not Actions.
+    fn red(first: &str) -> String {
+        let actions = r#"{"__typename":"CheckRun","name":"lint","conclusion":"FAILURE",
+            "databaseId":106192233819,"checkSuite":{"app":{"slug":"github-actions"}}}"#;
+        let bors = r#"{"__typename":"CheckRun","name":"Bors try build","conclusion":"FAILURE",
+            "databaseId":55,"checkSuite":{"app":null}}"#;
+        let running = r#"{"__typename":"CheckRun","name":"test","conclusion":null,
+            "databaseId":106192233589,"checkSuite":{"app":{"slug":"github-actions"}}}"#;
+        let failed = if first == "bors" { bors } else { actions };
+        with_rollup(&format!(
+            r#"{{"state":"FAILURE","contexts":{{"nodes":[{failed},{running}]}}}}"#
+        ))
+    }
+
+    #[test]
+    fn a_red_actions_job_carries_its_job_id() {
+        let status = interpret(&[pr("x", 1)], &parse(&red("actions")))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(
+            status.failing,
+            Some(FailedCheck {
+                name: "lint".into(),
+                job: Some(106192233819),
+            })
+        );
+    }
+
+    #[test]
+    fn a_check_run_from_another_app_has_no_job_to_point_at() {
+        let status = interpret(&[pr("x", 1)], &parse(&red("bors")))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(
+            status.failing,
+            Some(FailedCheck {
+                name: "Bors try build".into(),
+                job: None,
+            })
         );
     }
 
@@ -592,6 +665,11 @@ mod tests {
         // Measured: this costs nothing extra — a 3-reference batch is one
         // rate-limit point with it or without it.
         assert!(query.contains("contexts(first: 20)"), "{query}");
+        // So a red Actions job's log can be named; also free, measured the same way.
+        assert!(
+            query.contains("databaseId checkSuite { app { slug } }"),
+            "{query}"
+        );
     }
 
     #[test]

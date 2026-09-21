@@ -128,7 +128,10 @@ impl ScriptedStatusProvider {
             reference.clone(),
             Ok(RefStatus {
                 checks: Some(CheckState::Failure),
-                failing: Some(failing.to_string()),
+                failing: Some(crate::domain::watch::FailedCheck {
+                    name: failing.to_string(),
+                    job: None,
+                }),
                 ..RefStatus::new(state)
             }),
         );

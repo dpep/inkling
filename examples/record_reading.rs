@@ -16,7 +16,7 @@ use inkling::adapters::watches_json::WatchStore;
 use inkling::domain::detect::{Target, parse_target};
 use inkling::domain::model::{Reference, State};
 use inkling::domain::wait::CheckState;
-use inkling::domain::watch::{Sighting, Standing};
+use inkling::domain::watch::{FailedCheck, Sighting, Standing};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,7 +33,10 @@ fn main() {
         },
         title: "a title nobody should see in a pushed message".into(),
         failing: match checks.first().map(String::as_str) {
-            Some("failure") => Some("test / build".into()),
+            Some("failure") => Some(FailedCheck {
+                name: "test / build".into(),
+                job: None,
+            }),
             _ => None,
         },
     };
