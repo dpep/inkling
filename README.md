@@ -147,6 +147,12 @@ Behind it is one resident `inkling` per machine, started by `subscribe` or
 there isn't. Nothing to install, start, or restart — `inkling status` says
 whether one is up.
 
+A watch is read at 1/24 of how long it has been quiet — every minute while it
+is moving, hourly once it has sat still for a day — and back to every minute
+the moment a session touches it again (`gh pr …`, a `git push` naming it). The
+server sleeps until the next watch is due, and registering one wakes it.
+`inkling status` counts the upstream reads beside the transitions they caught.
+
 Two things worth knowing. The session socket sends no acknowledgement, so a
 successful push means the message reached a live session and no more; if a
 session's configuration drops it, that transition won't reappear at the next
@@ -194,7 +200,7 @@ Cost, measured over 50 runs each: **0.2ms** over the process itself for a
 command that isn't a candidate, and **3ms** when it is and the store has to
 be written. The process itself is 5.5ms, which is what any command hook
 costs. Nothing here makes a network call — the first reading is left to the
-resident server's next tick — so a `git push` whose output carries no pull
+resident server, which the hook wakes — so a `git push` whose output carries no pull
 request URL watches nothing rather than going to look one up.
 
 Running the same command again refreshes the deadline and says nothing.
@@ -256,7 +262,7 @@ canonical = "rocket"
 aliases   = ["merged", "shipit", "ship", "done"]
 
 [serve]
-interval     = "15s"   # how often the resident server looks and delivers
+interval     = "15s"   # the shortest nap; otherwise it sleeps until a watch is due
 idle_after   = "5m"    # how long with nothing to do before it stands down
 max_lifetime = "24h"   # so a rebuilt binary eventually gets picked up
 ```

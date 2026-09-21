@@ -43,8 +43,8 @@ fn main() {
             let _logging = logging(dir, true);
             let work = || -> Ticked {
                 match PathBuf::from(dir).join("work").exists() {
-                    true => Ok(Pulse::Busy),
-                    false => Ok(Pulse::Idle),
+                    true => Ok(Pulse::Busy.into()),
+                    false => Ok(Pulse::Idle.into()),
                 }
             };
             serve::run(config(dir), &work).expect("served");

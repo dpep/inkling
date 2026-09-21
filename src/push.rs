@@ -30,7 +30,7 @@ use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use crate::domain::watch::{Axis, Event, addressed};
 use crate::ports::Clock;
-use crate::serve::{Pulse, Ticked, Work};
+use crate::serve::{Beat, Pulse, Ticked, Work};
 use crate::watch::Poller;
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -271,18 +271,15 @@ pub fn should_serve(watches: &Watches, now: DateTime<Utc>) -> bool {
 pub struct Tick<'a> {
     pub poller: Poller<'a>,
     pub sessions: &'a dyn Sessions,
-    /// Don't look upstream again if the readings are fresher than this. Set to
-    /// the server's own interval, so in practice it polls every tick; the
-    /// window is what keeps it from repeating a poll a prompt hook just paid
-    /// for.
-    pub refresh: TimeDelta,
     pub clock: &'a dyn Clock,
 }
 
 impl Work for Tick<'_> {
     fn tick(&self) -> Ticked {
         let started = self.clock.now();
-        let polled = self.poller.poll_if_stale(self.refresh, "serve")?;
+        // The schedule alone decides: a watch a prompt hook just read is not
+        // due again, so there is no refresh window to keep.
+        let polled = self.poller.poll_if_stale(TimeDelta::zero(), "serve")?;
 
         // Delivery happens between the two store operations rather than
         // inside one: a connect is bounded in seconds, and the data lock is
@@ -292,13 +289,16 @@ impl Work for Tick<'_> {
         let outcomes = round(self.sessions, &watches, self.clock);
 
         let now = self.clock.now();
-        let pulse = self.poller.store.update(now, |file| {
+        let beat = self.poller.store.update(now, |file| {
             for outcome in &outcomes {
                 outcome.apply(file, now);
             }
-            match should_serve(file, now) {
-                true => Pulse::Busy,
-                false => Pulse::Idle,
+            Beat {
+                pulse: match should_serve(file, now) {
+                    true => Pulse::Busy,
+                    false => Pulse::Idle,
+                },
+                next: file.next_read(),
             }
         })?;
 
@@ -311,13 +311,14 @@ impl Work for Tick<'_> {
             written = outcomes.iter().map(|o| o.written).sum::<usize>(),
             detached = outcomes.iter().filter(|o| o.detach).count(),
             elapsed_ms = (self.clock.now() - started).num_milliseconds(),
-            pulse = match pulse {
+            pulse = match beat.pulse {
                 Pulse::Busy => "busy",
                 Pulse::Idle => "idle",
             },
+            next = beat.next.map(|t| t.to_rfc3339()),
             "serve tick"
         );
-        Ok(pulse)
+        Ok(beat)
     }
 }
 

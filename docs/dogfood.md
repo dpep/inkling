@@ -6,6 +6,28 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- After `make install` of #16 at 20:08, the resident server started at
+  20:05 kept running the old build and pushed `#17 state draft → open`,
+  which #16 had stopped pushing. Expected an install to take effect; since
+  `make install` renames a copy over the binary, the running process keeps
+  the old inode and only its 24h lifetime would have replaced it. Fixed on
+  `watch-backoff`: the server stats the path it was launched as each tick
+  and stands down when the build there changes (at its next wake — at most
+  its current nap, which the next watch change cuts short).
+- Nothing woke a running server early. "Keep whatever wakes it" turned
+  out to mean the 15s tick itself, so a server allowed to sleep until the
+  next watch came due would have slept through a new watch or a touch for up
+  to an hour. Expected the hook's spawn call to poke a live server; it only
+  checked the lock. Fixed on `watch-backoff`: a FIFO doorbell that every
+  watch change rings (watching.md, "How often a watch is read").
+- In the scratch server run, the first sleep-until-due woke 0.4ms *before*
+  the watch was due (poll(2) takes whole milliseconds, and the nap was
+  rounded down), found nothing due, and cost a whole 15s interval. Expected
+  to wake on time. Fixed on `watch-backoff`: naps round up.
+- "Under an hour quiet reads every minute" isn't what 1/24 says: the
+  one-minute floor lasts 24 minutes, and an hour quiet is already 2.5
+  minutes. Kept the rule as stated; the docs say which.
+
 - Off a TTY, as Claude Code runs Bash, `gh pr merge 3 --repo …` prints
   nothing and `gh pr ready 3` prints `owner/repo#3`, not a URL — so the
   post-tool hook can't name the PR for either unless the session typed a

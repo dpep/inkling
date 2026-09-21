@@ -163,8 +163,9 @@ again, in a new place. They share `Reference`, `State`, `CheckState`,
 ## Who polls
 
 No daemon, for waiting.md's reasons. The poll step is **one function** —
-`watch::Poller::poll` — that any caller may invoke; nothing owns it. Today
-`events` calls it when the readings have aged past `--refresh` (60s), under a
+`watch::Poller::poll` — that any caller may invoke; nothing owns it. It reads
+the watches that are due by [the schedule](#how-often-a-watch-is-read); the
+resident server calls it when one comes due, and `events` calls it under a
 non-blocking lock so concurrent hooks don't stampede. A shared short-lived
 poller could call it on an interval instead without changing a line of it:
 all the state is on disk, and a poller killed mid-flight costs its own
@@ -204,6 +205,63 @@ news, and costs little — this machine's live store, 2026-09-20, held about
 50 events a day in a 26KB file.
 A watch's default `--ttl` is the same constant (`watches_json::WATCH_TTL`),
 so a watch never outlives what it reported.
+
+## How often a watch is read
+
+> A watch is re-read at **1/24 of how long it has been quiet**, clamped to
+> one minute and one hour. Quiet counts from the latest of its registration,
+> its last transition, and the last time a session touched it.
+
+Every minute for 72 hours is 4,320 readings of something that mostly sits
+still, and a server awake every 15s to take them. GitHub readings are batched
+— one query a tick, about one rate-limit point — so the cost that mattered was
+the resident process never sleeping; Jira is one `acli` per issue, so there
+fewer readings are directly cheaper. Under the rule a watch that never moves
+costs ~170 readings over its 72h (`three_quiet_days_cost_…`): 24 at the
+one-minute floor, ~98 while backing off, 48 hourly. Six hours quiet reads
+every 15 minutes, twelve every 30. The floor lasts 24 minutes, not an hour —
+an hour quiet is already 2.5 minutes. It is one pure function,
+`watches_json::read_every`, with its constants named; docs/deferred.md says
+why it is a placeholder.
+
+- **A touch is what keeps new CI fast.** The `post-tool` hook re-registering
+  a reference — `gh pr view`, a `git push` whose output names it — and an
+  explicit `inkling watch` both count, so a three-day-old pull request you
+  just pushed to is back on one-minute readings at once. A transition counts
+  too: a PR that just went red is likely to move again.
+- **Per watch, not global.** The batch for a poll is the watches that are due;
+  a busy PR beside a quiet one doesn't drag the quiet one along.
+- **Measured from the last reading, not from now.** `next read = last reading
+  + read_every(last reading − quiet since)`, a fixed instant, so the server
+  can sleep until exactly then and every caller agrees on what is due.
+- **The server sleeps until the next watch is due**, never shorter than its
+  `interval` (15s — a watch that can't be read stays due, and that must not
+  be a spin) and never past its idle or lifetime deadline. A tick returns the
+  time it next wants (`serve::Beat`); `Serve` owns the arithmetic.
+- **A doorbell wakes it.** A server asleep for an hour must not sleep through
+  a new watch, or a touch that moved one back to every minute. It listens on a
+  FIFO beside its lock (`serve.wake`), and whatever registers a watch — `watch`,
+  `post-tool`, `subscribe` — writes a byte to it, non-blocking, before
+  deciding whether to spawn a server at all. A pipe rather than a signal: a
+  stale pid can name a stranger, whose default action on SIGUSR1 is to die.
+  Where the FIFO can't be made, a nap is capped at the interval — the old
+  cadence.
+- **`--refresh` is a floor under the schedule, not a schedule of its own.**
+  `events --refresh D` and the prompt hook (60s) read only the watches the
+  schedule says are due, and never one younger than `D`. The other choice —
+  the shorter of the two — would put every watch back on one-minute readings
+  whenever someone was typing, which is the cost the schedule exists to
+  remove. A pull (60s) and the schedule's floor (1 minute) coincide, so the
+  prompt path is now just what the server would have done, done by whoever
+  got there first. `watch` reads what it just registered — due, having never
+  been read or just touched — and no longer everything else besides.
+
+What it costs, plainly: news on a watch quiet for a day can be up to an hour
+late, if nobody touches it. That is the trade, and the numbers that would move
+it are in docs/deferred.md. Two smaller ones: subscriber probes ride on ticks,
+so a departed session is noticed when a watch is next due or at `SessionEnd`,
+rather than within 15s; and `wait` keeps its own interval — it is a
+foreground loop somebody is waiting on, and is not counted in `status`.
 
 ## Where this departed from the brief
 
@@ -386,8 +444,8 @@ tool call:
   process is the cost; the hook is not.
 - **No network, ever.** The first reading is a GitHub round trip — ~0.5s —
   which is not something to spend per tool call. Registration writes the
-  watch and stops; the server's next tick baselines it, since a watch never
-  read is due immediately. The visible consequence: a `git push` whose output
+  watch and stops, and rings the server awake; its tick baselines the watch,
+  since a watch never read is due immediately. The visible consequence: a `git push` whose output
   carries no pull request URL watches nothing rather than going to find one.
   A gap, and the fix is a `--repo`-aware lookup somewhere that is allowed to
   be slow.
@@ -535,7 +593,7 @@ and cursor move writes its own. Read them with `inkling logs -g polled` or
 `-g transition`.
 
 ```
-polled watches why="serve" watched=5 read=5 events=1 failures=0 elapsed_ms=412
+polled watches why="serve" watched=5 github=4 jira=1 read=5 events=1 failures=0 elapsed_ms=412
 transition reference="github.com/dpep/inkling#3" axis="checks" from="pending" to="failure" seq=7 audience=1
 watch registered reference="github.com/dpep/inkling#3" owner="abc-123" deadline="2026-09-21T20:44:00Z"
 subscribed subscriber="abc-123" socket="/tmp/cc-socks/9317.sock" reattached=false

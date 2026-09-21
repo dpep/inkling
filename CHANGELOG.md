@@ -22,6 +22,17 @@
   without CI still answers at once. In a repo with CI, a PR whose checks never start (`[skip ci]`, a
   path filter) now times out (exit 4) rather than exiting 3. Watches see such a head as `pending`
   rather than `none`.
+- **A quiet watch is read less often, and the resident server sleeps between readings.** A watch is
+  read at 1/24 of how long it has been quiet — every minute while it moves, hourly after a day of
+  nothing — instead of every minute for its whole 72 hours (~170 reads rather than 4,320). Touching it
+  again (`gh pr …`, a `git push` naming it, `inkling watch`) puts it back on every minute, so new CI
+  on an old PR is still caught fast. The server sleeps until the next watch is due rather than waking
+  every 15s, and registering a watch wakes it. The cost: news on a PR nobody has touched for a day can
+  be up to an hour late. `events --refresh` is now a floor under that schedule, not a schedule of its
+  own. `inkling status` counts upstream reads beside transitions.
+- **`make install` takes effect without waiting a day.** The resident server stands down when a new
+  build is installed over the binary it was started from, and the next hook starts the new one. It
+  used to keep running the old code until its 24-hour lifetime ran out.
 
 ## 0.1.0 — 2026-09-20
 
