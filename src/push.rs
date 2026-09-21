@@ -30,7 +30,7 @@ use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use crate::domain::watch::{Axis, Event, addressed};
 use crate::ports::Clock;
-use crate::serve::{Pulse, Ticked, Work};
+use crate::serve::{Beat, Pulse, Ticked, Work};
 use crate::watch::Poller;
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -289,13 +289,16 @@ impl Work for Tick<'_> {
         let outcomes = round(self.sessions, &watches, self.clock);
 
         let now = self.clock.now();
-        let pulse = self.poller.store.update(now, |file| {
+        let beat = self.poller.store.update(now, |file| {
             for outcome in &outcomes {
                 outcome.apply(file, now);
             }
-            match should_serve(file, now) {
-                true => Pulse::Busy,
-                false => Pulse::Idle,
+            Beat {
+                pulse: match should_serve(file, now) {
+                    true => Pulse::Busy,
+                    false => Pulse::Idle,
+                },
+                next: file.next_read(),
             }
         })?;
 
@@ -308,13 +311,14 @@ impl Work for Tick<'_> {
             written = outcomes.iter().map(|o| o.written).sum::<usize>(),
             detached = outcomes.iter().filter(|o| o.detach).count(),
             elapsed_ms = (self.clock.now() - started).num_milliseconds(),
-            pulse = match pulse {
+            pulse = match beat.pulse {
                 Pulse::Busy => "busy",
                 Pulse::Idle => "idle",
             },
+            next = beat.next.map(|t| t.to_rfc3339()),
             "serve tick"
         );
-        Ok(pulse)
+        Ok(beat)
     }
 }
 

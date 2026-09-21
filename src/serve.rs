@@ -43,9 +43,23 @@ pub enum Pulse {
     Idle,
 }
 
+/// What a successful tick found, and when it next wants to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Beat {
+    pub pulse: Pulse,
+    /// `None` is no opinion: come back after the interval.
+    pub next: Option<DateTime<Utc>>,
+}
+
+impl From<Pulse> for Beat {
+    fn from(pulse: Pulse) -> Self {
+        Self { pulse, next: None }
+    }
+}
+
 /// What a tick reports back. An error is transient as far as the loop is
 /// concerned: it logs, backs off, and comes round again.
-pub type Ticked = Result<Pulse, Box<dyn std::error::Error>>;
+pub type Ticked = Result<Beat, Box<dyn std::error::Error>>;
 
 /// The injected half of a server: do one tick, and say whether that tick found
 /// a reason to still be here.
@@ -105,7 +119,8 @@ impl Shutdown for Signals {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// How often to tick.
+    /// The shortest nap between ticks, and the nap when the work names no
+    /// time of its own. Otherwise a server sleeps until its work is next due.
     pub interval: Duration,
     /// How long with nothing to do before standing down. Generous on purpose:
     /// a session that detaches and reattaches shouldn't cost a respawn.
@@ -118,6 +133,8 @@ pub struct Config {
     pub lock: PathBuf,
     /// Display only, and disposable — rewritten every tick.
     pub status: PathBuf,
+    /// A FIFO that cuts a nap short: see `ring`.
+    pub doorbell: PathBuf,
 }
 
 impl Config {
@@ -129,6 +146,7 @@ impl Config {
             max_lifetime: Duration::from_secs(60 * 60 * 24),
             lock: dir.join("serve.lock"),
             status: dir.join("serve.json"),
+            doorbell: dir.join("serve.wake"),
         }
     }
 
@@ -238,7 +256,12 @@ pub enum Ensured {
 /// is the arbitration, not a case to guard against.
 pub fn ensure_running(config: &Config, args: &[&str], reason: &str) -> Result<Ensured, ServeError> {
     match FileLock::try_acquire(&config.lock)? {
-        None => Ok(Ensured::AlreadyRunning),
+        None => {
+            // Whatever brought us here may be due now, and the running server
+            // may be asleep until an hour from now.
+            ring(&config.doorbell);
+            Ok(Ensured::AlreadyRunning)
+        }
         Some(lock) => {
             // Released before spawning, or the child we just started would be
             // locked out by its own parent.
@@ -356,6 +379,8 @@ impl Serve<'_> {
         let mut idle_since = None;
         let mut consecutive_failures = 0u32;
         let mut longest_tick = Duration::ZERO;
+        // When the work last said it next wants to run.
+        let mut next = None;
 
         let exit = loop {
             let tick_started = self.clock.now();
@@ -367,9 +392,13 @@ impl Serve<'_> {
             record.last_tick_at = Some(now);
 
             match outcome {
-                Ok(pulse) => {
+                Ok(Beat {
+                    pulse,
+                    next: wanted,
+                }) => {
                     consecutive_failures = 0;
                     record.last_error = None;
+                    next = wanted;
                     idle_since = match pulse {
                         Pulse::Busy => None,
                         Pulse::Idle => idle_since.or(Some(now)),
@@ -410,7 +439,12 @@ impl Serve<'_> {
             if self.shutdown.requested() {
                 break Exit::Signalled;
             }
-            self.sleeper.sleep(self.backoff(consecutive_failures));
+            let nap = match consecutive_failures {
+                0 => self.nap(now, next, started, idle_since),
+                failures => self.backoff(failures),
+            };
+            tracing::debug!(nap_seconds = nap.as_secs(), "napping");
+            self.sleeper.sleep(nap);
         };
 
         let report = Report {
@@ -429,6 +463,30 @@ impl Serve<'_> {
             "serve finished"
         );
         Ok(Outcome::Served(report))
+    }
+
+    /// Until the work is next due, but no later than a deadline of the loop's
+    /// own and never shorter than the interval — something that stays due,
+    /// like a watch that can't be read, must not become a spin.
+    fn nap(
+        &self,
+        now: DateTime<Utc>,
+        next: Option<DateTime<Utc>>,
+        started: DateTime<Utc>,
+        idle_since: Option<DateTime<Utc>>,
+    ) -> Duration {
+        let Some(next) = next else {
+            return self.config.interval;
+        };
+        let lifetime_left = self.config.max_lifetime.saturating_sub(since(started, now));
+        let idle_left =
+            idle_since.map(|start| self.config.idle_after.saturating_sub(since(start, now)));
+        [Some(since(now, next)), Some(lifetime_left), idle_left]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(self.config.interval)
+            .max(self.config.interval)
     }
 
     fn backoff(&self, consecutive_failures: u32) -> Duration {
@@ -463,14 +521,100 @@ fn since(start: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
     (now - start).to_std().unwrap_or(Duration::ZERO)
 }
 
-/// Run a server in this process, with the real clock, the real sleeper, and
-/// real signals. `Serve` is the same loop with those swapped out.
+/// A named pipe beside the lock that anyone may ring to end a server's nap.
+///
+/// A server sleeps until its next watch is due, which can be an hour; a watch
+/// registered or touched meanwhile is due now. A pipe rather than a signal: a
+/// signal needs a pid, and a stale pid can name a stranger, whose default
+/// action on SIGUSR1 is to die.
+pub struct Doorbell {
+    pipe: Option<std::fs::File>,
+    /// The longest nap when there is no pipe to be woken through.
+    fallback: Duration,
+}
+
+impl Doorbell {
+    pub fn install(path: &Path, fallback: Duration) -> Self {
+        let pipe = match open_pipe(path) {
+            Ok(pipe) => Some(pipe),
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "no doorbell; napping at most the interval");
+                None
+            }
+        };
+        Self { pipe, fallback }
+    }
+}
+
+fn open_pipe(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+    }
+    if !std::fs::metadata(path)?.file_type().is_fifo() {
+        return Err(std::io::Error::other("exists and is not a pipe"));
+    }
+    // Opened for writing too, so the server is always a writer of its own
+    // pipe and `poll` never reports a hangup when a ringer closes.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+impl Sleeper for Doorbell {
+    fn sleep(&self, duration: Duration) {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+
+        let Some(pipe) = &self.pipe else {
+            return std::thread::sleep(duration.min(self.fallback));
+        };
+        let mut ready = libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = duration.as_millis().min(i32::MAX as u128) as i32;
+        if unsafe { libc::poll(&mut ready, 1, millis) } > 0 {
+            // Several rings during one nap are one wake-up.
+            let mut rung = [0u8; 64];
+            while matches!((&*pipe).read(&mut rung), Ok(n) if n > 0) {}
+        }
+    }
+}
+
+/// Wake the server, if one is asleep. Never blocks and never fails: with no
+/// server the pipe has no reader, and a non-blocking open refuses at once.
+pub fn ring(path: &Path) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Ok(mut pipe) = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        let _ = pipe.write(&[1]);
+    }
+}
+
+/// Run a server in this process, with the real clock, a sleeper that can be
+/// woken, and real signals. `Serve` is the same loop with those swapped out.
 pub fn run(config: Config, work: &dyn Work) -> Result<Outcome, ServeError> {
+    let doorbell = Doorbell::install(&config.doorbell, config.interval);
     Serve {
         config,
         work,
         clock: &SystemClock,
-        sleeper: &RealSleeper,
+        sleeper: &doorbell,
         shutdown: &Signals::install(),
     }
     .run()
@@ -548,7 +692,7 @@ mod tests {
     #[test]
     fn a_server_with_nothing_to_do_stands_down() {
         let scratch = Scratch::new("idle");
-        let report = serve(scratch.config(), &(|| Ok(Pulse::Idle)));
+        let report = serve(scratch.config(), &(|| Ok(Pulse::Idle.into())));
 
         assert_eq!(report.exit, Exit::Idle);
         // First tick starts the idle run at t=0; ticks at 1s..10s follow.
@@ -566,8 +710,8 @@ mod tests {
             &(|| {
                 ticks.set(ticks.get() + 1);
                 match ticks.get() <= 5 {
-                    true => Ok(Pulse::Busy),
-                    false => Ok(Pulse::Idle),
+                    true => Ok(Pulse::Busy.into()),
+                    false => Ok(Pulse::Idle.into()),
                 }
             }),
         );
@@ -587,7 +731,7 @@ mod tests {
             max_lifetime: Duration::from_secs(60),
             ..scratch.config()
         };
-        let report = serve(config, &(|| Ok(Pulse::Busy)));
+        let report = serve(config, &(|| Ok(Pulse::Busy.into())));
 
         assert_eq!(report.exit, Exit::MaxLifetime);
         assert_eq!(report.uptime, Duration::from_secs(60));
@@ -603,7 +747,7 @@ mod tests {
                 ticks.set(ticks.get() + 1);
                 match ticks.get() {
                     1..=3 => Err("github is having a moment".into()),
-                    _ => Ok(Pulse::Idle),
+                    _ => Ok(Pulse::Idle.into()),
                 }
             }),
         );
@@ -640,7 +784,7 @@ mod tests {
                 ticks.set(ticks.get() + 1);
                 match ticks.get() {
                     1 => Err("blip".into()),
-                    _ => Ok(Pulse::Idle),
+                    _ => Ok(Pulse::Idle.into()),
                 }
             }),
         );
@@ -660,7 +804,7 @@ mod tests {
         let signals = Signals::install();
         let work = || {
             unsafe { libc::raise(libc::SIGTERM) };
-            Ok(Pulse::Busy)
+            Ok(Pulse::Busy.into())
         };
         let outcome = Serve {
             config: scratch.config(),
@@ -690,7 +834,7 @@ mod tests {
 
         let clock = FixedClock::at("2026-09-20T12:00:00Z");
         let sleeper = Fast(&clock);
-        let work = || Ok(Pulse::Idle);
+        let work = || Ok(Pulse::Idle.into());
         let outcome = Serve {
             config,
             work: &work,
@@ -806,7 +950,7 @@ mod tests {
             &(|| {
                 seen.borrow_mut()
                     .push(read_record(&status).map(|record| (record.pid, record.ticks)));
-                Ok(Pulse::Idle)
+                Ok(Pulse::Idle.into())
             }),
         );
 
@@ -817,12 +961,155 @@ mod tests {
         );
     }
 
+    /// Every tick's time, for asserting how they are spaced.
+    fn ticks_at(config: Config, next: impl Fn(DateTime<Utc>) -> Beat) -> Vec<DateTime<Utc>> {
+        let clock = FixedClock::at("2026-09-20T12:00:00Z");
+        let sleeper = Fast(&clock);
+        let times = std::cell::RefCell::new(Vec::new());
+        let work = || {
+            let now = clock.now();
+            times.borrow_mut().push(now);
+            Ok(next(now))
+        };
+        Serve {
+            config,
+            work: &work,
+            clock: &clock,
+            sleeper: &sleeper,
+            shutdown: &Never,
+        }
+        .run()
+        .expect("served");
+        times.into_inner()
+    }
+
+    fn gaps(times: &[DateTime<Utc>]) -> Vec<i64> {
+        times
+            .windows(2)
+            .map(|w| (w[1] - w[0]).num_seconds())
+            .collect()
+    }
+
+    #[test]
+    fn a_server_sleeps_until_its_work_is_next_due() {
+        // The saving: a server whose watches are quiet wakes when one of them
+        // is due, not every interval.
+        let scratch = Scratch::new("sleeps");
+        let config = Config {
+            max_lifetime: Duration::from_secs(3600),
+            ..scratch.config()
+        };
+        let times = ticks_at(config, |now| Beat {
+            pulse: Pulse::Busy,
+            next: Some(now + chrono::TimeDelta::minutes(20)),
+        });
+        assert_eq!(gaps(&times), [1200, 1200, 1200]);
+    }
+
+    #[test]
+    fn a_server_never_ticks_faster_than_its_interval() {
+        // A watch that can't be read stays due; without a floor that is a spin.
+        let scratch = Scratch::new("floor");
+        let config = Config {
+            max_lifetime: Duration::from_secs(5),
+            ..scratch.config()
+        };
+        let times = ticks_at(config, |now| Beat {
+            pulse: Pulse::Busy,
+            next: Some(now - chrono::TimeDelta::minutes(5)),
+        });
+        assert_eq!(gaps(&times), [1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn a_long_sleep_still_ends_at_the_idle_deadline() {
+        let scratch = Scratch::new("idle-deadline");
+        let times = ticks_at(scratch.config(), |now| Beat {
+            pulse: Pulse::Idle,
+            next: Some(now + chrono::TimeDelta::hours(1)),
+        });
+        assert_eq!(gaps(&times), [10], "idle for 10s, then gone");
+    }
+
+    #[test]
+    fn a_long_sleep_still_ends_at_the_lifetime_cap() {
+        let scratch = Scratch::new("lifetime-deadline");
+        let config = Config {
+            max_lifetime: Duration::from_secs(90),
+            ..scratch.config()
+        };
+        let times = ticks_at(config, |now| Beat {
+            pulse: Pulse::Busy,
+            next: Some(now + chrono::TimeDelta::hours(1)),
+        });
+        assert_eq!(gaps(&times), [90]);
+    }
+
+    #[test]
+    fn a_rung_doorbell_cuts_a_nap_short() {
+        // How a new watch is read promptly by a server sleeping for an hour.
+        let scratch = Scratch::new("doorbell");
+        let config = scratch.config();
+        let bell = Doorbell::install(&config.doorbell, Duration::from_secs(60));
+
+        let started = std::time::Instant::now();
+        bell.sleep(Duration::from_millis(50));
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "unrung, it sleeps"
+        );
+
+        ring(&config.doorbell);
+        let started = std::time::Instant::now();
+        bell.sleep(Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let started = std::time::Instant::now();
+        bell.sleep(Duration::from_millis(50));
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "one ring wakes it once"
+        );
+    }
+
+    #[test]
+    fn ringing_with_nobody_home_is_harmless() {
+        let scratch = Scratch::new("nobody");
+        let config = scratch.config();
+        ring(&config.doorbell); // no such file
+        drop(Doorbell::install(&config.doorbell, Duration::from_secs(60)));
+        let started = std::time::Instant::now();
+        ring(&config.doorbell); // a FIFO with no reader
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn without_a_doorbell_a_nap_is_cut_to_the_fallback() {
+        // Somewhere a FIFO can't be made, nothing can wake a server, so it
+        // keeps its old cadence rather than sleeping through a new watch.
+        let bell = Doorbell::install(
+            Path::new("/nonexistent/dir/serve.wake"),
+            Duration::from_millis(20),
+        );
+        let started = std::time::Instant::now();
+        bell.sleep(Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn the_running_server_records_itself() {
         let scratch = Scratch::new("record");
         let config = scratch.config();
         let status = config.status.clone();
-        serve(config, &(|| Ok(Pulse::Idle)));
+        serve(config, &(|| Ok(Pulse::Idle.into())));
 
         let record = read_record(&status).expect("a record was written");
         assert_eq!(record.pid, std::process::id());
