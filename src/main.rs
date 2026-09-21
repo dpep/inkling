@@ -368,6 +368,15 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Where the log files are, for reading them back. `off` suppresses writing
+/// them, not reading whatever is already there.
+fn log_directory(common: &Common) -> PathBuf {
+    match common.log_dir.as_deref() {
+        Some("off") | None => obs::default_log_directory(),
+        Some(dir) => PathBuf::from(dir),
+    }
+}
+
 fn config_path(common: &Common) -> PathBuf {
     common.config.clone().unwrap_or_else(|| {
         let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -401,10 +410,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             follow,
             path: show_path,
         } => {
-            let directory = match cli.common.log_dir.as_deref() {
-                Some("off") | None => obs::default_log_directory(),
-                Some(dir) => PathBuf::from(dir),
-            };
+            let directory = log_directory(&cli.common);
             if *show_path {
                 println!("{}", directory.display());
                 return Ok(0);
@@ -638,6 +644,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             println!();
             println!("github      {}", credentials(&config));
+
+            println!();
+            last_day_out(&log_directory(&cli.common), now);
             Ok(0)
         }
         Command::Watch { targets, ttl, json } => {
@@ -2050,6 +2059,34 @@ fn serve_out(status: &inkling::serve::Status) {
         ),
         (false, None) => println!("serving     no"),
     }
+}
+
+/// What the last day cost and produced, read back out of the log.
+///
+/// "Is inkling being used, and is it working" was five greps: the counts are
+/// spread across a hook, a resident server and a terminal, and only the log
+/// sees all three. This is the one place that adds them up. Every line here
+/// names the `inkling logs -g` that shows the detail behind it.
+fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
+    let from = (now - TimeDelta::hours(24))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let lines = obs::since(directory, &from);
+    let tally = obs::Tally::of(lines.iter().map(String::as_str));
+
+    println!("last 24h    {} sessions subscribed", tally.subscribed);
+    println!(
+        "  watches   {} registered, {} transitions",
+        tally.watches, tally.transitions
+    );
+    println!(
+        "  delivered {} pushed, {} withheld, {} pulled",
+        tally.pushed, tally.withheld, tally.pulls
+    );
+    println!(
+        "  trouble   {} hook failures, {} references unread, {} errors",
+        tally.hook_failures, tally.unread, tally.errors
+    );
 }
 
 /// Who is reading, where each one has got to, and whether it can be pushed
