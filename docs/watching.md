@@ -262,7 +262,7 @@ an hour quiet is already 2.5 minutes. It is one pure function,
 why it is a placeholder.
 
 - **A touch is what keeps new CI fast.** The `post-tool` hook re-registering
-  a reference — `gh pr view`, a `git push` whose output names it — and an
+  a reference — `gh pr view`, a `git push` to its branch — and an
   explicit `inkling watch` both count, so a three-day-old pull request you
   just pushed to is back on one-minute readings at once. A transition counts
   too: a PR that just went red is likely to move again.
@@ -479,18 +479,71 @@ tool call:
   command that isn't a candidate, **3ms** when it is and the store is
   written, against a **5.5ms** floor for starting the binary at all. The
   process is the cost; the hook is not.
-- **No network, ever.** The first reading is a GitHub round trip — ~0.5s —
-  which is not something to spend per tool call. Registration writes the
-  watch and stops, and rings the server awake; its tick baselines the watch,
-  since a watch never read is due immediately. The visible consequence: a `git push` whose output
-  carries no pull request URL watches nothing rather than going to find one.
-  A gap, and the fix is a `--repo`-aware lookup somewhere that is allowed to
-  be slow.
+- **No network, except to name a pushed branch's pull request.** The first
+  reading is a GitHub round trip — ~0.5s — which is not something to spend
+  per tool call. Registration writes the watch and stops, and rings the
+  server awake; its tick baselines the watch, since a watch never read is due
+  immediately. The one lookup is below, and it is allowed because it is rare
+  and the hook runs async.
 - **Narrow rather than clever.** References come from URLs, which are
-  unambiguous, and from Jira keys only where they were arguments to `acli`.
-  Bare `KEY-123` in output is not read: `UTF-8`, `SHA-256` and `CVE-2024` are
-  all issue keys by shape. `gh pr list` is excluded because it names
-  everybody's pull requests, not the caller's.
+  unambiguous, from Jira keys only where they were arguments to `acli`, and
+  from the branches git itself reports a push landed. Bare `KEY-123` in
+  output is not read: `UTF-8`, `SHA-256` and `CVE-2024` are all issue keys by
+  shape. `gh pr list` is excluded because it names everybody's pull requests,
+  not the caller's.
+
+### A push watches the pull requests it updated
+
+`git push` to an existing pull request prints no URL — measured on the probe
+repository, the whole output is `To github.com:owner/repo.git` and one
+`abc..def  branch -> branch` line — so until this, updating a pull request,
+the commonest way to start CI, watched nothing. The rule:
+
+> A push watches every **open** pull request whose head is **exactly** the
+> repository and branch git says it pushed to.
+
+Read from git's own report, not the command: the `To <remote>` line names the
+repository (scp-style, `ssh://` or `https://`, on a configured GitHub host),
+and each ref line that *landed* — fast-forward, `+` forced, `* [new branch]` —
+names a remote branch. Tags, deletions, rejections and `up to date` changed no
+pull request. `git -C <dir> push` counts too; the gate used to miss it.
+
+Then, per branch, cheapest first:
+
+1. **One of this session's live watches has that head** → touch it: the
+   deadline extends and the read schedule snaps back to one minute, as
+   re-registering does. No network. This is the second push to a branch,
+   which is the common case.
+2. **GitHub offered to create a pull request for it** (`Create a pull request
+   for 'x' on GitHub by visiting`, printed before the `To` it belongs to) →
+   there is none. Nothing is asked.
+3. **Otherwise one GraphQL request** for all such branches
+   (`GitHubProvider::pushed_to`): the pushed repository's open pull requests
+   with that `headRefName`, and its parent's, since a fork's pull requests
+   live upstream. Each is kept only if its `headRepository` is the pushed
+   repository — upstream `master` is also every stranger's branch, recorded
+   as five open pull requests on rust-lang/rust. Found ones register exactly
+   as a URL would (`matched="git push"`), within the same cap of 8, with
+   their head stored. Measured: **one** rate-limit point, ~0.5s, bounded at
+   10s (`PUSH_LOOKUP_BUDGET`) around the token command and the request.
+
+The head lives **on the watch** (`Watch::head`), written by the lookup and
+refreshed by every reading, which now asks for `headRefName` and
+`headRepository` in the same query. Not a branch → PR map of its own: that
+would go stale the day a branch gets a new pull request, while a watch can't
+outlive the pull request it describes. After a watch expires the next push
+simply asks again.
+
+- **Several open pull requests from one branch** (different bases) are all
+  watched. The push changed every one of them, and each runs its own CI; the
+  cap bounds it.
+- **Only this session's watches are consulted for the touch.** Another
+  session watching the same pull request doesn't spare the lookup; a rule
+  about whose watches count would be a second sentence.
+- **A miss is the failure mode, never the wrong pull request.** An unreadable
+  repository, a deleted fork, a lookup that fails or times out, or more than
+  100 same-named branches upstream all watch nothing, and say so in the log
+  (`could not look up a push`, `gave up looking up a push`).
 
 An already-terminal reference is only discovered to be terminal at that first
 reading — and that path was already right: the baseline emits nothing, and a
@@ -507,13 +560,13 @@ of noise.
   `inkling logs -g transition` records every one with its reference, its
   sequence number and the size of its audience. If that turns out not to be
   enough when something goes wrong, the flag is one line.
-- **A pull request found by looking it up.** `git push` on a remote that
-  prints no URL, and `gh pr view 7 --repo owner/repo` with no URL anywhere,
-  both leave the hook with a number and a repo but no reference it is willing
-  to build. It could — `--repo owner/repo` plus a number is complete — but
-  `gh pr checks 7` in a repository with a tracked upstream is not, and
-  resolving it means asking. What would change this: the number of `git push`
-  lines in the log with no `watch registered automatically` beside them.
+- **A pull request named by number.** Built for `git push` (above).
+  `gh pr view 7 --repo owner/repo` with no URL anywhere still leaves the hook
+  with a number and a repo but no reference it is willing to build. It could
+  — `--repo owner/repo` plus a number is complete — but `gh pr checks 7` in a
+  repository with a tracked upstream is not, and resolving it means asking.
+  What would change this: dogfood lines about a `gh pr` command that should
+  have watched something and didn't.
 - **Tools other than Bash.** An Edit that writes a PR number, an MCP call to
   GitHub. Bash is where references appear today; the gate is one string
   comparison, so a second tool is a small change when one earns it.
@@ -592,11 +645,14 @@ And the caps, which is what the worst case is made of:
 | a connect or a write to a session socket | **3s** each |
 | messages pushed to one session | **5 per 5 minutes** (`PUSH_BUDGET`) |
 | references one tool call may register | **8** (`MAX_REFERENCES`) |
+| looking up the pull requests a push updated | **10s**, then `gave up looking up a push` (`PUSH_LOOKUP_BUDGET`; measures 0.5s) |
 
 So a prompt hook's worst case is 3s of refresh plus 250ms of lock plus the
 process: **~3.3s against a 30s budget**, whatever GitHub, `gh`, `acli` or
-another inkling is doing. A `post-tool` or `session-end` hook never looks
-upstream at all, so theirs is 250ms plus the process.
+another inkling is doing. A `session-end` hook never looks upstream at all,
+so its is 250ms plus the process; so is `post-tool`'s, except after a push to
+a branch none of the session's watches knows, where it adds up to 10s of
+lookup and one more lock — off the session's clock, since that hook is async.
 
 What that costs, plainly: a hook that gives up **skips a refresh, not a
 message**. The feed is complete either way — every transition is in the log for

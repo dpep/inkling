@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`git push` to an existing pull request now watches it.** The push prints no URL, so the
+  `post-tool` hook used to register nothing. It now reads the repository and branch git reports,
+  touches the session's own watch on that branch without asking GitHub, and otherwise looks it up
+  once — every open pull request whose head is exactly that repository and branch, upstream of a
+  fork included, never a stranger's branch of the same name. `git -C <dir> push` counts too. The
+  lookup is the hook's only network call (~0.5s, capped at 10s): if you configured `PostToolUse`
+  from the README rather than the plugin, add `"async": true` to it.
 - **Installing a new build no longer leaves nothing polling.** A server that sees a new build, or
   reaches its 24h cap, while somebody is still watching now starts its successor before it exits;
   before, nothing polled until a hook happened to start one, and an idle session waiting on CI
