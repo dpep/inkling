@@ -205,7 +205,12 @@ enum Command {
     /// The resident server. Started when it is needed and gone when it
     /// isn't; nothing runs this by hand.
     #[command(hide = true)]
-    Serve,
+    Serve {
+        /// Wake the running server, if any, and exit. For `make install`: a
+        /// shell can't write to a FIFO without blocking when nobody reads it.
+        #[arg(long)]
+        ring: bool,
+    },
     /// Show the search window, tracked records, and credential status.
     Status,
     /// Inspect or create the config file.
@@ -420,6 +425,11 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             return logs(&directory, *lines, grep.as_deref(), *follow);
         }
+        // A broken config mustn't fail the install that rings.
+        Command::Serve { ring: true } => {
+            inkling::serve::ring(&inkling::serve::Config::in_dir(serve_dir(&cli.common)).doorbell);
+            return Ok(0);
+        }
         // Before the config load, so a config that won't parse is this hook's
         // failure rather than the session's — see `swallowing`.
         Command::Hook { event } => {
@@ -551,9 +561,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
             Ok(0)
         }
-        // Handled above, before the config load it must not depend on.
-        Command::Hook { .. } => unreachable!(),
-        Command::Serve => {
+        // Handled above, before the config load they must not depend on.
+        Command::Hook { .. } | Command::Serve { ring: true } => unreachable!(),
+        Command::Serve { ring: false } => {
             let token = Secret::resolve(
                 config.github.token_env.as_deref(),
                 config.github.token_command.as_deref(),
@@ -1341,17 +1351,20 @@ fn short(id: &str) -> String {
 /// `--watches` at a scratch directory moves the whole server with it instead
 /// of leaving a test talking to the real one's lock.
 fn serve_config(config: &Config, common: &Common) -> inkling::serve::Config {
-    let dir = watch_store(common)
-        .path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(inkling::serve::Config::default_dir);
     inkling::serve::Config {
         interval: config.serve.interval,
         idle_after: config.serve.idle_after,
         max_lifetime: config.serve.max_lifetime,
-        ..inkling::serve::Config::in_dir(dir)
+        ..inkling::serve::Config::in_dir(serve_dir(common))
     }
+}
+
+fn serve_dir(common: &Common) -> PathBuf {
+    watch_store(common)
+        .path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(inkling::serve::Config::default_dir)
 }
 
 /// Wake the running server, or start one if there is now a reason for one.
@@ -2423,6 +2436,36 @@ mod tests {
         let default = inkling::adapters::watches_json::WATCH_TTL;
         assert_eq!(ttl, default.to_std().unwrap());
         assert!(default <= inkling::adapters::watches_json::RETENTION);
+    }
+
+    #[test]
+    fn ringing_the_server_needs_neither_a_server_nor_a_config() {
+        // `make install` rings after installing, and must never fail for it.
+        use clap::Parser;
+        let dir = std::env::temp_dir().join(format!("inkling-ring-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(&config, "this is [not toml").unwrap();
+        let watches = dir.join("watches.json");
+
+        let cli = super::Cli::try_parse_from([
+            "inkling".as_ref(),
+            "serve".as_ref(),
+            "--ring".as_ref(),
+            "--config".as_ref(),
+            config.as_os_str(),
+            "--watches".as_ref(),
+            watches.as_os_str(),
+        ])
+        .unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(super::run(&cli), Ok(0));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(
+            !dir.join("serve.wake").exists(),
+            "ringing makes no doorbell; a server does"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
