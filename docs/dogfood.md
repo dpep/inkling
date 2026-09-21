@@ -11,6 +11,17 @@ fixed, say where and leave the line.
   post-tool hook can't name the PR for either unless the session typed a
   URL. Expected the commands that change a PR to be the easiest to read.
   It's why self-caused pushes weren't suppressed (watching.md).
+- For a second or two after a force-push, GitHub still serves the PR's
+  *previous* head and its rollup. On the probe, a wait started at +1s
+  answered `precluded, checks failure` about the commit just replaced —
+  installed build and fix alike. Expected an answer about what I pushed.
+  A green old head would be a false `met`. Nothing GitHub returns tells the
+  two apart; only the caller knows the new sha. Open.
+- Codecov and Claude check suites sit `QUEUED` with no runs on every commit
+  of every dpep repo, CI or not, and never make a rollup. So "the head has
+  check suites" can't tell a repo without CI from a fresh push.
+- The installed build precluded at 0s with `no checks` on the #13 fix's own
+  PR (#17), started a second after opening it — the bug, live, once more.
 - Marking #14 ready pushed `state draft → open`, and merging it pushed
   `open → merged` — both news of what this session had just done itself.
   Expected a push to be something I didn't already know. Earlier PRs didn't
@@ -30,7 +41,10 @@ fixed, say where and leave the line.
   at 0s: `no checks … precluded after 0s (1 poll)`. The new head had no
   rollup yet; `gh pr checks` showed `test pending` seconds later. Expected it
   to wait for the checks the repo always runs. The no-checks shortcut is
-  meant for repos without CI, but a fresh push looks the same. Open.
+  meant for repos without CI, but a fresh push looks the same. Fixed on
+  `wait-fresh-push`: a head with no rollup reads as pending when any of the
+  repo's last five PRs had checks, and as none (answered at once) otherwise.
+  See waiting.md.
 - #12 was pushed `checks pending → success` twice, which looked like a
   duplicate. It wasn't: CI triggers on `pull_request: edited`, so writing the
   dogfood note into the PR description (as CLAUDE.md asks) re-ran CI, and
