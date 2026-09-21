@@ -30,6 +30,9 @@
   every 15s, and registering a watch wakes it. The cost: news on a PR nobody has touched for a day can
   be up to an hour late. `events --refresh` is now a floor under that schedule, not a schedule of its
   own. `inkling status` counts upstream reads beside transitions.
+- **`make install` takes effect without waiting a day.** The resident server stands down when a new
+  build is installed over the binary it was started from, and the next hook starts the new one. It
+  used to keep running the old code until its 24-hour lifetime ran out.
 
 ## 0.1.0 — 2026-09-20
 

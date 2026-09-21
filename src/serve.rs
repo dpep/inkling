@@ -135,6 +135,9 @@ pub struct Config {
     pub status: PathBuf,
     /// A FIFO that cuts a nap short: see `ring`.
     pub doorbell: PathBuf,
+    /// The binary this server was started from. When a new build is renamed
+    /// over it, the server stands down so the next caller spawns the new one.
+    pub executable: Option<PathBuf>,
 }
 
 impl Config {
@@ -147,6 +150,7 @@ impl Config {
             lock: dir.join("serve.lock"),
             status: dir.join("serve.json"),
             doorbell: dir.join("serve.wake"),
+            executable: None,
         }
     }
 
@@ -172,6 +176,8 @@ pub enum Exit {
     Idle,
     MaxLifetime,
     Signalled,
+    /// A new build was installed over the binary it is running.
+    Replaced,
 }
 
 impl Exit {
@@ -180,6 +186,7 @@ impl Exit {
             Exit::Idle => "idle",
             Exit::MaxLifetime => "max_lifetime",
             Exit::Signalled => "signalled",
+            Exit::Replaced => "replaced",
         }
     }
 }
@@ -371,6 +378,7 @@ impl Serve<'_> {
 
         // When the current run of nothing-to-do began. `None` means the last
         // tick found work.
+        let built = self.config.executable.as_deref().and_then(build_of);
         let mut idle_since = None;
         let mut consecutive_failures = 0u32;
         let mut longest_tick = Duration::ZERO;
@@ -430,6 +438,12 @@ impl Serve<'_> {
             }
             if since(started, now) >= self.config.max_lifetime {
                 break Exit::MaxLifetime;
+            }
+            if let (Some(built), Some(path)) = (built, &self.config.executable)
+                && build_of(path) != Some(built)
+            {
+                tracing::info!(executable = %path.display(), "a new build was installed; standing down for it");
+                break Exit::Replaced;
             }
             if self.shutdown.requested() {
                 break Exit::Signalled;
@@ -508,6 +522,17 @@ fn atomically(path: &Path, record: &Record) -> std::io::Result<()> {
     let temp = path.with_extension("tmp");
     std::fs::write(&temp, serde_json::to_string_pretty(record)?)?;
     std::fs::rename(&temp, path)
+}
+
+/// What identifies one build of the binary at `path`: a rename over it changes
+/// the inode, a write in place the mtime. The path, not the running image —
+/// macOS has no `/proc/self/exe` to name the old inode by.
+type Build = (u64, u64, i64, i64);
+
+fn build_of(path: &Path) -> Option<Build> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino(), meta.mtime(), meta.mtime_nsec()))
 }
 
 /// Wall-clock durations don't go backwards here; a clock that jumps reads as
@@ -604,7 +629,9 @@ pub fn ring(path: &Path) {
 
 /// Run a server in this process, with the real clock, a sleeper that can be
 /// woken, and real signals. `Serve` is the same loop with those swapped out.
-pub fn run(config: Config, work: &dyn Work) -> Result<Outcome, ServeError> {
+pub fn run(mut config: Config, work: &dyn Work) -> Result<Outcome, ServeError> {
+    // The path it was launched as: after a rename-over it names the new file.
+    config.executable = config.executable.or_else(|| std::env::current_exe().ok());
     let doorbell = Doorbell::install(&config.doorbell, config.interval);
     Serve {
         config,
@@ -731,6 +758,49 @@ mod tests {
 
         assert_eq!(report.exit, Exit::MaxLifetime);
         assert_eq!(report.uptime, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_server_stands_down_when_its_binary_is_replaced() {
+        // Found live: `make install` renames a new build over the old one,
+        // and the running server kept pushing with the old code until its
+        // 24h lifetime ran out.
+        let scratch = Scratch::new("replaced");
+        let exe = scratch.0.join("inkling");
+        std::fs::write(&exe, "old build").unwrap();
+        let config = Config {
+            executable: Some(exe.clone()),
+            ..scratch.config()
+        };
+        let ticks = Cell::new(0);
+        let report = serve(
+            config,
+            &(|| {
+                ticks.set(ticks.get() + 1);
+                if ticks.get() == 3 {
+                    let new = scratch.0.join("inkling.new");
+                    std::fs::write(&new, "new build").unwrap();
+                    std::fs::rename(&new, &exe).unwrap();
+                }
+                Ok(Pulse::Busy.into())
+            }),
+        );
+
+        assert_eq!(report.exit, Exit::Replaced);
+        assert_eq!(report.ticks, 3, "it noticed on the tick it happened");
+    }
+
+    #[test]
+    fn an_untouched_binary_changes_nothing() {
+        let scratch = Scratch::new("untouched");
+        let exe = scratch.0.join("inkling");
+        std::fs::write(&exe, "build").unwrap();
+        let config = Config {
+            executable: Some(exe),
+            ..scratch.config()
+        };
+        let report = serve(config, &(|| Ok(Pulse::Idle.into())));
+        assert_eq!(report.exit, Exit::Idle);
     }
 
     #[test]

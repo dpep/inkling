@@ -6,6 +6,14 @@ fixed, say where and leave the line.
 
 ## 2026-09-20
 
+- After `make install` of #16 at 20:08, the resident server started at
+  20:05 kept running the old build and pushed `#17 state draft → open`,
+  which #16 had stopped pushing. Expected an install to take effect; since
+  `make install` renames a copy over the binary, the running process keeps
+  the old inode and only its 24h lifetime would have replaced it. Fixed on
+  `watch-backoff`: the server stats the path it was launched as each tick
+  and stands down when the build there changes (at its next wake — at most
+  its current nap, which the next watch change cuts short).
 - Nothing woke a running server early. "Keep whatever wakes it" turned
   out to mean the 15s tick itself, so a server allowed to sleep until the
   next watch came due would have slept through a new watch or a touch for up
