@@ -351,6 +351,12 @@ fn main() {
     let code = match run(&cli) {
         Ok(code) => code,
         Err(error) => {
+            // Both sinks, deliberately. A server spawned by a hook has its
+            // stdio on /dev/null and no terminal to print to, so until this
+            // line existed a `serve` that died on its first act — an
+            // unresolvable token, most often — died without saying anything
+            // anywhere, while every hook went on spawning another one.
+            tracing::error!(error, "inkling failed");
             eprintln!("inkling: {error}");
             2
         }
