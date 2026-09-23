@@ -196,7 +196,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 20) {{ nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} }} }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -385,13 +385,74 @@ struct Rollup {
     contexts: Contexts,
 }
 
-/// The rollup's constituents. Measured 2026-09-20: a 3-reference batch costs
-/// one rate-limit point with this field or without it, so naming the failing
-/// check is free — same request, same point.
+/// The rollup's constituents. Measured 2026-09-20 and again 2026-09-22: a
+/// 3-reference batch costs one rate-limit point with these fields or without
+/// them, and one point still at `first: 100` returning 130 contexts — GitHub
+/// charges for what comes back, so neither the page nor the fields cost
+/// anything.
 #[derive(Debug, Deserialize, Default)]
 struct Contexts {
+    /// How many there are, against however many fit on the page.
+    #[serde(default, rename = "totalCount")]
+    total_count: usize,
     #[serde(default)]
     nodes: Vec<Context>,
+}
+
+/// What tells one check from another: the same job name under a different
+/// app, workflow, or triggering event is a different check.
+type Identity<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+impl Contexts {
+    /// The newest run of each check, in the order GitHub listed them.
+    ///
+    /// A context is one check *run*, not one check: a run superseded on the
+    /// same commit stays here beside its replacement, keeping its conclusion
+    /// forever. A context with no identity can't be shown to be superseded,
+    /// so it stays.
+    fn latest(&self) -> Vec<&Context> {
+        let mut newest: HashMap<Identity<'_>, u64> = HashMap::new();
+        for (identity, run) in self.nodes.iter().filter_map(Context::identity) {
+            let seen = newest.entry(identity).or_insert(run);
+            *seen = (*seen).max(run);
+        }
+        self.nodes
+            .iter()
+            .filter(|context| {
+                context
+                    .identity()
+                    .is_none_or(|(identity, run)| newest[&identity] == run)
+            })
+            .collect()
+    }
+
+    /// What the checks now on the commit add up to, or `None` when they
+    /// can't be read well enough to say.
+    ///
+    /// Three ways they can't, and one reason: what wasn't read can't be
+    /// judged, and can't clear a check either. No contexts at all, more of
+    /// them than the page held, or one this query doesn't select — a legacy
+    /// commit status arrives with neither a name nor a conclusion.
+    fn verdict(&self) -> Option<CheckState> {
+        let latest = self.latest();
+        if latest.is_empty()
+            || self.nodes.len() < self.total_count
+            || latest.iter().any(|context| context.identity().is_none())
+        {
+            return None;
+        }
+        Some(if latest.iter().any(|context| context.failed()) {
+            CheckState::Failure
+        } else if latest.iter().any(|context| context.conclusion.is_none()) {
+            // A running or queued check run has no conclusion yet.
+            CheckState::Pending
+        } else {
+            // SKIPPED, NEUTRAL and STALE are left: none of them is a
+            // verdict against the change, and GitHub's own rollup reads a
+            // commit of successes and skips as SUCCESS.
+            CheckState::Success
+        })
+    }
 }
 
 /// Only the `CheckRun` half of the union is selected. A repository still on
@@ -416,12 +477,68 @@ impl Context {
         let slug = self.check_suite.as_ref()?.app.as_ref()?.slug.as_str();
         (slug == "github-actions").then_some(self.database_id?)
     }
+
+    /// Which check this is a run of, and which run of it.
+    ///
+    /// Keyed as `gh pr checks` keys it, whose view of a re-run commit this
+    /// matches — with the app added, so two apps that happen to name a check
+    /// the same aren't merged. Erring wide only ever keeps a spare entry;
+    /// merging two real checks hides a failure.
+    ///
+    /// The run is the check run's id rather than `startedAt`, which `gh`
+    /// sorts on: it is monotonic and always present, so it needs neither
+    /// timestamp parsing nor a tie-break. `None` for a context this query
+    /// doesn't select — a legacy commit status has neither field.
+    fn identity(&self) -> Option<(Identity<'_>, u64)> {
+        let name = self.name.as_deref()?;
+        let run = self.database_id?;
+        let suite = self.check_suite.as_ref();
+        let app = suite
+            .and_then(|suite| suite.app.as_ref())
+            .map_or("", |app| app.slug.as_str());
+        let workflow_run = suite.and_then(|suite| suite.workflow_run.as_ref());
+        let event = workflow_run.map_or("", |run| run.event.as_str());
+        let workflow = workflow_run
+            .and_then(|run| run.workflow.as_ref())
+            .map_or("", |workflow| workflow.name.as_str());
+        Some(((app, workflow, event, name), run))
+    }
+
+    /// Conclusions that mean the check did not pass.
+    ///
+    /// `CANCELLED` among them: measured 2026-09-22 on a run cancelled with
+    /// nothing replacing it, GitHub's rollup, `gh pr checks` and the merge
+    /// box all call that red. Superseded cancellations, the noisy kind, are
+    /// gone by the time this is asked — they are never the newest run.
+    fn failed(&self) -> bool {
+        matches!(
+            self.conclusion.as_deref(),
+            Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE")
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct CheckSuite {
     #[serde(default)]
     app: Option<App>,
+    #[serde(default, rename = "workflowRun")]
+    workflow_run: Option<WorkflowRun>,
+}
+
+/// Null for a check run from an app that isn't Actions.
+#[derive(Debug, Deserialize)]
+struct WorkflowRun {
+    #[serde(default)]
+    event: String,
+    #[serde(default)]
+    workflow: Option<Workflow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Workflow {
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -449,13 +566,7 @@ impl Author {
 }
 
 impl PullRequest {
-    /// GitHub reports merge status, draft status, and review decision
-    /// independently. Inkling owns the collapse into one lifecycle position —
-    /// this is the business logic, and it deliberately lives here rather than
-    /// being asked of a model.
-    /// GitHub reports more rollup states than matter here. Anything not
-    /// plainly finished reads as pending, so an unfamiliar one makes a wait
-    /// keep waiting rather than declare a result it didn't get.
+    /// The head commit's rollup, or `None` if the commit has no check suite.
     fn rollup(&self) -> Option<&Rollup> {
         self.commits
             .nodes
@@ -469,14 +580,15 @@ impl PullRequest {
     ///
     /// Not "the first one that isn't green": recorded from rust-lang/rust the
     /// list runs successes, then a `SKIPPED`, then the failure — so anything
-    /// looser names a job that did nothing wrong.
+    /// looser names a job that did nothing wrong. And only among the runs
+    /// that still stand, or a superseded one names the wrong check and hands
+    /// out a log link that 404s once its logs are collected.
     fn failing(&self) -> Option<FailedCheck> {
-        let context = self.rollup()?.contexts.nodes.iter().find(|context| {
-            matches!(
-                context.conclusion.as_deref(),
-                Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE")
-            )
-        })?;
+        let contexts = &self.rollup()?.contexts;
+        let context = contexts
+            .latest()
+            .into_iter()
+            .find(|context| context.failed())?;
         let name = context
             .name
             .clone()
@@ -494,17 +606,31 @@ impl PullRequest {
         })
     }
 
+    /// GitHub reports more rollup states than matter here. Anything not
+    /// plainly finished reads as pending, so an unfamiliar one makes a wait
+    /// keep waiting rather than declare a result it didn't get.
     fn checks(&self) -> Option<CheckState> {
-        let state = self.rollup()?.state.as_str();
-        Some(match state {
+        let rollup = self.rollup()?;
+        Some(match rollup.state.as_str() {
             "SUCCESS" => CheckState::Success,
             // ERROR is a check that failed to run; for someone waiting to
             // respond, that is the same news as a failing one.
-            "FAILURE" | "ERROR" => CheckState::Failure,
+            //
+            // GitHub's state counts every run ever recorded on this commit,
+            // so it stays red for a run that a newer run of the same check
+            // superseded — measured on a pull request that was green in
+            // every other view (docs/watching.md). Red is believed only
+            // while the runs that still stand back it, and whenever they
+            // can't be read they can't disprove it either.
+            "FAILURE" | "ERROR" => rollup.contexts.verdict().unwrap_or(CheckState::Failure),
             _ => CheckState::Pending,
         })
     }
 
+    /// GitHub reports merge status, draft status, and review decision
+    /// independently. Inkling owns the collapse into one lifecycle position —
+    /// this is the business logic, and it deliberately lives here rather than
+    /// being asked of a model.
     fn state(&self) -> State {
         match self.state.as_str() {
             "MERGED" => State::Merged,
@@ -889,17 +1015,145 @@ mod tests {
         assert_eq!(status.failing, None);
     }
 
+    /// Recorded 2026-09-22 from dpep/inkling-ci-probe#8, whose in-flight run
+    /// was superseded on the same head commit (the pull request was reopened
+    /// under a `cancel-in-progress` concurrency group) and whose replacement
+    /// then passed. Both runs of `slowish` stay in the rollup — the cancelled
+    /// one keeps its conclusion forever — and GitHub's own `state` reads
+    /// `FAILURE` for a pull request `gh pr checks` calls `pass` and the merge
+    /// box calls `clean`. `later` is the conclusion of the surviving run.
+    fn superseded(later: &str) -> String {
+        let conclusion = if later == "null" {
+            "null".to_string()
+        } else {
+            format!("\"{later}\"")
+        };
+        let suite = r#""checkSuite":{"app":{"slug":"github-actions"},
+            "workflowRun":{"event":"pull_request","workflow":{"name":"supersede"}}}"#;
+        with_rollup(&format!(
+            r#"{{"state":"FAILURE","contexts":{{"totalCount":2,"nodes":[
+            {{"__typename":"CheckRun","name":"slowish","conclusion":"CANCELLED",
+              "databaseId":107051027337,{suite}}},
+            {{"__typename":"CheckRun","name":"slowish","conclusion":{conclusion},
+              "databaseId":107051237708,{suite}}}]}}}}"#
+        ))
+    }
+
+    #[test]
+    fn a_failure_no_current_run_backs_is_not_reported() {
+        let status = interpret(&[pr("inkling-ci-probe", 8)], &parse(&superseded("SUCCESS")))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(
+            status.checks,
+            Some(CheckState::Success),
+            "GitHub's rollup state still says FAILURE, from a run the newer \
+             one superseded"
+        );
+        assert_eq!(status.failing, None);
+    }
+
+    #[test]
+    fn a_superseded_failure_reads_as_pending_while_its_replacement_runs() {
+        // The same pull request four seconds in: nothing has failed and
+        // nothing has finished, so there is nothing to act on yet.
+        let status = interpret(&[pr("inkling-ci-probe", 8)], &parse(&superseded("null")))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Pending));
+        assert_eq!(status.failing, None);
+    }
+
+    /// Recorded 2026-09-22 from dpep/inkling-ci-probe#10: the only run was
+    /// cancelled and nothing replaced it. GitHub's rollup, `gh pr checks` and
+    /// `mergeable_state` all call that red, so Inkling does too rather than
+    /// growing a fourth check state for it.
+    #[test]
+    fn a_cancelled_run_with_nothing_after_it_is_a_failure() {
+        let json = with_rollup(
+            r#"{"state":"FAILURE","contexts":{"totalCount":1,"nodes":[
+            {"__typename":"CheckRun","name":"lonely","conclusion":"CANCELLED",
+             "databaseId":107051852127,"checkSuite":{"app":{"slug":"github-actions"},
+             "workflowRun":{"event":"pull_request","workflow":{"name":"lonely"}}}}]}}"#,
+        );
+        let status = interpret(&[pr("inkling-ci-probe", 10)], &parse(&json))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Failure));
+        assert_eq!(
+            status.failing.map(|f| f.name).as_deref(),
+            Some("lonely"),
+            "and it is still terminal, so a wait ends instead of spinning"
+        );
+    }
+
+    /// Two jobs that share a name are one check only if everything else about
+    /// them matches too. Splitting too finely just keeps an extra entry;
+    /// merging two real checks hides a failure, so the key errs wide.
+    #[test]
+    fn checks_that_only_share_a_name_are_not_the_same_check() {
+        let red = |workflow: &str, event: &str, id: u64| {
+            format!(
+                r#"{{"__typename":"CheckRun","name":"test","conclusion":"FAILURE",
+                "databaseId":{id},"checkSuite":{{"app":{{"slug":"github-actions"}},
+                "workflowRun":{{"event":"{event}","workflow":{{"name":"{workflow}"}}}}}}}}"#
+            )
+        };
+        let green = r#"{"__typename":"CheckRun","name":"test","conclusion":"SUCCESS",
+            "databaseId":999,"checkSuite":{"app":{"slug":"github-actions"},
+            "workflowRun":{"event":"pull_request","workflow":{"name":"ci"}}}}"#;
+        for stale in [red("nightly", "pull_request", 1), red("ci", "push", 2)] {
+            let json = with_rollup(&format!(
+                r#"{{"state":"FAILURE","contexts":{{"totalCount":2,
+                "nodes":[{stale},{green}]}}}}"#
+            ));
+            let status = interpret(&[pr("x", 1)], &parse(&json))[0]
+                .1
+                .clone()
+                .unwrap();
+            assert_eq!(status.checks, Some(CheckState::Failure), "{stale}");
+        }
+    }
+
+    #[test]
+    fn a_red_rollup_is_believed_when_more_checks_exist_than_one_page_holds() {
+        // Measured on home-assistant/core, whose pull requests carry 35 to 48
+        // contexts: the failing one can sit past the page, and calling that
+        // green would be the expensive way to be wrong.
+        let json = with_rollup(
+            r#"{"state":"FAILURE","contexts":{"totalCount":48,"nodes":[
+            {"__typename":"CheckRun","name":"test","conclusion":"SUCCESS",
+             "databaseId":1,"checkSuite":{"app":{"slug":"github-actions"},
+             "workflowRun":{"event":"pull_request","workflow":{"name":"ci"}}}}]}}"#,
+        );
+        let status = interpret(&[pr("x", 1)], &parse(&json))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.checks, Some(CheckState::Failure));
+    }
+
     #[test]
     fn the_query_asks_for_the_head_commits_rollup_and_its_contexts() {
         let query = build_query(&[pr("gqls", 1)]);
         assert!(query.contains("commits(last: 1)"), "{query}");
         assert!(query.contains("statusCheckRollup"), "{query}");
         // Measured: this costs nothing extra — a 3-reference batch is one
-        // rate-limit point with it or without it.
-        assert!(query.contains("contexts(first: 20)"), "{query}");
-        // So a red Actions job's log can be named; also free, measured the same way.
+        // rate-limit point with it or without it, and one point still at
+        // `first: 100` returning 130 contexts, so the page is free.
+        assert!(query.contains("contexts(first: 100)"), "{query}");
+        // `totalCount` says when a page didn't hold them all.
+        assert!(query.contains("totalCount"), "{query}");
+        // So a red Actions job's log can be named, and so two runs of the
+        // same check can be told apart; also free, measured the same way.
         assert!(
-            query.contains("databaseId checkSuite { app { slug } }"),
+            query.contains(
+                "databaseId checkSuite { app { slug } \
+                 workflowRun { event workflow { name } } }"
+            ),
             "{query}"
         );
     }
