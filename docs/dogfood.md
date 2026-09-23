@@ -4,6 +4,39 @@ What using inkling on inkling's own work has taught us. One dated line per
 finding: what happened, what was expected. Newest first. When a finding is
 fixed, say where and leave the line.
 
+## 2026-09-22
+
+- A green pull request was reported red. `wait --until checks` on
+  inkling-ci-probe#8 resolved `precluded`, exit 3, `checks: failure`, while
+  `gh pr checks` said `pass` and the merge box said `clean`. The cause was
+  ours only in part: GitHub's `statusCheckRollup.state` itself read `FAILURE`,
+  off a run that a newer run of the same check had superseded. Expected the
+  rollup state to describe the commit now. Fixed — see
+  [watching.md](watching.md#red-that-a-re-run-already-answered).
+- The log link in a red push can 404, and that turned out to be a symptom
+  rather than a bug: `failing()` was naming a superseded run, whose logs
+  GitHub had collected. Picking from the current runs fixes both at once.
+  Expected a 404 to mean the logs weren't ready yet, which is what
+  [the earlier note](#red-arrives-before-its-logs-do--or-seems-to) had
+  measured.
+- `contexts(first: 20)` was quietly short. home-assistant/core pull requests
+  carry 35 to 48 contexts, so the check inkling names as failing could already
+  be past the page. Expected 20 to be generous. Raised to 100 — measured at
+  one rate-limit point either way.
+- Good surprise: `gh run rerun --failed` does *not* duplicate a check in the
+  rollup. It replaces the check run in place, and only REST's `filter=all`
+  still lists the failed attempt. The case that looked commonest wasn't a case
+  at all, which took a chunk out of the fix.
+- Good surprise: adding `workflowRun { event workflow { name } }` and
+  `totalCount`, and going from 20 contexts to 100, cost nothing — a
+  3-reference batch is one point before and after, at 130 contexts returned.
+  Expected to have to trade page size against rate limit.
+- Reproducing a superseded cancellation needs the *same* head commit, so the
+  obvious recipe — push twice — is wrong: the cancelled run stays attached to
+  the commit it started on, where no rollup we read will ever see it. Closing
+  and reopening the pull request under a `cancel-in-progress` concurrency
+  group is what does it. Worth writing down; it cost a detour.
+
 ## 2026-09-20
 
 - `git push` to the branch of an open probe PR printed exactly `To

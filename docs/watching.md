@@ -134,11 +134,80 @@ still an observation: inkling names where the log is and runs nothing.
   is not a job's — rust-lang/rust's `Bors try build` is one — so the app's
   slug has to be `github-actions`, and anything else keeps `gh pr checks`.
 - **"All checks final" is derivable without another query**, should it be
-  wanted: a running check run's `conclusion` is null. Not used, and only for
-  the first 20 contexts.
+  wanted: a running check run's `conclusion` is null. Used now, below.
 - **The rest of the suite is still unreported.** The rollup stays `failure`
   as later jobs finish, so no second event says whether the slow job passed.
   `gh pr checks` answers that; the log is the more urgent question.
+
+## Red that a re-run already answered
+
+A context in the rollup is one check **run**, not one check. Run a workflow
+twice on the same commit and both runs sit there under the same name, and the
+older one keeps its conclusion for good. GitHub's `statusCheckRollup.state`
+sums all of them, so it stays red for a job that has since been re-run green.
+
+Measured 2026-09-22 on dpep/inkling-ci-probe#8 — an in-flight run superseded
+on the same head commit (the pull request was reopened under a
+`cancel-in-progress` concurrency group), its replacement green:
+
+| view | says |
+| --- | --- |
+| `statusCheckRollup.state` | `FAILURE` |
+| its contexts | `slowish CANCELLED` (run 35820473918) **and** `slowish SUCCESS` (run 35820529179) |
+| `gh pr checks` | `slowish  pass` — one row |
+| `mergeable_state` | `clean` |
+| the web UI | green |
+
+Inkling read that as `checks: failure` and resolved a `wait --until checks`
+`precluded`, exit 3 — a false red on a green pull request, which costs a
+session a turn and sends it after a bug that isn't there. `failing()` named
+the cancelled run and handed out its job's log link, which 404s once those
+logs are collected: the 404 was the staleness showing, not a cancellation
+problem.
+
+**What was built: red is believed only while the runs that still stand back
+it.** Group the contexts by what identifies a check — app, workflow, event,
+name — keep the newest run of each, and if GitHub says `FAILURE` or `ERROR`,
+take the verdict of that reduced set instead: any failure is a failure, any
+run without a conclusion is pending, otherwise success. `failing()` picks from
+the same reduced set, so the state and the check it names can't disagree.
+
+- **Only red is second-guessed.** GitHub is not wrong in the other direction —
+  it cannot call a commit green while a live check is red, that being its
+  whole job — and a rule that only ever downgrades red is one sentence rather
+  than a second opinion on everything.
+- **What can't be read can't clear a check.** No contexts, more of them than
+  the page held, or one this query doesn't select — a legacy commit status
+  arrives with neither name nor conclusion — and the rollup's own `FAILURE`
+  stands. Three cases, one reason, and the conservative way to be wrong: a
+  missed red costs more than a late one. Repositories still on legacy commit
+  statuses keep exactly the behavior they had.
+- **The page went from 20 contexts to 100.** Superseded runs occupy slots, and
+  20 was already short of real pull requests — home-assistant/core carries 35
+  to 48. Measured the same day: a 3-reference batch is one rate-limit point at
+  `first: 20` and one at `first: 100` returning 130 contexts. GitHub charges
+  for what comes back, so the page is free; `totalCount` says when it wasn't
+  enough.
+- **Newest is the highest check-run id**, not the latest `startedAt` that `gh`
+  sorts on. It is monotonic and always present, so it needs neither timestamp
+  parsing nor a tie-break.
+- **The key errs wide.** Two jobs called `test` are one check only if their
+  app, workflow and triggering event match too — a repository on `on: [push,
+  pull_request]` really does run two. Splitting too finely keeps a spare
+  entry; merging two real checks hides a failure.
+- **A re-run of the same run was never the problem.** `gh run rerun --failed`
+  replaces the check run in place: measured on #9, the failed attempt leaves
+  the rollup entirely and only REST's `filter=all` still lists it. Two
+  separate workflow runs on one commit are what duplicate.
+- **`CANCELLED` stays a failure, and no fourth check state was added.** When
+  it is the newest run — measured on #10, cancelled with nothing replacing it
+  — GitHub's rollup, `gh pr checks` and the merge box all call it red, and it
+  is terminal, so `wait --until checks` ends rather than spinning. The
+  superseded cancellations, the ones that were only noise, are no longer the
+  newest run of anything. A `CheckState::Cancelled` would have reached into
+  the domain, the wait predicate, the push rules and the exit-code table to
+  express a distinction that survives only when someone cancelled their own
+  run on purpose, and that person already knows.
 
 ## Where the state lives
 
