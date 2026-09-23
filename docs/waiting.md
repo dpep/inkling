@@ -171,6 +171,14 @@ Costs, itemized:
 - **Not modelled**: individual checks. `--until checks` answers "did CI
   finish, and green or red" via the rollup. "Wait for the deploy job
   specifically" is out of scope; the rollup is the line.
+- **The rollup's own `state` field is not the answer for red.** It sums every
+  run ever recorded on the commit, including ones a re-run superseded, so it
+  reports red for checks that are now green. Inkling reads red back off the
+  latest run of each check instead — see [watching.md](watching.md#red-that-a-re-run-already-answered).
+  This stays a three-state lifecycle: a cancelled run that nothing replaced is
+  red, like everywhere else that reports on it, and so `--until checks`
+  resolves `precluded` rather than waiting out its timeout on a run that will
+  never finish.
 
 So yes — CI is a bigger lift than the PR-lifecycle case, mostly in fixtures
 and the terminality caveat rather than code volume. It gets its own
