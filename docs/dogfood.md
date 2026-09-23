@@ -17,7 +17,8 @@ fixed, say where and leave the line.
   rather than a bug: `failing()` was naming a superseded run, whose logs
   GitHub had collected. Picking from the current runs fixes both at once.
   Expected a 404 to mean the logs weren't ready yet, which is what
-  [the earlier note](#red-arrives-before-its-logs-do--or-seems-to) had
+  [the earlier note](watching.md#red-arrives-before-its-logs-do--or-seems-to)
+  had
   measured.
 - `contexts(first: 20)` was quietly short. home-assistant/core pull requests
   carry 35 to 48 contexts, so the check inkling names as failing could already
@@ -31,6 +32,11 @@ fixed, say where and leave the line.
   `totalCount`, and going from 20 contexts to 100, cost nothing — a
   3-reference batch is one point before and after, at 130 contexts returned.
   Expected to have to trade page size against rate limit.
+- Watching #24 with the branch's own build: `wait --until checks` returned at
+  52s and the feed carried one row, `checks pending → success`, about 2s after
+  the run finished. Both agreed, neither needed a second lookup. Expected
+  exactly that, and got it — worth a line because it is the case the earlier
+  fixes were aiming at.
 - Reproducing a superseded cancellation needs the *same* head commit, so the
   obvious recipe — push twice — is wrong: the cancelled run stays attached to
   the commit it started on, where no rollup we read will ever see it. Closing
