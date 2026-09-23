@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — 2026-09-23
 
 - **A pull request no longer goes red because an older run of a check did.** GitHub's check rollup
   reports one entry per check *run*, so a workflow that was cancelled as superseded and re-run on
@@ -9,7 +9,9 @@
   the newest run of each check — same app, workflow, triggering event and name — and only believes
   red while those still back it; the failing check it names, and the log link beside it, come from
   the same set, so they can no longer point at a run whose logs have been collected. A rollup it
-  can't read in full still counts as red. Nothing to do on upgrade.
+  can't read in full still counts as red. It also reads up to 100 checks on a commit rather than
+  20, so the check it names on a pull request with many of them is the one that actually failed.
+  Nothing to do on upgrade.
 
 ## 0.2.0 — 2026-09-20
 
