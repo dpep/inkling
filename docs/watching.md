@@ -155,8 +155,8 @@ on the same head commit (the pull request was reopened under a
 | `statusCheckRollup.state` | `FAILURE` |
 | its contexts | `slowish CANCELLED` (run 35820473918) **and** `slowish SUCCESS` (run 35820529179) |
 | `gh pr checks` | `slowish  pass` — one row |
+| REST `check-runs?filter=latest` | both — it de-dupes per check *suite*, not per name |
 | `mergeable_state` | `clean` |
-| the web UI | green |
 
 Inkling read that as `checks: failure` and resolved a `wait --until checks`
 `precluded`, exit 3 — a false red on a green pull request, which costs a

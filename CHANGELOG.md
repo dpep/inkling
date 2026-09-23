@@ -5,7 +5,7 @@
 - **A pull request no longer goes red because an older run of a check did.** GitHub's check rollup
   reports one entry per check *run*, so a workflow that was cancelled as superseded and re-run on
   the same commit leaves both entries behind, and GitHub's summary of them stays `FAILURE` for a
-  pull request that `gh pr checks`, the merge box and the web UI all call green. Inkling now keeps
+  pull request that `gh pr checks` calls green and the merge box calls clean. Inkling now keeps
   the newest run of each check — same app, workflow, triggering event and name — and only believes
   red while those still back it; the failing check it names, and the log link beside it, come from
   the same set, so they can no longer point at a run whose logs have been collected. A rollup it
