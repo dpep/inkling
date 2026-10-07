@@ -33,6 +33,13 @@ on Buildkite. Mostly noise and ambiguity.
 - A brace too many in the GraphQL query, while adding commit statuses, read
   as every pull request vanishing (`wait` exit 5) rather than as an error.
   Fixed, and the query's balance is now a test.
+- Opening #26 watched buildkite/agent#4458 and #4460 too: the PR body, written
+  by a heredoc in the same Bash call as `gh pr create`, linked them. Expected
+  only the pull request created. Fixed in the same PR: prose — a body, a
+  title, `gh pr view`'s output — never names a target.
+- #26's `pending → success` was pushed mid-turn 15s after the foreground
+  `wait --until checks` saw it, and needed no further lookup. The wait and the
+  server each polled on their own.
 
 ## 2026-09-22
 

@@ -233,9 +233,12 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
     };
 
     if let Some(verb) = PULL_COMMANDS.iter().find(|verb| command.contains(**verb)) {
-        for reference in detect(command, hosts)
+        for reference in detect(arguments(command, verb), hosts)
             .into_iter()
-            .chain(detect(output, hosts))
+            .chain(detect(
+                if *verb == "gh pr view" { "" } else { output },
+                hosts,
+            ))
         {
             add(reference, verb);
         }
@@ -263,6 +266,36 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
         }
     }
     found
+}
+
+/// The part of `command` that names which pull request `verb` is about.
+///
+/// Prose is not a target: a description or comment that links other pull
+/// requests says nothing about which one this command touched. So only this
+/// shell segment counts, and only up to its first body or title; `gh pr
+/// create`'s arguments name no pull request at all — the one it made is in
+/// its output. Likewise `gh pr view`'s output is skipped by the caller, since
+/// it prints the body.
+fn arguments<'a>(command: &'a str, verb: &str) -> &'a str {
+    if verb == "gh pr create" {
+        return "";
+    }
+    let Some(start) = command.find(verb) else {
+        return "";
+    };
+    let segment = &command[start..];
+    let end = ["\n", "&&", "||", ";", "|"]
+        .iter()
+        .filter_map(|separator| segment.find(separator))
+        .min()
+        .unwrap_or(segment.len());
+    let segment = &segment[..end];
+    let prose = [" --body", " -b ", " --title", " -t "]
+        .iter()
+        .filter_map(|flag| segment.find(flag))
+        .min()
+        .unwrap_or(segment.len());
+    &segment[..prose]
 }
 
 /// A branch a `git push` updated, and where it went.
@@ -708,6 +741,39 @@ mod touched_tests {
         vec!["github.com".to_string()]
     }
 
+    #[test]
+    fn pull_requests_linked_from_prose_are_not_targets() {
+        // Recorded 2026-10-06: a PR body written by a heredoc in the same
+        // call as `gh pr create` registered the two pull requests it linked.
+        let created = "cat > /tmp/body.md <<'EOF'\nfixture from https://github.com/buildkite/agent/pull/4460\nEOF\ngh pr create --draft --body-file /tmp/body.md";
+        assert_eq!(
+            names(created, "https://github.com/dpep/inkling/pull/26\n"),
+            ["github.com/dpep/inkling#26"]
+        );
+        assert_eq!(
+            names(
+                "gh pr comment https://github.com/dpep/inkling/pull/26 --body 'like https://github.com/dpep/inkling/pull/3'",
+                ""
+            ),
+            ["github.com/dpep/inkling#26"]
+        );
+        assert_eq!(
+            names(
+                "gh pr view",
+                "title:\tFix it\nfollows https://github.com/dpep/inkling/pull/3\n"
+            ),
+            Vec::<String>::new(),
+            "view prints the body, which is prose"
+        );
+        assert_eq!(
+            names(
+                "gh pr view https://github.com/dpep/inkling/pull/26 | grep pull/3",
+                ""
+            ),
+            ["github.com/dpep/inkling#26"]
+        );
+    }
+
     fn names(command: &str, output: &str) -> Vec<String> {
         touched(command, output, &hosts())
             .into_iter()
@@ -991,6 +1057,6 @@ mod touched_tests {
         let output: String = (1..=100)
             .map(|n| format!("https://github.com/dpep/inkling/pull/{n}\n"))
             .collect();
-        assert_eq!(names("gh pr view 1", &output).len(), MAX_REFERENCES);
+        assert_eq!(names("gh pr checks 1", &output).len(), MAX_REFERENCES);
     }
 }
