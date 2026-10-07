@@ -6,6 +6,9 @@
   does — used to leave a red pull request unnamed, and kept GitHub's own verdict even when the
   only other red was a run a re-run had superseded. A red status is now named
   (`checks success → failure: buildkite/main`), and a pending one keeps the checks pending.
+- **New: `github.ignore_checks`.** Checks named here — a merge lock, a label policy — never turn a
+  pull request red or hold it pending, for `watch`, `wait --until checks` and reactions alike.
+  Exact names: `ignore_checks = ["merge-lock"]`.
 
 ## 0.2.1 — 2026-09-23
 

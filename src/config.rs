@@ -190,6 +190,10 @@ pub struct GitHub {
     /// that would want this.
     #[serde(default = "d_token_command")]
     pub token_command: Option<String>,
+    /// Checks that say nothing about the change — a merge lock, a label
+    /// policy — by exact name. They never turn a pull request red.
+    #[serde(default)]
+    pub ignore_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -556,6 +560,7 @@ impl Default for GitHub {
             api_url: d_api_url(),
             token_env: None,
             token_command: d_token_command(),
+            ignore_checks: Vec::new(),
         }
     }
 }
@@ -644,6 +649,16 @@ mod tests {
         assert_eq!(config.filters.max_message_chars, 1000);
         assert!(config.filters.only_my_messages);
         assert_eq!(config.github.hosts, vec!["github.com"]);
+    }
+
+    #[test]
+    fn checks_to_ignore_are_named_under_github() {
+        let config = parse(&format!(
+            "{EXAMPLE}\n[github]\nignore_checks = [\"merge-lock\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(config.github.ignore_checks, vec!["merge-lock"]);
+        assert!(parse(EXAMPLE).unwrap().github.ignore_checks.is_empty());
     }
 
     #[test]

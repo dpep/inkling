@@ -571,7 +571,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             .map_err(|e| e.to_string())?;
 
             let watches = watch_store(&cli.common);
-            let github = GitHubProvider::new(&config.github.api_url, token);
+            let github = GitHubProvider::from_config(&config.github, token);
             let jira = inkling::adapters::jira_acli::JiraProvider::new();
             let clock = SystemClock;
             let work = inkling::push::Tick {
@@ -852,7 +852,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let references = wait_targets(targets, &config.github.hosts, &snapshot)?;
 
-            let github = GitHubProvider::new(&config.github.api_url, token);
+            let github = GitHubProvider::from_config(&config.github, token);
             let clock = SystemClock;
 
             // Waiters coordinate through a file so N of them cost one poll.
@@ -924,7 +924,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             .map_err(|e| e.to_string())?;
 
             let slack = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
-            let github = GitHubProvider::new(&config.github.api_url, token);
+            let github = GitHubProvider::from_config(&config.github, token);
             let clock = SystemClock;
 
             // One writer at a time. The snapshot is rewritten whole, so two
@@ -1728,7 +1728,7 @@ fn look_up_pushes(
     let asked = within(PUSH_LOOKUP_BUDGET, move || {
         let token = Secret::resolve(github.token_env.as_deref(), github.token_command.as_deref())
             .map_err(|e| e.to_string())?;
-        GitHubProvider::new(&github.api_url, token)
+        GitHubProvider::from_config(&github, token)
             .pushed_to(&pushes)
             .map_err(|e| e.to_string())
     });
@@ -1946,7 +1946,7 @@ fn poll(
 
     let poller = inkling::watch::Poller {
         store,
-        github: &GitHubProvider::new(&config.github.api_url, token),
+        github: &GitHubProvider::from_config(&config.github, token),
         jira: &inkling::adapters::jira_acli::JiraProvider::new(),
         clock,
     };

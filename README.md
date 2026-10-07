@@ -258,6 +258,7 @@ only_my_messages = true          # annotate only your own posts
 
 [github]
 token_command = "gh auth token"  # or token_env = "GITHUB_TOKEN"
+ignore_checks = ["merge-lock"]    # exact check names that never make a pull request red
 
 [status.approved]
 canonical = "white_check_mark"

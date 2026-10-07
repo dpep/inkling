@@ -19,6 +19,7 @@ pub struct GitHubProvider {
     api_url: String,
     token: Secret,
     timeout: Duration,
+    ignore_checks: Vec<String>,
 }
 
 impl GitHubProvider {
@@ -27,6 +28,14 @@ impl GitHubProvider {
             api_url: api_url.into(),
             token,
             timeout: Duration::from_secs(30),
+            ignore_checks: Vec::new(),
+        }
+    }
+
+    pub fn from_config(github: &crate::config::GitHub, token: Secret) -> Self {
+        Self {
+            ignore_checks: github.ignore_checks.clone(),
+            ..Self::new(&github.api_url, token)
         }
     }
 
@@ -175,7 +184,8 @@ impl StatusProvider for GitHubProvider {
         if pulls.is_empty() {
             return Ok(Vec::new());
         }
-        let response = self.post(&build_query(&pulls))?;
+        let mut response: Response = self.post(&build_query(&pulls))?;
+        response.ignore(&self.ignore_checks);
         Ok(interpret(&pulls, &response))
     }
 }
@@ -304,6 +314,36 @@ struct Response {
     errors: Vec<GraphQlError>,
 }
 
+impl Response {
+    /// Drop the checks configured as noise — a merge lock, a label policy —
+    /// before anything judges the rollup, so they can neither turn it red nor
+    /// be named as the check that did.
+    fn ignore(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let rollups = self
+            .data
+            .values_mut()
+            .flatten()
+            .filter_map(|repository| repository.pull_request.as_mut())
+            .flat_map(|pr| pr.commits.nodes.iter_mut())
+            .filter_map(|node| node.commit.status_check_rollup.as_mut());
+        for rollup in rollups {
+            let contexts = &mut rollup.contexts;
+            let before = contexts.nodes.len();
+            contexts.nodes.retain(|context| {
+                context
+                    .display_name()
+                    .is_none_or(|name| !names.iter().any(|ignored| ignored == name))
+            });
+            let dropped = before - contexts.nodes.len();
+            contexts.total_count = contexts.total_count.saturating_sub(dropped);
+            contexts.pruned |= dropped > 0;
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Repository {
     #[serde(default, rename = "pullRequest")]
@@ -403,6 +443,9 @@ struct Contexts {
     total_count: usize,
     #[serde(default)]
     nodes: Vec<Context>,
+    /// Some were ignored, so GitHub's own state no longer sums what is left.
+    #[serde(skip)]
+    pruned: bool,
 }
 
 /// What tells one check from another: the same job name under a different
@@ -636,6 +679,11 @@ impl PullRequest {
     /// keep waiting rather than declare a result it didn't get.
     fn checks(&self) -> Option<CheckState> {
         let rollup = self.rollup()?;
+        if rollup.contexts.pruned
+            && let Some(verdict) = rollup.contexts.verdict()
+        {
+            return Some(verdict);
+        }
         Some(match rollup.state.as_str() {
             "SUCCESS" => CheckState::Success,
             // ERROR is a check that failed to run; for someone waiting to
@@ -1070,6 +1118,47 @@ mod tests {
             );
         }
         assert_eq!(buildkite("SUCCESS").checks, Some(CheckState::Success));
+    }
+
+    fn ignoring(json: &str, names: &[&str]) -> RefStatus {
+        let mut response = parse(json);
+        response.ignore(&names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+        interpret(&[pr("agent", 4460)], &response)[0]
+            .1
+            .clone()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_ignored_check_neither_turns_a_rollup_red_nor_is_named() {
+        let red = with_rollup(&BUILDKITE.replace("STATE", "FAILURE"));
+        let status = ignoring(&red, &["buildkite/agent"]);
+        assert_eq!(status.checks, Some(CheckState::Success));
+        assert_eq!(status.failing, None);
+    }
+
+    #[test]
+    fn an_ignored_check_still_running_does_not_hold_the_rollup_pending() {
+        // A merge lock that never reports would otherwise keep every pull
+        // request pending for as long as it is engaged.
+        let json = with_rollup(&BUILDKITE.replace("STATE", "PENDING").replacen(
+            r#""state":"FAILURE""#,
+            r#""state":"PENDING""#,
+            1,
+        ));
+        assert_eq!(
+            ignoring(&json, &["buildkite/agent"]).checks,
+            Some(CheckState::Success)
+        );
+    }
+
+    #[test]
+    fn ignoring_a_check_that_is_not_there_changes_nothing() {
+        let red = with_rollup(&BUILDKITE.replace("STATE", "FAILURE"));
+        assert_eq!(
+            ignoring(&red, &["merge-lock"]).checks,
+            Some(CheckState::Failure)
+        );
     }
 
     #[test]
