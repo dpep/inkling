@@ -237,9 +237,15 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
     // Errors are keyed by the alias in their `path`, so a per-reference
     // reason survives instead of collapsing into "something failed".
     let mut errors: HashMap<&str, &str> = HashMap::new();
+    // An error with no path is about the query itself — a syntax error fails
+    // the whole batch — and must not read as every reference not existing.
+    let mut whole_batch = None;
     for error in &response.errors {
-        if let Some(alias) = error.path.first() {
-            errors.insert(alias.as_str(), error.message.as_str());
+        match error.path.first() {
+            Some(alias) => {
+                errors.insert(alias.as_str(), error.message.as_str());
+            }
+            None => whole_batch = whole_batch.or(Some(error.message.as_str())),
         }
     }
 
@@ -279,9 +285,9 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                     None => Err(RefError::NotFound),
                 },
                 // Null data with an error is the normal unreadable-repo shape.
-                _ => Err(match errors.get(alias.as_str()) {
+                _ => Err(match errors.get(alias.as_str()).copied().or(whole_batch) {
                     Some(message) if message.contains("Could not resolve") => RefError::NotFound,
-                    Some(message) => RefError::Other((*message).to_string()),
+                    Some(message) => RefError::Other(message.to_string()),
                     None => RefError::NotFound,
                 }),
             };
@@ -1225,6 +1231,14 @@ mod tests {
             query.contains("... on StatusContext { context state }"),
             "{query}"
         );
+    }
+
+    #[test]
+    fn a_broken_query_is_an_error_not_a_missing_pull_request() {
+        // Recorded 2026-10-06 from a query with one brace too many.
+        let json = r#"{"errors":[{"message":"Expected one of SCHEMA, SCALAR, TYPE, ENUM, INPUT, UNION, INTERFACE, actual: RCURLY (\"}\") at [1, 488]","locations":[{"line":1,"column":488}]}]}"#;
+        let result = interpret(&[pr("x", 1)], &parse(json))[0].1.clone();
+        assert!(matches!(result, Err(RefError::Other(_))), "{result:?}");
     }
 
     #[test]
