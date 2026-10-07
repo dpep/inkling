@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Commit statuses are read, not just check runs.** CI that reports as a commit status — Buildkite
+  does — used to leave a red pull request unnamed, and kept GitHub's own verdict even when the
+  only other red was a run a re-run had superseded. A red status is now named
+  (`checks success → failure: buildkite/main`), and a pending one keeps the checks pending.
+
 ## 0.2.1 — 2026-09-23
 
 - **A pull request no longer goes red because an older run of a check did.** GitHub's check rollup
