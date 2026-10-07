@@ -6,7 +6,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Category, FailedCheck, Head};
+use crate::domain::watch::{Actors, Category, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -123,10 +123,8 @@ pub struct RefStatus {
     pub failing: Option<FailedCheck>,
     /// The branch its commits come from, so a push to it can be recognised.
     pub head: Option<Head>,
-    /// Whose standing approvals there are, as `@login`, or `login (bot)` for
-    /// an app — a review bot satisfying the requirement is different news
-    /// from a person.
-    pub approved_by: Vec<String>,
+    /// Who did what to it, so a transition can say.
+    pub by: Actors,
 }
 
 impl RefStatus {
@@ -138,7 +136,7 @@ impl RefStatus {
             checks: None,
             failing: None,
             head: None,
-            approved_by: Vec::new(),
+            by: Default::default(),
         }
     }
 }

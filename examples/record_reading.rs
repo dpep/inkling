@@ -33,7 +33,7 @@ fn main() {
         },
         title: "a title nobody should see in a pushed message".into(),
         head: None,
-        approved_by: Vec::new(),
+        by: Default::default(),
         failing: match checks.first().map(String::as_str) {
             Some("failure") => Some(FailedCheck {
                 name: "test / build".into(),

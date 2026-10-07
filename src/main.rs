@@ -2650,7 +2650,7 @@ mod tests {
                 title: "Add the serve lifecycle".into(),
                 failing: None,
                 head: None,
-                approved_by: Vec::new(),
+                by: Default::default(),
             },
         )
     }
