@@ -483,6 +483,7 @@ mod tests {
             title: "Add the session socket sink".into(),
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         }
     }
 
@@ -941,6 +942,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_approval_says_who_gave_it() {
+        let mut watches = watching();
+        watches.record(
+            &[(
+                pr(3),
+                Sighting {
+                    approved_by: vec!["buildsworth-bk-app (bot)".into()],
+                    ..sighting(State::Approved, None)
+                },
+            )],
+            now(),
+        );
+        assert_eq!(
+            message(&watches.events[0]),
+            "inkling: github.com/dpep/inkling#3 state open → approved: by buildsworth-bk-app (bot)"
+        );
+    }
+
     fn went_red(job: Option<u64>) -> String {
         let mut watches = watching();
         watches.record(
@@ -1013,6 +1033,7 @@ mod tests {
             title: "Try the watch feature".into(),
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         };
         watches.record(&[(key.clone(), issue("To Do"))], now());
         watches.record(&[(key, issue("In Review"))], now());

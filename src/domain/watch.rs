@@ -143,6 +143,9 @@ pub struct Sighting {
     /// news, and including it in the comparison would emit an event every
     /// time the first red job changed name.
     pub failing: Option<FailedCheck>,
+    /// Who approved, when a pull request is approved. Outside `Standing` for
+    /// the same reason as `failing`: a second approver is not a transition.
+    pub approved_by: Vec<String>,
 }
 
 /// A change worth telling somebody about.
@@ -225,11 +228,12 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
         ) => {
             let mut moved = Vec::new();
             if was != now {
+                let approved = *now == State::Approved && !after.approved_by.is_empty();
                 moved.push(Transition {
                     axis: Axis::State,
                     from: was.as_str().into(),
                     to: now.as_str().into(),
-                    detail: None,
+                    detail: approved.then(|| format!("by {}", after.approved_by.join(", "))),
                     job: None,
                 });
             }
@@ -388,6 +392,7 @@ mod tests {
             title: "Add inkling wait".into(),
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         }
     }
 
@@ -400,6 +405,7 @@ mod tests {
             title: "Try the watch feature".into(),
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         }
     }
 

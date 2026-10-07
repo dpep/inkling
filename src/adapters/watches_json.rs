@@ -873,6 +873,7 @@ mod tests {
             title: "Add inkling wait".into(),
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         }
     }
 
@@ -885,6 +886,7 @@ mod tests {
             title: "Try the watch feature".into(),
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         }
     }
 

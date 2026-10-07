@@ -123,6 +123,10 @@ pub struct RefStatus {
     pub failing: Option<FailedCheck>,
     /// The branch its commits come from, so a push to it can be recognised.
     pub head: Option<Head>,
+    /// Whose standing approvals there are, as `@login`, or `login (bot)` for
+    /// an app — a review bot satisfying the requirement is different news
+    /// from a person.
+    pub approved_by: Vec<String>,
 }
 
 impl RefStatus {
@@ -134,6 +138,7 @@ impl RefStatus {
             checks: None,
             failing: None,
             head: None,
+            approved_by: Vec::new(),
         }
     }
 }

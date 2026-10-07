@@ -179,6 +179,7 @@ impl Poller<'_> {
                                     title: status.title,
                                     failing: status.failing,
                                     head: status.head,
+                                    approved_by: status.approved_by,
                                 },
                             )),
                             Err(error) => {
@@ -218,6 +219,7 @@ impl Poller<'_> {
                                     title: status.summary,
                                     failing: None,
                                     head: None,
+                                    approved_by: Vec::new(),
                                 },
                             )),
                             Err(error) => {

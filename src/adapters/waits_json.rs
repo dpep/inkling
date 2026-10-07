@@ -182,6 +182,7 @@ impl Waits {
                         // not which job did.
                         failing: None,
                         head: None,
+                        approved_by: Vec::new(),
                     }),
                     Seen::NotFound => Err(RefError::NotFound),
                     Seen::Failed { message } => Err(RefError::Other(message.clone())),

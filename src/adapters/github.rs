@@ -206,7 +206,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} latestReviews(first: 20) {{ nodes {{ state author {{ __typename login }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -291,6 +291,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                             .or_else(|| runs_checks(reference).then_some(CheckState::Pending)),
                         failing: pr.failing(),
                         head: pr.head(),
+                        approved_by: pr.approved_by(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -397,6 +398,30 @@ struct PullRequest {
     head_repository: Option<NamedRepository>,
     #[serde(default)]
     commits: Commits,
+    #[serde(default, rename = "latestReviews")]
+    latest_reviews: Option<Reviews>,
+}
+
+/// Each reviewer's latest review, which is the one that stands.
+#[derive(Debug, Deserialize, Default)]
+struct Reviews {
+    #[serde(default)]
+    nodes: Vec<Review>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Review {
+    state: String,
+    /// Null for a deleted account.
+    #[serde(default)]
+    author: Option<Reviewer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Reviewer {
+    #[serde(rename = "__typename")]
+    kind: String,
+    login: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,6 +697,24 @@ impl PullRequest {
             repo: self.head_repository.as_ref()?.name_with_owner.clone(),
             branch: self.head_ref_name.clone()?,
         })
+    }
+
+    /// Logins only, never names: this reaches a session mid-turn, and a
+    /// login's alphabet can't carry an instruction.
+    fn approved_by(&self) -> Vec<String> {
+        let Some(reviews) = &self.latest_reviews else {
+            return Vec::new();
+        };
+        reviews
+            .nodes
+            .iter()
+            .filter(|review| review.state == "APPROVED")
+            .filter_map(|review| review.author.as_ref())
+            .map(|reviewer| match reviewer.kind.as_str() {
+                "Bot" => format!("{} (bot)", reviewer.login),
+                _ => format!("@{}", reviewer.login),
+            })
+            .collect()
     }
 
     /// GitHub reports more rollup states than matter here. Anything not
@@ -1328,6 +1371,39 @@ mod tests {
         let json = r#"{"errors":[{"message":"Expected one of SCHEMA, SCALAR, TYPE, ENUM, INPUT, UNION, INTERFACE, actual: RCURLY (\"}\") at [1, 488]","locations":[{"line":1,"column":488}]}]}"#;
         let result = interpret(&[pr("x", 1)], &parse(json))[0].1.clone();
         assert!(matches!(result, Err(RefError::Other(_))), "{result:?}");
+    }
+
+    #[test]
+    fn approvers_are_named_by_login_and_bots_say_so() {
+        // Recorded 2026-10-06 from buildkite/agent#4456 and #4455: a review
+        // bot approves beside a person, or only comments.
+        let reviewed = |reviews: &str| {
+            let json = format!(
+                r#"{{"data":{{"r0":{{"pullRequest":{{"isDraft":false,"state":"OPEN",
+                "reviewDecision":"APPROVED","latestReviews":{{"nodes":[{reviews}]}}}}}}}}}}"#
+            );
+            interpret(&[pr("agent", 4456)], &parse(&json))[0]
+                .1
+                .clone()
+                .unwrap()
+                .approved_by
+        };
+        assert_eq!(
+            reviewed(
+                r#"{"state":"APPROVED","author":{"__typename":"User","login":"CerealBoy"}},
+                {"state":"APPROVED","author":{"__typename":"Bot","login":"buildsworth-bk-app"}}"#
+            ),
+            ["@CerealBoy", "buildsworth-bk-app (bot)"]
+        );
+        assert_eq!(
+            reviewed(
+                r#"{"state":"COMMENTED","author":{"__typename":"Bot","login":"buildsworth-bk-app"}},
+                {"state":"APPROVED","author":{"__typename":"User","login":"CerealBoy"}},
+                {"state":"APPROVED","author":null}"#
+            ),
+            ["@CerealBoy"],
+            "a comment is not an approval, and a deleted account has no name"
+        );
     }
 
     #[test]
