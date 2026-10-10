@@ -19,6 +19,7 @@ pub struct GitHubProvider {
     api_url: String,
     token: Secret,
     timeout: Duration,
+    ignore_checks: Vec<String>,
 }
 
 impl GitHubProvider {
@@ -27,6 +28,14 @@ impl GitHubProvider {
             api_url: api_url.into(),
             token,
             timeout: Duration::from_secs(30),
+            ignore_checks: Vec::new(),
+        }
+    }
+
+    pub fn from_config(github: &crate::config::GitHub, token: Secret) -> Self {
+        Self {
+            ignore_checks: github.ignore_checks.clone(),
+            ..Self::new(&github.api_url, token)
         }
     }
 
@@ -175,7 +184,8 @@ impl StatusProvider for GitHubProvider {
         if pulls.is_empty() {
             return Ok(Vec::new());
         }
-        let response = self.post(&build_query(&pulls))?;
+        let mut response: Response = self.post(&build_query(&pulls))?;
+        response.ignore(&self.ignore_checks);
         Ok(interpret(&pulls, &response))
     }
 }
@@ -196,7 +206,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -237,9 +247,15 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
     // Errors are keyed by the alias in their `path`, so a per-reference
     // reason survives instead of collapsing into "something failed".
     let mut errors: HashMap<&str, &str> = HashMap::new();
+    // An error with no path is about the query itself — a syntax error fails
+    // the whole batch — and must not read as every reference not existing.
+    let mut whole_batch = None;
     for error in &response.errors {
-        if let Some(alias) = error.path.first() {
-            errors.insert(alias.as_str(), error.message.as_str());
+        match error.path.first() {
+            Some(alias) => {
+                errors.insert(alias.as_str(), error.message.as_str());
+            }
+            None => whole_batch = whole_batch.or(Some(error.message.as_str())),
         }
     }
 
@@ -279,9 +295,9 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                     None => Err(RefError::NotFound),
                 },
                 // Null data with an error is the normal unreadable-repo shape.
-                _ => Err(match errors.get(alias.as_str()) {
+                _ => Err(match errors.get(alias.as_str()).copied().or(whole_batch) {
                     Some(message) if message.contains("Could not resolve") => RefError::NotFound,
-                    Some(message) => RefError::Other((*message).to_string()),
+                    Some(message) => RefError::Other(message.to_string()),
                     None => RefError::NotFound,
                 }),
             };
@@ -296,6 +312,36 @@ struct Response {
     data: HashMap<String, Option<Repository>>,
     #[serde(default)]
     errors: Vec<GraphQlError>,
+}
+
+impl Response {
+    /// Drop the checks configured as noise — a merge lock, a label policy —
+    /// before anything judges the rollup, so they can neither turn it red nor
+    /// be named as the check that did.
+    fn ignore(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let rollups = self
+            .data
+            .values_mut()
+            .flatten()
+            .filter_map(|repository| repository.pull_request.as_mut())
+            .flat_map(|pr| pr.commits.nodes.iter_mut())
+            .filter_map(|node| node.commit.status_check_rollup.as_mut());
+        for rollup in rollups {
+            let contexts = &mut rollup.contexts;
+            let before = contexts.nodes.len();
+            contexts.nodes.retain(|context| {
+                context
+                    .display_name()
+                    .is_none_or(|name| !names.iter().any(|ignored| ignored == name))
+            });
+            let dropped = before - contexts.nodes.len();
+            contexts.total_count = contexts.total_count.saturating_sub(dropped);
+            contexts.pruned |= dropped > 0;
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +443,9 @@ struct Contexts {
     total_count: usize,
     #[serde(default)]
     nodes: Vec<Context>,
+    /// Some were ignored, so GitHub's own state no longer sums what is left.
+    #[serde(skip)]
+    pruned: bool,
 }
 
 /// What tells one check from another: the same job name under a different
@@ -431,8 +480,8 @@ impl Contexts {
     ///
     /// Three ways they can't, and one reason: what wasn't read can't be
     /// judged, and can't clear a check either. No contexts at all, more of
-    /// them than the page held, or one this query doesn't select — a legacy
-    /// commit status arrives with neither a name nor a conclusion.
+    /// them than the page held, or a member of the union this query doesn't
+    /// select.
     fn verdict(&self) -> Option<CheckState> {
         let latest = self.latest();
         if latest.is_empty()
@@ -443,8 +492,7 @@ impl Contexts {
         }
         Some(if latest.iter().any(|context| context.failed()) {
             CheckState::Failure
-        } else if latest.iter().any(|context| context.conclusion.is_none()) {
-            // A running or queued check run has no conclusion yet.
+        } else if latest.iter().any(|context| context.running()) {
             CheckState::Pending
         } else {
             // SKIPPED, NEUTRAL and STALE are left: none of them is a
@@ -455,15 +503,19 @@ impl Contexts {
     }
 }
 
-/// Only the `CheckRun` half of the union is selected. A repository still on
-/// legacy commit statuses reports a red rollup with no name attached, which
-/// is the old behavior rather than a new failure.
+/// One member of the `CheckRun | StatusContext` union, flattened: a check run
+/// fills `name` and `conclusion`, a commit status — Buildkite reports this
+/// way — fills `context` and `state`.
 #[derive(Debug, Deserialize)]
 struct Context {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     conclusion: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
     #[serde(default, rename = "databaseId")]
     database_id: Option<u64>,
     #[serde(default, rename = "checkSuite")]
@@ -487,9 +539,13 @@ impl Context {
     ///
     /// The run is the check run's id rather than `startedAt`, which `gh`
     /// sorts on: it is monotonic and always present, so it needs neither
-    /// timestamp parsing nor a tie-break. `None` for a context this query
-    /// doesn't select — a legacy commit status has neither field.
+    /// timestamp parsing nor a tie-break. A commit status has no run: GitHub
+    /// keeps only the newest status per context, so each is its own check.
+    /// `None` for a member of the union this query doesn't select.
     fn identity(&self) -> Option<(Identity<'_>, u64)> {
+        if let Some(context) = self.context.as_deref() {
+            return Some((("status", "", "", context), 0));
+        }
         let name = self.name.as_deref()?;
         let run = self.database_id?;
         let suite = self.check_suite.as_ref();
@@ -514,7 +570,23 @@ impl Context {
         matches!(
             self.conclusion.as_deref(),
             Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE")
-        )
+        ) || matches!(self.state.as_deref(), Some("FAILURE" | "ERROR"))
+    }
+
+    /// Still to report: a check run without a conclusion, or a commit status
+    /// that is pending or required but not yet posted (`EXPECTED`).
+    fn running(&self) -> bool {
+        match self.context {
+            Some(_) => matches!(self.state.as_deref(), Some("PENDING" | "EXPECTED")),
+            None => self.conclusion.is_none(),
+        }
+    }
+
+    fn display_name(&self) -> Option<&str> {
+        self.name
+            .as_deref()
+            .or(self.context.as_deref())
+            .filter(|name| !name.trim().is_empty())
     }
 }
 
@@ -589,12 +661,8 @@ impl PullRequest {
             .latest()
             .into_iter()
             .find(|context| context.failed())?;
-        let name = context
-            .name
-            .clone()
-            .filter(|name| !name.trim().is_empty())?;
         Some(FailedCheck {
-            name,
+            name: context.display_name()?.to_string(),
             job: context.job(),
         })
     }
@@ -611,6 +679,11 @@ impl PullRequest {
     /// keep waiting rather than declare a result it didn't get.
     fn checks(&self) -> Option<CheckState> {
         let rollup = self.rollup()?;
+        if rollup.contexts.pruned
+            && let Some(verdict) = rollup.contexts.verdict()
+        {
+            return Some(verdict);
+        }
         Some(match rollup.state.as_str() {
             "SUCCESS" => CheckState::Success,
             // ERROR is a check that failed to run; for someone waiting to
@@ -998,14 +1071,101 @@ mod tests {
         );
     }
 
+    /// Recorded 2026-10-06 from buildkite/agent#4460: Buildkite reports as a
+    /// commit status beside Actions check runs, one of which was re-run green.
+    const BUILDKITE: &str = r#"{"state":"FAILURE","contexts":{"totalCount":4,"nodes":[
+        {"__typename":"CheckRun","name":"Require category label","conclusion":"FAILURE",
+         "databaseId":112556715016,"checkSuite":{"app":{"slug":"github-actions"},
+         "workflowRun":{"event":"pull_request","workflow":{"name":"PR Labels"}}}},
+        {"__typename":"CheckRun","name":"enable-auto-merge","conclusion":"SKIPPED",
+         "databaseId":112556752234,"checkSuite":{"app":{"slug":"github-actions"},
+         "workflowRun":{"event":"pull_request_target","workflow":{"name":"Dependabot auto-merge"}}}},
+        {"__typename":"CheckRun","name":"Require category label","conclusion":"SUCCESS",
+         "databaseId":112556872962,"checkSuite":{"app":{"slug":"github-actions"},
+         "workflowRun":{"event":"pull_request","workflow":{"name":"PR Labels"}}}},
+        {"__typename":"StatusContext","context":"buildkite/agent","state":"STATE"}]}}"#;
+
+    fn buildkite(state: &str) -> RefStatus {
+        let json = with_rollup(&BUILDKITE.replace("STATE", state));
+        interpret(&[pr("agent", 4460)], &parse(&json))[0]
+            .1
+            .clone()
+            .unwrap()
+    }
+
     #[test]
-    fn a_legacy_status_context_leaves_the_rollup_unnamed() {
-        // Only the CheckRun half of the union is selected, so a repository on
-        // old-style commit statuses reports red with nothing attached — which
-        // is the behavior before this field existed, not a new failure.
+    fn a_red_commit_status_is_named() {
+        let status = buildkite("FAILURE");
+        assert_eq!(status.checks, Some(CheckState::Failure));
+        assert_eq!(
+            status.failing,
+            Some(FailedCheck {
+                name: "buildkite/agent".into(),
+                job: None,
+            }),
+            "not the label check, whose failure a re-run superseded"
+        );
+    }
+
+    #[test]
+    fn a_commit_status_still_running_reads_as_pending() {
+        // GitHub's state is FAILURE only because of the superseded label run.
+        for state in ["PENDING", "EXPECTED"] {
+            assert_eq!(
+                buildkite(state).checks,
+                Some(CheckState::Pending),
+                "{state}"
+            );
+        }
+        assert_eq!(buildkite("SUCCESS").checks, Some(CheckState::Success));
+    }
+
+    fn ignoring(json: &str, names: &[&str]) -> RefStatus {
+        let mut response = parse(json);
+        response.ignore(&names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+        interpret(&[pr("agent", 4460)], &response)[0]
+            .1
+            .clone()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_ignored_check_neither_turns_a_rollup_red_nor_is_named() {
+        let red = with_rollup(&BUILDKITE.replace("STATE", "FAILURE"));
+        let status = ignoring(&red, &["buildkite/agent"]);
+        assert_eq!(status.checks, Some(CheckState::Success));
+        assert_eq!(status.failing, None);
+    }
+
+    #[test]
+    fn an_ignored_check_still_running_does_not_hold_the_rollup_pending() {
+        // A merge lock that never reports would otherwise keep every pull
+        // request pending for as long as it is engaged.
+        let json = with_rollup(&BUILDKITE.replace("STATE", "PENDING").replacen(
+            r#""state":"FAILURE""#,
+            r#""state":"PENDING""#,
+            1,
+        ));
+        assert_eq!(
+            ignoring(&json, &["buildkite/agent"]).checks,
+            Some(CheckState::Success)
+        );
+    }
+
+    #[test]
+    fn ignoring_a_check_that_is_not_there_changes_nothing() {
+        let red = with_rollup(&BUILDKITE.replace("STATE", "FAILURE"));
+        assert_eq!(
+            ignoring(&red, &["merge-lock"]).checks,
+            Some(CheckState::Failure)
+        );
+    }
+
+    #[test]
+    fn an_unselected_member_of_the_union_leaves_the_rollup_unnamed() {
         let json = with_rollup(
             r#"{"state":"FAILURE","contexts":{"nodes":[
-            {"__typename":"StatusContext"}]}}"#,
+            {"__typename":"SomethingNew"}]}}"#,
         );
         let status = interpret(&[pr("x", 1)], &parse(&json))[0]
             .1
@@ -1156,6 +1316,35 @@ mod tests {
             ),
             "{query}"
         );
+        assert!(
+            query.contains("... on StatusContext { context state }"),
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn a_broken_query_is_an_error_not_a_missing_pull_request() {
+        // Recorded 2026-10-06 from a query with one brace too many.
+        let json = r#"{"errors":[{"message":"Expected one of SCHEMA, SCALAR, TYPE, ENUM, INPUT, UNION, INTERFACE, actual: RCURLY (\"}\") at [1, 488]","locations":[{"line":1,"column":488}]}]}"#;
+        let result = interpret(&[pr("x", 1)], &parse(json))[0].1.clone();
+        assert!(matches!(result, Err(RefError::Other(_))), "{result:?}");
+    }
+
+    #[test]
+    fn the_query_is_balanced() {
+        // A stray brace is a GraphQL error for the whole batch, which reads as
+        // every reference vanishing rather than as a broken query.
+        let query = build_query(&[pr("a", 1), pr("b", 2)]);
+        let mut depth = 0i32;
+        for c in query.chars() {
+            depth += match c {
+                '{' | '(' => 1,
+                '}' | ')' => -1,
+                _ => 0,
+            };
+            assert!(depth >= 0, "closes more than it opens: {query}");
+        }
+        assert_eq!(depth, 0, "{query}");
     }
 
     #[test]

@@ -4,6 +4,43 @@ What using inkling on inkling's own work has taught us. One dated line per
 finding: what happened, what was expected. Newest first. When a finding is
 fixed, say where and leave the line.
 
+## 2026-10-06
+
+Feedback from a few days of watching dozens of work pull requests, most of them
+on Buildkite. Mostly noise and ambiguity.
+
+- Most `checks success → failure` pushes were stale by the time anyone ran
+  `gh pr checks`: a job failing then retried, a check restarting after a push,
+  a required check re-queued. A handful of a few dozen were real. Buildkite
+  posts a commit status that goes red while the build is still running and
+  clears on a retry; inkling never selected commit statuses, so it couldn't
+  name one either. Expected a red push to name the check and still be red a
+  minute later. Statuses now read and named; see below for holding red.
+- A repo-wide merge lock turned every watched pull request red through one
+  lock-checker check. Expected a policy gate not to count. Fixed:
+  `github.ignore_checks`.
+- `open → approved` didn't say who approved; most were a review bot, which
+  satisfies the requirement but is different news from a person.
+- `draft → approved` and `open → draft` were hard to read: several events
+  collapsed into one, with no actor. The reader wanted to know whether their
+  own tooling had moved the pull request.
+- A merge queue touching 10–15 pull requests sent 10–15 separate pushes inside
+  a minute. Expected one.
+- A bare number forced a lookup every time with dozens of similar pull
+  requests open; wanted the title or a slug.
+- Asked for a per-PR mute and "stop after merged" — both exist (`unwatch`, and
+  finished watches remove themselves) and weren't found.
+- A brace too many in the GraphQL query, while adding commit statuses, read
+  as every pull request vanishing (`wait` exit 5) rather than as an error.
+  Fixed, and the query's balance is now a test.
+- Opening #26 watched buildkite/agent#4458 and #4460 too: the PR body, written
+  by a heredoc in the same Bash call as `gh pr create`, linked them. Expected
+  only the pull request created. Fixed in the same PR: prose — a body, a
+  title, `gh pr view`'s output — never names a target.
+- #26's `pending → success` was pushed mid-turn 15s after the foreground
+  `wait --until checks` saw it, and needed no further lookup. The wait and the
+  server each polled on their own.
+
 ## 2026-09-22
 
 - A green pull request was reported red. `wait --until checks` on

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Commit statuses are read, not just check runs.** CI that reports as a commit status — Buildkite
+  does — used to leave a red pull request unnamed, and kept GitHub's own verdict even when the
+  only other red was a run a re-run had superseded. A red status is now named
+  (`checks success → failure: buildkite/main`), and a pending one keeps the checks pending.
+- **New: `github.ignore_checks`.** Checks named here — a merge lock, a label policy — never turn a
+  pull request red or hold it pending, for `watch`, `wait --until checks` and reactions alike.
+  Exact names: `ignore_checks = ["merge-lock"]`.
+- **Pull requests linked from prose are no longer watched.** The `post-tool` hook read every pull
+  request URL in a `gh pr` command and its output, so one linked from a description, a comment, or
+  the body `gh pr view` prints was watched as if you were working on it. Now only the command's own
+  arguments count, up to any `--body` or `--title`, plus the URL `gh pr create` prints. `gh pr view`
+  with no argument no longer registers the current branch's pull request; `git push` still does.
+
 ## 0.2.1 — 2026-09-23
 
 - **A pull request no longer goes red because an older run of a check did.** GitHub's check rollup
