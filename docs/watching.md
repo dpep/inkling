@@ -521,9 +521,12 @@ considered and rejected:
 say: the second `merge` in the measurement above answered `already merged`.
 
 **Who did it is now said, and still decides nothing.** Since 2026-10-06 a
-state transition names its actors: `ready by @dpep; approved by review-bot
-(bot)`, from each reviewer's latest review and the last ready/draft toggle —
-free in the same query, measured at one rate-limit point either way. A reader
+state transition names whoever caused the state it ended in: `draft → merged
+by @dpep`, `open → approved by @alice / review-bot (bot)`. Only the end state:
+naming who readied a PR on its way to merged answered a question nobody asked.
+The actors come from `mergedBy`, each reviewer's latest review and the last
+ready/draft toggle — free in the same query, measured at one rate-limit point
+either way. A reader
 asked, of a collapsed `draft → approved`, whether their own tooling had moved
 it. The actor is GitHub's login, so a session and its person both read as
 `@dpep`; that is why it informs the reader rather than gating a push, and the

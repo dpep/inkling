@@ -60,16 +60,15 @@ fn digest(events: &[&Event]) -> String {
 }
 
 fn line(event: &Event) -> String {
-    let branch = match &event.branch {
-        Some(branch) => format!(" ({branch})"),
-        None => String::new(),
-    };
     let mut text = format!(
-        "{}{branch} {} {} → {}",
+        "{} | {} {} → {}",
         event.reference, event.axis, event.from, event.to
     );
-    if let Some(detail) = &event.detail {
-        text.push_str(&format!(": {detail}"));
+    // A state's detail is who caused it ("by @x"), a check's is its name.
+    match (&event.detail, event.axis) {
+        (Some(by), Axis::State) => text.push_str(&format!(" {by}")),
+        (Some(detail), _) => text.push_str(&format!(": {detail}")),
+        (None, _) => {}
     }
     if let Some(command) = more(event) {
         text.push_str(&format!(" ({command})"));
@@ -399,7 +398,7 @@ mod tests {
     use super::*;
     use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
 
-    use crate::domain::watch::{Actors, FailedCheck, Head, Sighting, Standing};
+    use crate::domain::watch::{Actors, FailedCheck, Sighting, Standing};
     use crate::secret::Secret;
     use crate::testing::FixedClock;
     use std::cell::RefCell;
@@ -552,12 +551,12 @@ mod tests {
         assert_eq!(
             to("/tmp/a"),
             ["inkling: 2 changes\n\
-              - github.com/dpep/inkling#3 state open → approved\n\
-              - github.com/dpep/inkling#3 state approved → merged"]
+              - github.com/dpep/inkling#3 | state open → approved\n\
+              - github.com/dpep/inkling#3 | state approved → merged"]
         );
         assert_eq!(
             to("/tmp/b"),
-            ["inkling: github.com/dpep/inkling#3 state approved → merged"]
+            ["inkling: github.com/dpep/inkling#3 | state approved → merged"]
         );
     }
 
@@ -800,7 +799,7 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert_eq!(
             sessions.texts(),
-            ["inkling: github.com/dpep/inkling#3 checks pending → success"]
+            ["inkling: github.com/dpep/inkling#3 | checks pending → success"]
         );
     }
 
@@ -938,33 +937,11 @@ mod tests {
 
         assert_eq!(
             text,
-            "inkling: github.com/dpep/inkling#3 state open → approved"
+            "inkling: github.com/dpep/inkling#3 | state open → approved"
         );
         assert!(
             !text.contains("session socket"),
             "the title is somebody else's prose: {text}"
-        );
-    }
-
-    #[test]
-    fn a_pull_request_is_named_by_its_branch_not_its_title() {
-        let mut watches = watching();
-        watches.record(
-            &[(
-                pr(3),
-                Sighting {
-                    head: Some(Head {
-                        repo: "dpep/inkling".into(),
-                        branch: "commit-statuses".into(),
-                    }),
-                    ..sighting(State::Draft, None)
-                },
-            )],
-            now(),
-        );
-        assert_eq!(
-            message(&watches.events[0]),
-            "inkling: github.com/dpep/inkling#3 (commit-statuses) state open → draft"
         );
     }
 
@@ -976,8 +953,8 @@ mod tests {
                 pr(3),
                 Sighting {
                     by: Actors {
-                        approved: vec!["buildsworth-bk-app (bot)".into()],
-                        draft: None,
+                        approved: vec!["@alice".into(), "buildsworth (bot)".into()],
+                        ..Default::default()
                     },
                     ..sighting(State::Approved, None)
                 },
@@ -986,7 +963,7 @@ mod tests {
         );
         assert_eq!(
             message(&watches.events[0]),
-            "inkling: github.com/dpep/inkling#3 state open → approved: approved by buildsworth-bk-app (bot)"
+            "inkling: github.com/dpep/inkling#3 | state open → approved by @alice / buildsworth (bot)"
         );
     }
 
@@ -1016,7 +993,7 @@ mod tests {
     fn a_red_actions_job_points_at_its_log_which_is_readable_before_the_run_ends() {
         assert_eq!(
             went_red(Some(106192233819)),
-            "inkling: github.com/dpep/inkling#3 checks pending → failure: test / build \
+            "inkling: github.com/dpep/inkling#3 | checks pending → failure: test / build \
              (gh api --hostname github.com repos/dpep/inkling/actions/jobs/106192233819/logs)"
         );
     }
@@ -1025,7 +1002,7 @@ mod tests {
     fn a_red_check_with_no_job_behind_it_points_at_the_list_of_checks() {
         assert_eq!(
             went_red(None),
-            "inkling: github.com/dpep/inkling#3 checks pending → failure: test / build \
+            "inkling: github.com/dpep/inkling#3 | checks pending → failure: test / build \
              (gh pr checks 3 --repo github.com/dpep/inkling)"
         );
     }
@@ -1045,7 +1022,7 @@ mod tests {
         let text = message(watches.events.last().unwrap());
         assert_eq!(
             text,
-            "inkling: github.com/dpep/inkling#3 checks pending → success"
+            "inkling: github.com/dpep/inkling#3 | checks pending → success"
         );
     }
 
@@ -1069,7 +1046,7 @@ mod tests {
 
         assert_eq!(
             message(&watches.events[0]),
-            "inkling: AI-1 status To Do → In Review"
+            "inkling: AI-1 | status To Do → In Review"
         );
     }
 
