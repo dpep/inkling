@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A pushed line names the pull request's branch** beside its number —
+  `github.com/you/repo#26 (fix-lock) checks …` — so dozens of similar numbers don't each need a
+  lookup. Not the title: a push lands mid-turn, and a title is prose anyone can write.
 - **A state change says who made it.** `open → approved: approved by review-bot (bot)`, `open →
   draft: drafted by automation (bot)`, and a collapsed `draft → approved` names both: `ready by
   @you; approved by @someone`. A pull request reads `approved` only once GitHub's review

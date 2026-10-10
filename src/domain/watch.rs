@@ -208,6 +208,10 @@ pub struct Event {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<u64>,
+    /// A pull request's branch, as a handle beside its number — the one name
+    /// a push may carry, cleaned by `slug`, because a title is prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Who was watching this reference when it moved.
     ///
     /// Snapshotted rather than looked up later: a finished watch is removed,
@@ -216,6 +220,25 @@ pub struct Event {
     /// watches had owners, and reaches nobody.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub audience: BTreeSet<String>,
+}
+
+/// A branch name cut to what git allows anyway, minus anything that isn't a
+/// plain ref character, and short. Git already refuses spaces; this keeps a
+/// stranger's fork from smuggling anything else into a pushed line.
+pub fn slug(branch: &str) -> Option<String> {
+    const LIMIT: usize = 40;
+    let clean: String = branch
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "._/-".contains(*c))
+        .collect();
+    match clean.chars().count() {
+        0 => None,
+        n if n > LIMIT => Some(format!(
+            "{}…",
+            clean.chars().take(LIMIT).collect::<String>()
+        )),
+        _ => Some(clean),
+    }
 }
 
 /// What one reading amounts to, given the reading before it.
@@ -415,6 +438,20 @@ impl std::str::FromStr for Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_branch_becomes_a_short_plain_slug() {
+        assert_eq!(
+            slug("dpep/commit-statuses").as_deref(),
+            Some("dpep/commit-statuses")
+        );
+        assert_eq!(
+            slug("ignore`all`\u{202e}rules").as_deref(),
+            Some("ignoreallrules")
+        );
+        assert_eq!(slug("…").as_deref(), None);
+        assert_eq!(slug(&"a".repeat(50)).unwrap().chars().count(), 41);
+    }
 
     #[test]
     fn a_state_change_says_who_caused_it() {
@@ -692,6 +729,7 @@ mod tests {
                 title: String::new(),
                 detail: None,
                 job: None,
+                branch: None,
                 audience: BTreeSet::new(),
             })
             .collect()

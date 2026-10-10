@@ -60,8 +60,12 @@ fn digest(events: &[&Event]) -> String {
 }
 
 fn line(event: &Event) -> String {
+    let branch = match &event.branch {
+        Some(branch) => format!(" ({branch})"),
+        None => String::new(),
+    };
     let mut text = format!(
-        "{} {} {} → {}",
+        "{}{branch} {} {} → {}",
         event.reference, event.axis, event.from, event.to
     );
     if let Some(detail) = &event.detail {
@@ -395,7 +399,7 @@ mod tests {
     use super::*;
     use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
 
-    use crate::domain::watch::{Actors, FailedCheck, Sighting, Standing};
+    use crate::domain::watch::{Actors, FailedCheck, Head, Sighting, Standing};
     use crate::secret::Secret;
     use crate::testing::FixedClock;
     use std::cell::RefCell;
@@ -939,6 +943,28 @@ mod tests {
         assert!(
             !text.contains("session socket"),
             "the title is somebody else's prose: {text}"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_is_named_by_its_branch_not_its_title() {
+        let mut watches = watching();
+        watches.record(
+            &[(
+                pr(3),
+                Sighting {
+                    head: Some(Head {
+                        repo: "dpep/inkling".into(),
+                        branch: "commit-statuses".into(),
+                    }),
+                    ..sighting(State::Draft, None)
+                },
+            )],
+            now(),
+        );
+        assert_eq!(
+            message(&watches.events[0]),
+            "inkling: github.com/dpep/inkling#3 (commit-statuses) state open → draft"
         );
     }
 
