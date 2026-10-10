@@ -206,7 +206,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} latestReviews(first: 20) {{ nodes {{ state author {{ __typename login }} }} }} timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {{ nodes {{ ... on ReadyForReviewEvent {{ actor {{ __typename login }} }} ... on ConvertToDraftEvent {{ actor {{ __typename login }} }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision mergedBy {{ __typename login }} title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} latestReviews(first: 20) {{ nodes {{ state author {{ __typename login }} }} }} timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {{ nodes {{ ... on ReadyForReviewEvent {{ actor {{ __typename login }} }} ... on ConvertToDraftEvent {{ actor {{ __typename login }} }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -387,6 +387,8 @@ struct PullRequest {
     state: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(default, rename = "mergedBy")]
+    merged_by: Option<Reviewer>,
     #[serde(default)]
     author: Option<Author>,
     #[serde(default)]
@@ -741,7 +743,12 @@ impl PullRequest {
             .and_then(|toggles| toggles.nodes.last())
             .and_then(|toggle| toggle.actor.as_ref())
             .map(Reviewer::display);
-        Actors { approved, draft }
+        let merged = self.merged_by.as_ref().map(Reviewer::display);
+        Actors {
+            approved,
+            draft,
+            merged,
+        }
     }
 
     /// GitHub reports more rollup states than matter here. Anything not
@@ -1445,6 +1452,18 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(status.by.draft.as_deref(), Some("@dpep"));
+    }
+
+    #[test]
+    fn a_merge_names_who_merged_it() {
+        // Recorded 2026-10-10 from dpep/inkling#29.
+        let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"MERGED",
+            "reviewDecision":null,"mergedBy":{"__typename":"User","login":"dpep"}}}}}"#;
+        let status = interpret(&[pr("inkling", 29)], &parse(json))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.by.merged.as_deref(), Some("@dpep"));
     }
 
     #[test]

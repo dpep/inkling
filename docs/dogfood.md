@@ -12,6 +12,10 @@ fixed, say where and leave the line.
   through as one `state draft → merged` push, which looks like a merge that
   skipped review. The actors from #28 now say who did it, which takes the
   alarm out.
+- The first push from that install read `#29 (push-slug) state draft →
+  merged: ready by @dpep`. Noisy: the branch meant nothing to the reader, and
+  "ready by" named who undrafted it, not who merged it. Now `#29 | state draft
+  → merged by @dpep`: no branch, and the actor of the end state only.
 
 ## 2026-10-06
 
@@ -36,7 +40,8 @@ on Buildkite. Mostly noise and ambiguity.
 - A merge queue touching 10–15 pull requests sent 10–15 separate pushes inside
   a minute. Expected one.
 - A bare number forced a lookup every time with dozens of similar pull
-  requests open; wanted the title or a slug.
+  requests open; wanted the title or a slug. The branch name was tried and
+  dropped (2026-10-10): it read as noise. Titles stay out of pushes.
 - Asked for a per-PR mute and "stop after merged" — both exist (`unwatch`, and
   finished watches remove themselves) and weren't found.
 - A brace too many in the GraphQL query, while adding commit statuses, read

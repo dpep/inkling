@@ -19,7 +19,7 @@ use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
 use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
-use crate::domain::watch::{Event, Head, Sighting, Standing, reading, slug};
+use crate::domain::watch::{Event, Head, Sighting, Standing, reading};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -472,11 +472,6 @@ impl Watches {
             // it moved — not looked up at read time, by when the watch may be
             // finished and its owners gone.
             let audience = watch.owners.clone();
-            let branch = sighting
-                .head
-                .as_ref()
-                .or(watch.head.as_ref())
-                .and_then(|head| slug(&head.branch));
             let read = reading(watch.seen.as_ref().map(|s| &s.standing), sighting);
             if !read.moved.is_empty() {
                 watch.stirred_at = Some(observed_at);
@@ -502,7 +497,6 @@ impl Watches {
                     title: sighting.title.clone(),
                     detail: moved.detail,
                     job: moved.job,
-                    branch: branch.clone(),
                     audience: audience.clone(),
                 });
             }

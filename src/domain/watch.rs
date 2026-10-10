@@ -157,25 +157,23 @@ pub struct Actors {
     pub approved: Vec<String>,
     /// Who last marked it ready or converted it to draft.
     pub draft: Option<String>,
+    /// Who merged it.
+    pub merged: Option<String>,
 }
 
 impl Actors {
-    /// What a state transition says about who caused it, if anything.
+    /// Who put a pull request in the state it is now in, if anyone can say.
+    /// Only the end state counts: whoever readied a PR on its way to merged
+    /// is not who merged it.
     fn of(&self, was: State, now: State) -> Option<String> {
-        let mut said = Vec::new();
-        if let Some(actor) = &self.draft {
-            match (was, now) {
-                (State::Draft, now) if now != State::Draft => {
-                    said.push(format!("ready by {actor}"))
-                }
-                (_, State::Draft) => said.push(format!("drafted by {actor}")),
-                _ => {}
-            }
-        }
-        if now == State::Approved && !self.approved.is_empty() {
-            said.push(format!("approved by {}", self.approved.join(", ")));
-        }
-        (!said.is_empty()).then(|| said.join("; "))
+        let who = match now {
+            State::Merged => self.merged.clone()?,
+            State::Approved if !self.approved.is_empty() => self.approved.join(" / "),
+            State::Draft => self.draft.clone()?,
+            State::Open if was == State::Draft => self.draft.clone()?,
+            _ => return None,
+        };
+        Some(format!("by {who}"))
     }
 }
 
@@ -208,10 +206,6 @@ pub struct Event {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<u64>,
-    /// A pull request's branch, as a handle beside its number — the one name
-    /// a push may carry, cleaned by `slug`, because a title is prose.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
     /// Who was watching this reference when it moved.
     ///
     /// Snapshotted rather than looked up later: a finished watch is removed,
@@ -220,25 +214,6 @@ pub struct Event {
     /// watches had owners, and reaches nobody.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub audience: BTreeSet<String>,
-}
-
-/// A branch name cut to what git allows anyway, minus anything that isn't a
-/// plain ref character, and short. Git already refuses spaces; this keeps a
-/// stranger's fork from smuggling anything else into a pushed line.
-pub fn slug(branch: &str) -> Option<String> {
-    const LIMIT: usize = 40;
-    let clean: String = branch
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || "._/-".contains(*c))
-        .collect();
-    match clean.chars().count() {
-        0 => None,
-        n if n > LIMIT => Some(format!(
-            "{}…",
-            clean.chars().take(LIMIT).collect::<String>()
-        )),
-        _ => Some(clean),
-    }
 }
 
 /// What one reading amounts to, given the reading before it.
@@ -440,40 +415,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_branch_becomes_a_short_plain_slug() {
-        assert_eq!(
-            slug("dpep/commit-statuses").as_deref(),
-            Some("dpep/commit-statuses")
-        );
-        assert_eq!(
-            slug("ignore`all`\u{202e}rules").as_deref(),
-            Some("ignoreallrules")
-        );
-        assert_eq!(slug("…").as_deref(), None);
-        assert_eq!(slug(&"a".repeat(50)).unwrap().chars().count(), 41);
-    }
-
-    #[test]
     fn a_state_change_says_who_caused_it() {
-        let by = |approved: &[&str], draft: Option<&str>| Actors {
-            approved: approved.iter().map(|a| a.to_string()).collect(),
-            draft: draft.map(str::to_string),
+        let by = Actors {
+            approved: vec!["@alice".into(), "buildsworth (bot)".into()],
+            draft: Some("@dpep".into()),
+            merged: Some("@carol".into()),
         };
-        // Marked ready and approved inside one reading: one transition, and
-        // the two events it collapses are both named.
+        let of = |was, now| by.of(was, now);
         assert_eq!(
-            by(&["review-bot (bot)"], Some("@dpep")).of(State::Draft, State::Approved),
-            Some("ready by @dpep; approved by review-bot (bot)".into())
+            of(State::Draft, State::Approved),
+            Some("by @alice / buildsworth (bot)".into()),
+            "who approved, not who readied it on the way"
         );
+        assert_eq!(of(State::Draft, State::Merged), Some("by @carol".into()));
+        assert_eq!(of(State::Draft, State::Open), Some("by @dpep".into()));
+        assert_eq!(of(State::Open, State::Draft), Some("by @dpep".into()));
         assert_eq!(
-            by(&[], Some("automation (bot)")).of(State::Open, State::Draft),
-            Some("drafted by automation (bot)".into())
-        );
-        assert_eq!(
-            by(&["@a"], Some("@dpep")).of(State::Approved, State::Merged),
+            of(State::Approved, State::Open),
             None,
-            "an old toggle and a standing approval say nothing about a merge"
+            "an old toggle says nothing about a withdrawn approval"
         );
+        assert_eq!(Actors::default().of(State::Open, State::Merged), None);
     }
 
     fn pull(state: State, checks: Option<CheckState>) -> Sighting {
@@ -729,7 +691,6 @@ mod tests {
                 title: String::new(),
                 detail: None,
                 job: None,
-                branch: None,
                 audience: BTreeSet::new(),
             })
             .collect()
