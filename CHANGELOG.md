@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Red is pushed only once a second reading agrees.** CI that marks a build red while a retry is
+  still running — Buildkite does — used to push `success → failure` for a failure gone a minute
+  later. A red push now waits for the next reading, about a minute, and is dropped if the checks
+  moved on. Pull and `wait` are unchanged.
+- **One push per round.** Everything due to a session at once arrives as one message, a line per
+  change, so a merge queue landing fifteen pull requests costs one turn instead of fifteen.
 - **Commit statuses are read, not just check runs.** CI that reports as a commit status — Buildkite
   does — used to leave a red pull request unnamed, and kept GitHub's own verdict even when the
   only other red was a run a re-run had superseded. A red status is now named

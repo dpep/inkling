@@ -41,8 +41,27 @@ use chrono::{DateTime, TimeDelta, Utc};
 /// request's title or the issue's summary: this lands inside an agent's turn,
 /// and prose somebody else wrote does not belong there.
 pub fn message(event: &Event) -> String {
+    format!("inkling: {}", line(event))
+}
+
+/// Everything one round owes a session, as one message: a merge queue that
+/// lands fifteen pull requests costs one turn, not fifteen.
+fn digest(events: &[&Event]) -> String {
+    match events {
+        [event] => message(event),
+        _ => {
+            let mut text = format!("inkling: {} changes", events.len());
+            for event in events {
+                text.push_str(&format!("\n- {}", line(event)));
+            }
+            text
+        }
+    }
+}
+
+fn line(event: &Event) -> String {
     let mut text = format!(
-        "inkling: {} {} {} → {}",
+        "{} {} {} → {}",
         event.reference, event.axis, event.from, event.to
     );
     if let Some(detail) = &event.detail {
@@ -80,6 +99,49 @@ fn more(event: &Event) -> Option<String> {
         }
         None => format!("gh pr checks {number} --repo {host}/{owner}/{repo}"),
     })
+}
+
+/// How long red must last before it is pushed: one later reading at least
+/// this much after it. CI that marks a build red while a retry is still
+/// running — Buildkite's "failing" — clears within that, and a reader told
+/// of it finds nothing failing by the time they look. The reading schedule
+/// re-reads a watch a minute after it moves, so this costs about a minute.
+pub const RED_SETTLE: TimeDelta = TimeDelta::seconds(30);
+
+/// What to do with a transition that is otherwise worth a turn.
+#[derive(Debug, PartialEq, Eq)]
+enum Ripe {
+    Push,
+    /// Already overtaken: a later reading moved its checks again.
+    Pass,
+    /// Not yet known to last. It, and everything after it, waits for a round
+    /// that can tell — the cursor is one number, so nothing may overtake it.
+    Hold,
+}
+
+fn ripe(event: &Event, watches: &Watches) -> Ripe {
+    if event.axis != Axis::Checks || event.to != CheckState::Failure.as_str() {
+        return Ripe::Push;
+    }
+    let overtaken = watches.events.iter().any(|later| {
+        later.seq > event.seq && later.axis == Axis::Checks && later.reference == event.reference
+    });
+    if overtaken {
+        return Ripe::Pass;
+    }
+    // A watch that has gone will not be read again, so nothing would ever
+    // settle it.
+    let Some(seen) = watches
+        .watches
+        .get(&event.reference.to_string())
+        .and_then(|watch| watch.seen.as_ref())
+    else {
+        return Ripe::Push;
+    };
+    match seen.at - event.at >= RED_SETTLE {
+        true => Ripe::Push,
+        false => Ripe::Hold,
+    }
 }
 
 /// Whether a transition is worth starting a turn over.
@@ -164,24 +226,33 @@ pub fn round(sessions: &dyn Sessions, watches: &Watches, clock: &dyn Clock) -> V
             // Addressed, not merely newer: a session hears about the things
             // it is watching and nothing else, however many others are
             // running on this machine.
-            let owed: Vec<&Event> = addressed(&watches.events, cursor, subscriber)
-                .into_iter()
-                .filter(|event| worth_a_turn(event))
-                .collect();
+            let mut owed: Vec<&Event> = Vec::new();
+            for event in addressed(&watches.events, cursor, subscriber) {
+                if !worth_a_turn(event) {
+                    continue;
+                }
+                match ripe(event, watches) {
+                    Ripe::Push => owed.push(event),
+                    Ripe::Pass => {}
+                    Ripe::Hold => break,
+                }
+            }
             // A session is only ever told so much. What the budget withholds
             // stays in the feed for the next prompt, so this caps the turns
             // inkling can cost without dropping anything.
             let allowance = watches.allowance(subscriber, clock.now());
-            if owed.len() > allowance {
+            if !owed.is_empty() && allowance == 0 {
                 tracing::info!(
                     subscriber,
                     owed = owed.len(),
-                    allowance,
                     window_minutes = crate::adapters::watches_json::PUSH_WINDOW.num_minutes(),
                     "withheld; the rest waits for a prompt"
                 );
             }
-            let due: Vec<&Event> = owed.into_iter().take(allowance).collect();
+            let due: Vec<&Event> = match allowance {
+                0 => Vec::new(),
+                _ => owed,
+            };
             match due.is_empty() {
                 true => probe(sessions, subscriber, address),
                 false => push(sessions, subscriber, address, &due, clock),
@@ -198,43 +269,40 @@ fn push(
     clock: &dyn Clock,
 ) -> Outcome {
     let mut outcome = Outcome::for_subscriber(subscriber);
-    for event in due {
-        let started = clock.now();
-        let sent = sessions.deliver(address, &message(event));
-        let elapsed_ms = (clock.now() - started).num_milliseconds();
+    let last = due.last().map(|event| event.seq);
+    let started = clock.now();
+    let sent = sessions.deliver(address, &digest(due));
+    let elapsed_ms = (clock.now() - started).num_milliseconds();
 
-        match sent {
-            Ok(Written) => {
-                outcome.cursor = Some(event.seq);
-                outcome.written += 1;
-                tracing::info!(
-                    subscriber,
-                    seq = event.seq,
-                    outcome = "written",
-                    elapsed_ms,
-                    advanced = true,
-                    "pushed"
-                );
-            }
-            Err(error) => {
-                outcome.detach = error.drop_address();
-                tracing::info!(
-                    subscriber,
-                    seq = event.seq,
-                    outcome = match outcome.detach {
-                        true => "gone",
-                        false => "transient",
-                    },
-                    elapsed_ms,
-                    advanced = false,
-                    %error,
-                    "pushed"
-                );
-                // Stop at the first failure. The cursor is one number, so
-                // skipping past a message that didn't arrive would mark it
-                // delivered along with the ones that did.
-                break;
-            }
+    match sent {
+        Ok(Written) => {
+            outcome.cursor = last;
+            outcome.written = 1;
+            tracing::info!(
+                subscriber,
+                seq = last,
+                events = due.len(),
+                outcome = "written",
+                elapsed_ms,
+                advanced = true,
+                "pushed"
+            );
+        }
+        Err(error) => {
+            outcome.detach = error.drop_address();
+            tracing::info!(
+                subscriber,
+                seq = last,
+                events = due.len(),
+                outcome = match outcome.detach {
+                    true => "gone",
+                    false => "transient",
+                },
+                elapsed_ms,
+                advanced = false,
+                %error,
+                "pushed"
+            );
         }
     }
     outcome
@@ -476,9 +544,16 @@ mod tests {
                 .map(|(_, t)| t.clone())
                 .collect()
         };
-        assert_eq!(to("/tmp/a").len(), 2, "approved and merged");
-        assert_eq!(to("/tmp/b").len(), 1, "{:?}", to("/tmp/b"));
-        assert!(to("/tmp/b")[0].contains("approved → merged"));
+        assert_eq!(
+            to("/tmp/a"),
+            ["inkling: 2 changes\n\
+              - github.com/dpep/inkling#3 state open → approved\n\
+              - github.com/dpep/inkling#3 state approved → merged"]
+        );
+        assert_eq!(
+            to("/tmp/b"),
+            ["inkling: github.com/dpep/inkling#3 state approved → merged"]
+        );
     }
 
     #[test]
@@ -645,21 +720,94 @@ mod tests {
         watches.attach("s", address("/tmp/a"), now());
         let sessions = FakeSessions::default();
 
-        for _ in 0..PUSH_BUDGET {
+        for _ in 0..=PUSH_BUDGET {
             moved(&mut watches, State::Approved);
             moved(&mut watches, State::Open);
             deliver(&sessions, &mut watches);
         }
-        assert_eq!(sessions.texts().len(), PUSH_BUDGET);
+        assert_eq!(
+            sessions.texts().len(),
+            PUSH_BUDGET,
+            "the last round withheld"
+        );
 
-        // A window later the session can be told things again — and still no
-        // more than a budget's worth of them.
+        // A window later the session is told what was withheld.
         let later = now() + PUSH_WINDOW + TimeDelta::seconds(1);
         let clock = FixedClock::at("2026-09-20T12:06:00Z");
         for outcome in round(&sessions, &watches, &clock) {
             outcome.apply(&mut watches, later);
         }
-        assert_eq!(sessions.texts().len(), PUSH_BUDGET * 2);
+        assert_eq!(sessions.texts().len(), PUSH_BUDGET + 1);
+        assert!(sessions.texts()[PUSH_BUDGET].starts_with("inkling: 2 changes"));
+    }
+
+    /// Green and attached, so the next reading is the only news.
+    fn green_and_attached() -> Watches {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s", forever(), now());
+        read(&mut watches, State::Open, CheckState::Success, 0);
+        watches.attach("s", address("/tmp/a"), now());
+        watches
+    }
+
+    fn read(watches: &mut Watches, state: State, checks: CheckState, seconds: i64) {
+        let at = now() + TimeDelta::seconds(seconds);
+        watches.record(&[(pr(3), sighting(state, Some(checks)))], at);
+    }
+
+    #[test]
+    fn red_waits_for_a_second_reading_that_still_says_red() {
+        let mut watches = green_and_attached();
+        read(&mut watches, State::Open, CheckState::Failure, 10);
+        read(&mut watches, State::Approved, CheckState::Failure, 20);
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert!(
+            sessions.texts().is_empty(),
+            "red not yet known to last, and the approval queues behind it: {:?}",
+            sessions.texts()
+        );
+
+        // Read again a minute on, still red: now it is news.
+        read(&mut watches, State::Approved, CheckState::Failure, 70);
+        deliver(&sessions, &mut watches);
+        let texts = sessions.texts();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("success → failure"), "{texts:?}");
+        assert!(texts[0].contains("open → approved"), "{texts:?}");
+    }
+
+    #[test]
+    fn red_that_a_retry_cleared_is_never_pushed() {
+        // Buildkite marks a build red while a retry is still running, and the
+        // retry passing takes it back.
+        let mut watches = green_and_attached();
+        let sessions = FakeSessions::default();
+
+        read(&mut watches, State::Open, CheckState::Failure, 10);
+        deliver(&sessions, &mut watches);
+        read(&mut watches, State::Open, CheckState::Pending, 70);
+        deliver(&sessions, &mut watches);
+        assert!(sessions.texts().is_empty(), "{:?}", sessions.texts());
+
+        read(&mut watches, State::Open, CheckState::Success, 300);
+        deliver(&sessions, &mut watches);
+        assert_eq!(
+            sessions.texts(),
+            ["inkling: github.com/dpep/inkling#3 checks pending → success"]
+        );
+    }
+
+    #[test]
+    fn red_on_a_watch_that_is_gone_is_pushed_rather_than_held_forever() {
+        let mut watches = green_and_attached();
+        read(&mut watches, State::Open, CheckState::Failure, 10);
+        watches.watches.clear();
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert_eq!(sessions.texts().len(), 1, "{:?}", sessions.texts());
     }
 
     #[test]

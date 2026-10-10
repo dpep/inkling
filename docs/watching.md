@@ -139,6 +139,31 @@ still an observation: inkling names where the log is and runs nothing.
   as later jobs finish, so no second event says whether the slow job passed.
   `gh pr checks` answers that; the log is the more urgent question.
 
+## Red that a retry clears
+
+Reported 2026-10-06 from a few days on dozens of Buildkite pull requests: most
+`success → failure` pushes had cleared by the time anyone ran `gh pr checks`.
+Buildkite posts its commit status red the moment a job fails, while the build
+is still running and an automatic retry may pass it; a few dozen pushes held a
+handful of real failures.
+
+**What was built: a red push waits for a second reading.** A checks event into
+`failure` is pushed only once the watch has been read again at least
+`RED_SETTLE` (30s) later; if that reading has moved the checks again, the red
+is passed over. The schedule re-reads a watch a minute after it moves, so red
+costs about a minute — the trade [the section above](#red-arrives-before-its-logs-do--or-seems-to)
+measured and declined for a whole suite to finish, which is minutes. A held red
+holds everything after it for the same minute, because the cursor is one
+number.
+
+- **Push only.** Pull and `wait --until checks` still report red on the reading
+  that saw it: pull costs no turn, and a wait is one answer someone asked for.
+- **A gone watch doesn't hold.** Nothing will read it again, so its red is
+  pushed rather than kept forever.
+- **The retry's `pending → success` is still pushed.** The reader never heard
+  the red, so it reads as a second green; telling them apart would need the
+  red remembered per subscriber.
+
 ## Red that a re-run already answered
 
 A context in the rollup is one check **run**, not one check. Run a workflow
