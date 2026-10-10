@@ -6,7 +6,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Category, FailedCheck, Head};
+use crate::domain::watch::{Actors, Category, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -123,6 +123,8 @@ pub struct RefStatus {
     pub failing: Option<FailedCheck>,
     /// The branch its commits come from, so a push to it can be recognised.
     pub head: Option<Head>,
+    /// Who did what to it, so a transition can say.
+    pub by: Actors,
 }
 
 impl RefStatus {
@@ -134,6 +136,7 @@ impl RefStatus {
             checks: None,
             failing: None,
             head: None,
+            by: Default::default(),
         }
     }
 }

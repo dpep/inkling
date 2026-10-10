@@ -8,7 +8,7 @@
 use crate::domain::detect::Pushed;
 use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{FailedCheck, Head};
+use crate::domain::watch::{Actors, FailedCheck, Head};
 use crate::ports::{Lookup, ProviderError, RefError, RefStatus, StatusProvider};
 use crate::secret::Secret;
 use serde::Deserialize;
@@ -206,7 +206,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} latestReviews(first: 20) {{ nodes {{ state author {{ __typename login }} }} }} timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {{ nodes {{ ... on ReadyForReviewEvent {{ actor {{ __typename login }} }} ... on ConvertToDraftEvent {{ actor {{ __typename login }} }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -291,6 +291,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                             .or_else(|| runs_checks(reference).then_some(CheckState::Pending)),
                         failing: pr.failing(),
                         head: pr.head(),
+                        by: pr.actors(),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -397,6 +398,57 @@ struct PullRequest {
     head_repository: Option<NamedRepository>,
     #[serde(default)]
     commits: Commits,
+    #[serde(default, rename = "latestReviews")]
+    latest_reviews: Option<Reviews>,
+    /// The latest ready-for-review or convert-to-draft, whichever was last.
+    #[serde(default, rename = "timelineItems")]
+    draft_toggles: Option<Toggles>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct Toggles {
+    #[serde(default)]
+    nodes: Vec<Toggle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Toggle {
+    /// Null for a deleted account.
+    #[serde(default)]
+    actor: Option<Reviewer>,
+}
+
+/// Each reviewer's latest review, which is the one that stands.
+#[derive(Debug, Deserialize, Default)]
+struct Reviews {
+    #[serde(default)]
+    nodes: Vec<Review>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Review {
+    state: String,
+    /// Null for a deleted account.
+    #[serde(default)]
+    author: Option<Reviewer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Reviewer {
+    #[serde(rename = "__typename")]
+    kind: String,
+    login: String,
+}
+
+impl Reviewer {
+    /// Logins only, never names: this reaches a session mid-turn, and a
+    /// login's alphabet can't carry an instruction.
+    fn display(&self) -> String {
+        match self.kind.as_str() {
+            "Bot" => format!("{} (bot)", self.login),
+            _ => format!("@{}", self.login),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,6 +724,24 @@ impl PullRequest {
             repo: self.head_repository.as_ref()?.name_with_owner.clone(),
             branch: self.head_ref_name.clone()?,
         })
+    }
+
+    fn actors(&self) -> Actors {
+        let approved = self
+            .latest_reviews
+            .iter()
+            .flat_map(|reviews| &reviews.nodes)
+            .filter(|review| review.state == "APPROVED")
+            .filter_map(|review| review.author.as_ref())
+            .map(Reviewer::display)
+            .collect();
+        let draft = self
+            .draft_toggles
+            .as_ref()
+            .and_then(|toggles| toggles.nodes.last())
+            .and_then(|toggle| toggle.actor.as_ref())
+            .map(Reviewer::display);
+        Actors { approved, draft }
     }
 
     /// GitHub reports more rollup states than matter here. Anything not
@@ -1328,6 +1398,53 @@ mod tests {
         let json = r#"{"errors":[{"message":"Expected one of SCHEMA, SCALAR, TYPE, ENUM, INPUT, UNION, INTERFACE, actual: RCURLY (\"}\") at [1, 488]","locations":[{"line":1,"column":488}]}]}"#;
         let result = interpret(&[pr("x", 1)], &parse(json))[0].1.clone();
         assert!(matches!(result, Err(RefError::Other(_))), "{result:?}");
+    }
+
+    #[test]
+    fn approvers_are_named_by_login_and_bots_say_so() {
+        // Recorded 2026-10-06 from buildkite/agent#4456 and #4455: a review
+        // bot approves beside a person, or only comments.
+        let reviewed = |reviews: &str| {
+            let json = format!(
+                r#"{{"data":{{"r0":{{"pullRequest":{{"isDraft":false,"state":"OPEN",
+                "reviewDecision":"APPROVED","latestReviews":{{"nodes":[{reviews}]}}}}}}}}}}"#
+            );
+            interpret(&[pr("agent", 4456)], &parse(&json))[0]
+                .1
+                .clone()
+                .unwrap()
+                .by
+                .approved
+        };
+        assert_eq!(
+            reviewed(
+                r#"{"state":"APPROVED","author":{"__typename":"User","login":"CerealBoy"}},
+                {"state":"APPROVED","author":{"__typename":"Bot","login":"buildsworth-bk-app"}}"#
+            ),
+            ["@CerealBoy", "buildsworth-bk-app (bot)"]
+        );
+        assert_eq!(
+            reviewed(
+                r#"{"state":"COMMENTED","author":{"__typename":"Bot","login":"buildsworth-bk-app"}},
+                {"state":"APPROVED","author":{"__typename":"User","login":"CerealBoy"}},
+                {"state":"APPROVED","author":null}"#
+            ),
+            ["@CerealBoy"],
+            "a comment is not an approval, and a deleted account has no name"
+        );
+    }
+
+    #[test]
+    fn the_latest_draft_toggle_names_who_made_it() {
+        // Recorded 2026-10-06 from dpep/inkling#25.
+        let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
+            "reviewDecision":null,"timelineItems":{"nodes":[
+            {"__typename":"ReadyForReviewEvent","actor":{"__typename":"User","login":"dpep"}}]}}}}}"#;
+        let status = interpret(&[pr("inkling", 25)], &parse(json))[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(status.by.draft.as_deref(), Some("@dpep"));
     }
 
     #[test]

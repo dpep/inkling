@@ -143,6 +143,40 @@ pub struct Sighting {
     /// news, and including it in the comparison would emit an event every
     /// time the first red job changed name.
     pub failing: Option<FailedCheck>,
+    /// Outside `Standing` for the same reason as `failing`: a second
+    /// approver is not a transition.
+    pub by: Actors,
+}
+
+/// Who moved a pull request, as `@login`, or `login (bot)` for an app: a
+/// review bot satisfying the requirement, or automation sending a pull
+/// request back to draft, is different news from a person.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Actors {
+    /// Whose approvals stand.
+    pub approved: Vec<String>,
+    /// Who last marked it ready or converted it to draft.
+    pub draft: Option<String>,
+}
+
+impl Actors {
+    /// What a state transition says about who caused it, if anything.
+    fn of(&self, was: State, now: State) -> Option<String> {
+        let mut said = Vec::new();
+        if let Some(actor) = &self.draft {
+            match (was, now) {
+                (State::Draft, now) if now != State::Draft => {
+                    said.push(format!("ready by {actor}"))
+                }
+                (_, State::Draft) => said.push(format!("drafted by {actor}")),
+                _ => {}
+            }
+        }
+        if now == State::Approved && !self.approved.is_empty() {
+            said.push(format!("approved by {}", self.approved.join(", ")));
+        }
+        (!said.is_empty()).then(|| said.join("; "))
+    }
 }
 
 /// A change worth telling somebody about.
@@ -229,7 +263,7 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                     axis: Axis::State,
                     from: was.as_str().into(),
                     to: now.as_str().into(),
-                    detail: None,
+                    detail: after.by.of(*was, *now),
                     job: None,
                 });
             }
@@ -382,12 +416,36 @@ impl std::str::FromStr for Cursor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_state_change_says_who_caused_it() {
+        let by = |approved: &[&str], draft: Option<&str>| Actors {
+            approved: approved.iter().map(|a| a.to_string()).collect(),
+            draft: draft.map(str::to_string),
+        };
+        // Marked ready and approved inside one reading: one transition, and
+        // the two events it collapses are both named.
+        assert_eq!(
+            by(&["review-bot (bot)"], Some("@dpep")).of(State::Draft, State::Approved),
+            Some("ready by @dpep; approved by review-bot (bot)".into())
+        );
+        assert_eq!(
+            by(&[], Some("automation (bot)")).of(State::Open, State::Draft),
+            Some("drafted by automation (bot)".into())
+        );
+        assert_eq!(
+            by(&["@a"], Some("@dpep")).of(State::Approved, State::Merged),
+            None,
+            "an old toggle and a standing approval say nothing about a merge"
+        );
+    }
+
     fn pull(state: State, checks: Option<CheckState>) -> Sighting {
         Sighting {
             standing: Standing::PullRequest { state, checks },
             title: "Add inkling wait".into(),
             failing: None,
             head: None,
+            by: Default::default(),
         }
     }
 
@@ -400,6 +458,7 @@ mod tests {
             title: "Try the watch feature".into(),
             failing: None,
             head: None,
+            by: Default::default(),
         }
     }
 

@@ -46,8 +46,9 @@ Two more have since joined it, each one sentence long:
   that runs no checks; one reading cannot tell them apart. So once a rollup
   has been seen, a reading without one keeps the rollup it had. See below.
 - **A transition is news even to the reader that caused it.** A session that
-  merges a pull request is told `open → merged` seconds later. Inkling knows
-  what changed, not who changed it, and it costs one line, once: the finished
+  merges a pull request is told `open → merged` seconds later. Inkling names
+  who, as a login, but a login can't tell a session from its person, and it
+  costs one line, once: the finished
   watch then removes itself. Revisited against the dogfood log and kept — see
   [Your own actions](#your-own-actions-arrive-as-news-and-that-stays).
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
@@ -518,6 +519,15 @@ considered and rejected:
 
 `gh pr merge` does not return early, contrary to what this document used to
 say: the second `merge` in the measurement above answered `already merged`.
+
+**Who did it is now said, and still decides nothing.** Since 2026-10-06 a
+state transition names its actors: `ready by @dpep; approved by review-bot
+(bot)`, from each reviewer's latest review and the last ready/draft toggle —
+free in the same query, measured at one rate-limit point either way. A reader
+asked, of a collapsed `draft → approved`, whether their own tooling had moved
+it. The actor is GitHub's login, so a session and its person both read as
+`@dpep`; that is why it informs the reader rather than gating a push, and the
+reasons above stand.
 The confirmation argument was wrong; the decision survives without it.
 
 What would change this: the dogfood log still showing sessions told about

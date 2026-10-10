@@ -395,7 +395,7 @@ mod tests {
     use super::*;
     use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
 
-    use crate::domain::watch::{FailedCheck, Sighting, Standing};
+    use crate::domain::watch::{Actors, FailedCheck, Sighting, Standing};
     use crate::secret::Secret;
     use crate::testing::FixedClock;
     use std::cell::RefCell;
@@ -483,6 +483,7 @@ mod tests {
             title: "Add the session socket sink".into(),
             failing: None,
             head: None,
+            by: Default::default(),
         }
     }
 
@@ -941,6 +942,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_approval_says_who_gave_it() {
+        let mut watches = watching();
+        watches.record(
+            &[(
+                pr(3),
+                Sighting {
+                    by: Actors {
+                        approved: vec!["buildsworth-bk-app (bot)".into()],
+                        draft: None,
+                    },
+                    ..sighting(State::Approved, None)
+                },
+            )],
+            now(),
+        );
+        assert_eq!(
+            message(&watches.events[0]),
+            "inkling: github.com/dpep/inkling#3 state open → approved: approved by buildsworth-bk-app (bot)"
+        );
+    }
+
     fn went_red(job: Option<u64>) -> String {
         let mut watches = watching();
         watches.record(
@@ -1013,6 +1036,7 @@ mod tests {
             title: "Try the watch feature".into(),
             failing: None,
             head: None,
+            by: Default::default(),
         };
         watches.record(&[(key.clone(), issue("To Do"))], now());
         watches.record(&[(key, issue("In Review"))], now());

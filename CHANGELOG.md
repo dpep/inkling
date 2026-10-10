@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A state change says who made it.** `open → approved: approved by review-bot (bot)`, `open →
+  draft: drafted by automation (bot)`, and a collapsed `draft → approved` names both: `ready by
+  @you; approved by @someone`. A pull request reads `approved` only once GitHub's review
+  requirement is met, so a bot named alone there is a bot that satisfied it.
 - **Red is pushed only once a second reading agrees.** CI that marks a build red while a retry is
   still running — Buildkite does — used to push `success → failure` for a failure gone a minute
   later. A red push now waits for the next reading, about a minute, and is dropped if the checks
