@@ -4,6 +4,15 @@ What using inkling on inkling's own work has taught us. One dated line per
 finding: what happened, what was expected. Newest first. When a finding is
 fixed, say where and leave the line.
 
+## 2026-10-10
+
+- Landing the #26–#29 stack: each `wait --until checks` in the background woke
+  me green in about a minute, and the push for the same green arrived mid-turn
+  just after it. Marking #27 ready and merging it before the next reading came
+  through as one `state draft → merged` push, which looks like a merge that
+  skipped review. The actors from #28 now say who did it, which takes the
+  alarm out.
+
 ## 2026-10-06
 
 Feedback from a few days of watching dozens of work pull requests, most of them
