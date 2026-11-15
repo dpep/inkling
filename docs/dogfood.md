@@ -11,6 +11,7 @@ fixed, say where and leave the line.
   `inkling wait 42` fails, and `unwatch 42` can't find a watch made with the
   full form. Expected them to resolve against my own watches. The old README's
   `wait 42` examples worked only because Slack had tracked those pull requests.
+  Fixed: short forms match watches too (`known` in src/main.rs).
 - Two older findings here were fixed in 0.1.0 without a note (#7, #8):
   `owner/repo#N` without the host, and one bad reference aborting `watch`. A
   status review read them as open.

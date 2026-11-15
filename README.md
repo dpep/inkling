@@ -92,8 +92,8 @@ later what changed.
 inkling watch you/repo#42 AI-123    # a pull request and a Jira issue
 inkling watch you/repo#42 --ttl 2h  # default is 72h
 inkling watch                       # what's being watched
-inkling unwatch you/repo#42         # or --all
-inkling events                 # what's moved, and nothing when nothing has
+inkling unwatch 42                  # short forms work once it is watched; or --all
+inkling events                      # what's moved, and nothing when nothing has
 ```
 
 One line per transition: from what, to what, and who caused it or which check
@@ -117,12 +117,8 @@ last event.
 
 - A URL, `github.com/owner/repo#12`, or `owner/repo#12` names a pull request
   completely.
-- `repo#12`, `#12`, or a bare `12` is filled in from what's already tracked,
+- `repo#12`, `#12`, or a bare `12` is filled in from what's already watched,
   and must match exactly one. Ambiguity is an error, not a guess.
-
-"Tracked" means the records in `state.json`, which only the parked Slack
-reactions write. Your own watches don't count, so in practice give the full
-form.
 
 Jira issues are a key (`AI-123`) or an `.atlassian.net/browse/` URL. Jira goes
 through `acli`, which must be on `PATH` and authenticated.
@@ -293,8 +289,7 @@ Everything lives in `~/.local/state/inkling/`:
   written `0600` because it holds session tokens. Deleting it forgets every
   watch and every place.
 - `waits.json` coordinates `inkling wait` processes.
-- `state.json` holds the tracked records that short references are filled in
-  from.
+- `state.json` is the parked Slack reactions' state; nothing else writes it.
 - The resident server's lock and status file sit beside them, so `--watches`
   moves the whole lot somewhere else.
 

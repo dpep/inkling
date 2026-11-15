@@ -99,7 +99,7 @@ enum Command {
     /// with the shell: `inkling wait --until merged 42 && deploy`.
     Wait {
         /// Pull requests to wait on — a URL, `owner/repo#12`, or a shorter
-        /// form matching something already tracked. Several means all of them
+        /// form matching something already watched. Several means all of them
         /// must satisfy the condition.
         targets: Vec<String>,
         /// What to wait for. The default, `changed`, returns on the next
@@ -127,7 +127,7 @@ enum Command {
     /// its `--ttl`, and that expiry is the only cleanup there is.
     Watch {
         /// Pull requests — a URL, `owner/repo#12`, or a shorter form matching
-        /// something tracked — and Jira issues, as a key like `AI-123` or a
+        /// something watched — and Jira issues, as a key like `AI-123` or a
         /// browse URL.
         targets: Vec<String>,
         /// Stop watching after this long, e.g. 2h, 24h, 7d.
@@ -654,8 +654,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             if !targets.is_empty() {
                 let snapshot = store.load().map_err(|e| e.to_string())?;
+                let known = known(&snapshot, &watches.read());
                 let references;
-                (references, refused) = watch_targets(targets, &config.github.hosts, &snapshot);
+                (references, refused) = watch_targets(targets, &config.github.hosts, &known);
                 for problem in &refused {
                     println!("{problem}");
                 }
@@ -730,7 +731,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
 
             let snapshot = store.load().map_err(|e| e.to_string())?;
-            let (references, refused) = watch_targets(targets, &config.github.hosts, &snapshot);
+            let known = known(&snapshot, &watches.read());
+            let (references, refused) = watch_targets(targets, &config.github.hosts, &known);
             for problem in &refused {
                 println!("{problem}");
             }
@@ -834,10 +836,11 @@ fn run(cli: &Cli) -> Result<i32, String> {
             )
             .map_err(|e| e.to_string())?;
 
-            // Read-only, and no lock: a wait never writes the snapshot. It
-            // reads it only to expand short references like `inkling#2`.
+            // Read-only, and no lock: a wait never writes either file. It
+            // reads them only to expand short references like `inkling#2`.
             let snapshot = store.load().map_err(|e| e.to_string())?;
-            let references = wait_targets(targets, &config.github.hosts, &snapshot)?;
+            let known = known(&snapshot, &watch_store(&cli.common).read());
+            let references = wait_targets(targets, &config.github.hosts, &known)?;
 
             let github = GitHubProvider::from_config(&config.github, token);
             let clock = SystemClock;
@@ -932,7 +935,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             let mut config = config;
             let snapshot = store.load().map_err(|e| e.to_string())?;
-            let (channels, force) = classify(targets, &config.github.hosts, &snapshot)?;
+            let known = known(&snapshot, &watch_store(&cli.common).read());
+            let (channels, force) = classify(targets, &config.github.hosts, &known)?;
             if !channels.is_empty() {
                 config.slack.channels = channels;
                 config.slack.personal = false;
@@ -1123,6 +1127,18 @@ fn tracking(records: &[inkling::app::Tracked]) {
     println!();
 }
 
+/// Everything a short reference can select among: what is watched, plus what
+/// the parked Slack reactions track. Watches alone would leave `run`'s records
+/// unreachable; tracked alone made `wait 42` fail for anything not seen in Slack.
+fn known(
+    snapshot: &inkling::adapters::store_json::Snapshot,
+    watches: &inkling::adapters::watches_json::Watches,
+) -> Vec<inkling::domain::model::Reference> {
+    let tracked = snapshot.tracked.values().flat_map(|t| t.references.iter());
+    let watched = watches.watches.values().map(|w| &w.reference);
+    tracked.chain(watched).cloned().collect()
+}
+
 /// Fill in the parts of a reference the caller left out.
 ///
 /// The one rule, for every command that takes a reference: `owner/repo#N`
@@ -1137,7 +1153,7 @@ fn complete(
     repo: Option<String>,
     number: u64,
     hosts: &[String],
-    snapshot: &inkling::adapters::store_json::Snapshot,
+    known: &[inkling::domain::model::Reference],
 ) -> Result<inkling::domain::model::Reference, String> {
     match (owner, repo) {
         (Some(owner), Some(repo)) => match hosts.first() {
@@ -1151,7 +1167,7 @@ fn complete(
                 "{owner}/{repo}#{number}: no github host is configured — give the full reference"
             )),
         },
-        (owner, repo) => resolve(&owner, &repo, number, snapshot),
+        (owner, repo) => resolve(&owner, &repo, number, known),
     }
 }
 
@@ -1162,14 +1178,12 @@ fn resolve(
     owner: &Option<String>,
     repo: &Option<String>,
     number: u64,
-    snapshot: &inkling::adapters::store_json::Snapshot,
+    known: &[inkling::domain::model::Reference],
 ) -> Result<inkling::domain::model::Reference, String> {
     use inkling::domain::model::Reference::GitHubPullRequest;
 
-    let mut matches: Vec<_> = snapshot
-        .tracked
-        .values()
-        .flat_map(|t| t.references.iter())
+    let mut matches: Vec<_> = known
+        .iter()
         .filter(|reference| {
             // A partial reference is always a pull request; a Jira key can
             // only be given in full, so there is nothing to fill in.
@@ -1203,7 +1217,7 @@ fn resolve(
     match matches.len() {
         1 => Ok(matches.remove(0)),
         0 => Err(format!(
-            "{given}: nothing tracked references it — give the full reference, \
+            "{given}: nothing watched matches it — give the full reference, \
              e.g. github.com/owner/repo#{number}"
         )),
         _ => {
@@ -1231,9 +1245,9 @@ fn parse_until(arg: &str) -> Result<inkling::domain::wait::Until, String> {
 fn wait_targets(
     targets: &[String],
     hosts: &[String],
-    snapshot: &inkling::adapters::store_json::Snapshot,
+    known: &[inkling::domain::model::Reference],
 ) -> Result<Vec<inkling::domain::model::Reference>, String> {
-    let (channels, references) = classify(targets, hosts, snapshot)?;
+    let (channels, references) = classify(targets, hosts, known)?;
     if let Some(channel) = channels.first() {
         return Err(format!("{channel}: wait takes pull requests, not channels"));
     }
@@ -1254,7 +1268,7 @@ fn wait_targets(
 fn classify(
     targets: &[String],
     hosts: &[String],
-    snapshot: &inkling::adapters::store_json::Snapshot,
+    known: &[inkling::domain::model::Reference],
 ) -> Result<(Vec<String>, Vec<inkling::domain::model::Reference>), String> {
     use inkling::domain::detect::{Target, parse_target};
 
@@ -1269,7 +1283,7 @@ fn classify(
                 owner,
                 repo,
                 number,
-            } => force.push(complete(owner, repo, number, hosts, snapshot)?),
+            } => force.push(complete(owner, repo, number, hosts, known)?),
         }
     }
     Ok((channels, force))
@@ -1877,12 +1891,12 @@ fn watch_store(common: &Common) -> inkling::adapters::watches_json::WatchStore {
 fn watch_targets(
     targets: &[String],
     hosts: &[String],
-    snapshot: &inkling::adapters::store_json::Snapshot,
+    known: &[inkling::domain::model::Reference],
 ) -> (Vec<inkling::domain::model::Reference>, Vec<String>) {
     let mut references = Vec::new();
     let mut refused = Vec::new();
     for target in targets {
-        match watch_target(target, hosts, snapshot) {
+        match watch_target(target, hosts, known) {
             Ok(reference) => references.push(reference),
             Err(problem) => refused.push(problem),
         }
@@ -1898,7 +1912,7 @@ fn watch_targets(
 fn watch_target(
     target: &str,
     hosts: &[String],
-    snapshot: &inkling::adapters::store_json::Snapshot,
+    known: &[inkling::domain::model::Reference],
 ) -> Result<inkling::domain::model::Reference, String> {
     use inkling::domain::detect::{Target, parse_target};
 
@@ -1911,7 +1925,7 @@ fn watch_target(
             owner,
             repo,
             number,
-        } => complete(owner, repo, number, hosts, snapshot),
+        } => complete(owner, repo, number, hosts, known),
     }
 }
 
@@ -2505,8 +2519,10 @@ mod tests {
     /// The level the dogfood finding was at: each command was tested against
     /// its own idea of what a reference is, so `watch` learning a form and
     /// `wait` not learning it looked green both times.
-    fn each_command(target: &str) -> Vec<(&'static str, Result<String, String>)> {
-        let snapshot = Snapshot::default();
+    fn each_command(
+        target: &str,
+        known: &[inkling::domain::model::Reference],
+    ) -> Vec<(&'static str, Result<String, String>)> {
         let one = [target.to_string()];
         let names = |references: Vec<inkling::domain::model::Reference>| {
             references
@@ -2518,12 +2534,12 @@ mod tests {
         vec![
             (
                 "watch",
-                watch_target(target, &hosts(), &snapshot).map(|r| r.to_string()),
+                watch_target(target, &hosts(), known).map(|r| r.to_string()),
             ),
-            ("wait", wait_targets(&one, &hosts(), &snapshot).map(names)),
+            ("wait", wait_targets(&one, &hosts(), known).map(names)),
             (
                 "run",
-                classify(&one, &hosts(), &snapshot).map(|(_, references)| names(references)),
+                classify(&one, &hosts(), known).map(|(_, references)| names(references)),
             ),
         ]
     }
@@ -2584,7 +2600,7 @@ mod tests {
             "github.com/dpep/inkling#3",
             "dpep/inkling#3",
         ] {
-            for (command, resolved) in each_command(target) {
+            for (command, resolved) in each_command(target, &[]) {
                 assert_eq!(
                     resolved.as_deref(),
                     Ok("github.com/dpep/inkling#3"),
@@ -2595,15 +2611,35 @@ mod tests {
     }
 
     #[test]
-    fn a_shorter_form_still_needs_something_tracked_to_match() {
+    fn a_shorter_form_still_needs_something_watched_to_match() {
         // The other half of the one rule, and the reason it isn't "accept
         // everything": `inkling#3` leaves out the owner, and guessing one
         // would watch somebody else's pull request. Only here does a short
-        // form select among tracked records.
+        // form select among what is already known.
         for target in ["inkling#3", "#3", "3"] {
-            for (command, resolved) in each_command(target) {
+            for (command, resolved) in each_command(target, &[]) {
                 let error = resolved.expect_err(target);
-                assert!(error.contains("nothing tracked"), "{command}: {error}");
+                assert!(error.contains("nothing watched"), "{command}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shorter_form_selects_what_is_already_watched() {
+        // Found by dogfooding: short forms matched only what the Slack
+        // reactions tracked, so with those parked `wait 3` never worked.
+        let now = chrono::Utc::now();
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "cli", now + chrono::TimeDelta::hours(1), now);
+        let known = super::known(&Snapshot::default(), &watches);
+
+        for target in ["inkling#3", "#3", "3"] {
+            for (command, resolved) in each_command(target, &known) {
+                assert_eq!(
+                    resolved.as_deref(),
+                    Ok("github.com/dpep/inkling#3"),
+                    "{command} {target}"
+                );
             }
         }
     }
@@ -2613,7 +2649,7 @@ mod tests {
         // Found by dogfooding: a typo in the second argument cost the watch
         // on the first one, which was the whole reason for running it.
         let targets = ["dpep/inkling#3".to_string(), "42".to_string()];
-        let (references, refused) = watch_targets(&targets, &hosts(), &Snapshot::default());
+        let (references, refused) = watch_targets(&targets, &hosts(), &[]);
 
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].to_string(), "github.com/dpep/inkling#3");
@@ -2734,7 +2770,7 @@ mod tests {
 
     #[test]
     fn a_channel_is_refused_rather_than_watched() {
-        let error = watch_target("#eng", &hosts(), &Snapshot::default()).unwrap_err();
+        let error = watch_target("#eng", &hosts(), &[]).unwrap_err();
         assert!(error.contains("not channels"), "{error}");
     }
 

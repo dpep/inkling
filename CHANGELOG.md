@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`42`, `#42` and `repo#42` now find what you are watching.** The short forms only ever matched
+  pull requests the Slack reactions had seen, so `inkling wait 42` and `inkling unwatch 42` failed
+  for a pull request you had watched by its full name. They now match your watches too, and still
+  refuse to guess between two.
 - **`run` is hidden from `--help`, and the Slack reactions are no longer documented.** Inkling is
   the event feed for agents now; the reactions are parked (docs/deferred.md). Nothing changes for
   anyone still running `run` or `slackmcp`.
