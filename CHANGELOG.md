@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`run` is hidden from `--help`, and the Slack reactions are no longer documented.** Inkling is
+  the event feed for agents now; the reactions are parked (docs/deferred.md). Nothing changes for
+  anyone still running `run` or `slackmcp`.
 - **A state change says who made it**: `github.com/you/repo#26 | state draft → merged by @you`,
   `open → approved by @alice / review-bot (bot)`. It names whoever caused the state it ended in —
   a collapsed `draft → merged` names the merger, not who marked it ready on the way. A pull

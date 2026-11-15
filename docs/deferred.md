@@ -4,6 +4,22 @@ Things deliberately not built, each with what was measured and what would
 change the answer. The point is to avoid re-deriving the evidence — most of
 these were decided against with numbers, not taste.
 
+## Slack reactions, parked
+
+**Parked, 2026-11-14.** v1 — `inkling run` reacting to pull-request links in
+Slack with their state — worked end to end. Usage showed no demand: the binary
+wasn't even installed for weeks, and nothing in crontab runs it. The event
+feed for agents is the product now.
+
+Kept compiling and hidden rather than deleted: `run` is hidden from `--help`
+and `slackmcp` is undocumented. The claude → Slack MCP bridge underneath may be
+useful elsewhere. Don't extend it.
+
+**Revisit when** something needs Slack: extract the bridge into its own crate
+rather than growing it here. Or when the upkeep shows up — `ignore_checks` and
+the commit-status work both had to keep reactions working — then delete it
+outright. Git history keeps it.
+
 ## Tuning how often a watch is read
 
 **Placeholder, 2026-09-20.** A watch is read at 1/24 of how long it has been

@@ -18,10 +18,13 @@ use std::path::PathBuf;
 #[command(
     name = "inkling",
     version,
-    about = "Annotate Slack messages with the current state of what they link to.",
-    long_about = "Finds GitHub pull-request links in Slack messages and keeps the \
-message's reactions reflecting where each PR is.\n\n\
-Built to run from cron. Start with `inkling run --dry-run` to see what it would do."
+    about = "Tell an agent when a pull request or Jira issue it cares about changes.",
+    long_about = "Watches GitHub pull requests and Jira issues and reports each transition \
+once: checks going red or green, an approval, a merge, a status change.\n\n\
+`wait` blocks until a pull request gets somewhere; `watch` and `events` register \
+interest and read what moved later; `subscribe` and `hook` push news into a \
+Claude Code session as it happens.\n\n\
+Start with `inkling wait <pr>`, or install the hooks from the README."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -45,7 +48,7 @@ struct Common {
     /// Watches and their events. Defaults to $XDG_STATE_HOME/inkling/watches.json
     #[arg(long, global = true)]
     watches: Option<PathBuf>,
-    /// More detail. -v adds per-message decisions, -vv adds message text.
+    /// More detail; repeat for more (-vv).
     #[arg(long, short, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
     /// Structured logs, for a collector rather than a person.
@@ -63,6 +66,8 @@ struct Common {
 #[derive(Subcommand)]
 enum Command {
     /// Discover new messages and bring tracked ones up to date.
+    // Hidden: the Slack reactions are parked, not removed (docs/deferred.md).
+    #[command(hide = true)]
     Run {
         /// Channels to search, or pull requests to check now.
         ///
@@ -211,7 +216,7 @@ enum Command {
         #[arg(long)]
         ring: bool,
     },
-    /// Show the search window, tracked records, and credential status.
+    /// Show watches, the resident server, subscribers, and credential status.
     Status,
     /// Inspect or create the config file.
     Config {
@@ -275,12 +280,12 @@ enum ConfigAction {
     },
     /// Print one key's value, as written in the file.
     Get {
-        /// Dotted path, e.g. slack.personal or status.merged.canonical
+        /// Dotted path, e.g. github.token_command or serve.idle_after
         key: String,
     },
     /// Set one key. An empty value removes it.
     Set {
-        /// Dotted path, e.g. slack.personal or status.merged.canonical
+        /// Dotted path, e.g. github.token_command or serve.idle_after
         key: String,
         /// Type is inferred: true/false, whole numbers, comma-separated
         /// lists, otherwise a string. Pass "" to remove the key.
@@ -288,39 +293,21 @@ enum ConfigAction {
     },
 }
 
-/// A working config out of the box: personal mode needs nothing else, since
-/// the user ID resolves itself. Emoji default to ones every workspace has —
-/// `:merged:` and `:shipit:` are common but not universal, and adding one the
-/// workspace lacks fails with invalid_name.
-const STARTER_CONFIG: &str = r##"# Inkling — annotates Slack messages with the state of what they link to.
+/// What `inkling config init` writes. Every value is a default, so the file
+/// changes nothing until edited; it exists to show where the knobs are.
+const STARTER_CONFIG: &str = r##"# Inkling — tells an agent when something it cares about changes.
 # Every field here has a default; this file is a starting point, not a schema.
-
-[slack]
-# Find pull-request links in your own posts, wherever you post them.
-personal = true
-# ...and/or watch specific channels. Handles, not IDs.
-# channels = ["#eng-prs"]
-# user_id resolves from your credentials on first run. `slackmcp whoami` prints it.
-
-[filters]
-# Only annotate messages you wrote, however they were found. Worth keeping on
-# until the behavior is boring: every reaction it leaves is then on a post of
-# yours, which is both a small blast radius and legible feedback.
-only_my_messages = true
 
 [github]
 token_command = "gh auth token"   # or token_env = "GITHUB_TOKEN"
+# Exact check names that never turn a pull request red or hold it pending.
+# ignore_checks = ["merge-lock"]
 
-# Only states listed here are ever signaled — open, draft, and closed stay
-# silent unless you add them. `canonical` is what Inkling adds; `aliases` are
-# what count as someone having already said it, so it stays quiet.
-[status.approved]
-canonical = "white_check_mark"
-aliases = ["heavy_check_mark", "lgtm", "approved"]
-
-[status.merged]
-canonical = "rocket"              # swap for "merged" if your workspace has it
-aliases = ["merged", "shipit", "ship", "done"]
+# The resident server, started by `subscribe` or `watch` when needed.
+[serve]
+# interval = "15s"      # the shortest nap; otherwise it sleeps until a watch is due
+# idle_after = "5m"     # how long with nothing to do before it stands down
+# max_lifetime = "24h"  # so a rebuilt binary eventually gets picked up
 "##;
 
 fn main() {
@@ -1052,9 +1039,9 @@ fn init(path: &std::path::Path, force: bool) -> Result<i32, String> {
 
     println!("wrote {}", path.display());
     println!("\nnext:");
-    println!("  1. edit it — at minimum confirm the emoji exist in your workspace");
+    println!("  1. edit it, if a default doesn't suit");
     println!("  2. inkling config         show what it resolves to");
-    println!("  3. inkling run --dry-run  see what it would do, change nothing");
+    println!("  3. inkling watch <pr>     start watching something");
     Ok(0)
 }
 
@@ -2498,6 +2485,11 @@ mod tests {
 
     fn hosts() -> Vec<String> {
         vec!["github.com".to_string()]
+    }
+
+    #[test]
+    fn the_starter_config_is_a_config_inkling_accepts() {
+        inkling::config::Config::parse(super::STARTER_CONFIG, "config.toml").unwrap();
     }
 
     #[test]

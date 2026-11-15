@@ -4,6 +4,17 @@ What using inkling on inkling's own work has taught us. One dated line per
 finding: what happened, what was expected. Newest first. When a finding is
 fixed, say where and leave the line.
 
+## 2026-11-14
+
+- Rewriting the README without Slack: the short reference forms (`42`, `#42`,
+  `repo#42`) resolve only against `state.json`, which only `run` writes. So
+  `inkling wait 42` fails, and `unwatch 42` can't find a watch made with the
+  full form. Expected them to resolve against my own watches. The old README's
+  `wait 42` examples worked only because Slack had tracked those pull requests.
+- Two older findings here were fixed in 0.1.0 without a note (#7, #8):
+  `owner/repo#N` without the host, and one bad reference aborting `watch`. A
+  status review read them as open.
+
 ## 2026-10-10
 
 - Landing the #26–#29 stack: each `wait --until checks` in the background woke
