@@ -1,6 +1,8 @@
 # Inkling
 
-Tells a Claude Code session when something it cares about changes. A pull
+Keep an eye on things.
+
+Inkling tells a Claude Code session when something it cares about changes. A pull
 request's checks go red or green, it gets approved, it merges; a Jira issue
 moves column. The news lands in the session as one line, mid-turn, without
 anyone asking:
