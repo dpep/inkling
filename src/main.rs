@@ -1968,6 +1968,11 @@ fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
             None => state.to_string(),
         },
         Some(Standing::Issue { status, .. }) => status.clone(),
+        Some(Standing::Message { reactions, replies }) => {
+            let mut said = vec![format!("{} replies", replies.len())];
+            said.extend(reactions.iter().map(|(emoji, n)| format!(":{emoji}: {n}")));
+            said.join(", ")
+        }
     }
 }
 

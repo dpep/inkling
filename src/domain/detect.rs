@@ -45,6 +45,9 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
     if let Some(reference) = parse_jira(trimmed) {
         return Ok(Target::Reference(reference));
     }
+    if let Some(reference) = crate::domain::slack::parse_reference(trimmed) {
+        return Ok(Target::Reference(reference));
+    }
 
     if let Some(partial) = parse_partial(trimmed) {
         return Ok(partial);
@@ -54,6 +57,12 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
         return Err(format!(
             "{trimmed}: looks like a pull request but isn't one — expected \
              https://<host>/<owner>/<repo>/pull/<number>"
+        ));
+    }
+    if crate::domain::slack::looks_like_slack(trimmed) {
+        return Err(format!(
+            "{trimmed}: looks like a Slack message but isn't one — expected a \
+             permalink, https://<workspace>.slack.com/archives/<channel>/p<digits>"
         ));
     }
     if looks_like_a_jira_issue(trimmed) {
@@ -493,6 +502,24 @@ mod tests {
 
     fn detected(text: &str) -> Vec<Reference> {
         detect(text, &hosts())
+    }
+
+    #[test]
+    fn a_slack_permalink_is_a_target_and_a_broken_one_is_an_error() {
+        let target = parse_target(
+            "https://acme.slack.com/archives/C0123ABCD/p1786596050245879",
+            &hosts(),
+        );
+        assert!(
+            matches!(
+                target,
+                Ok(Target::Reference(Reference::SlackMessage { .. }))
+            ),
+            "{target:?}"
+        );
+        let error =
+            parse_target("https://acme.slack.com/archives/C0123ABCD", &hosts()).unwrap_err();
+        assert!(error.contains("Slack message"), "{error}");
     }
 
     #[test]

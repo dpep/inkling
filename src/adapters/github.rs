@@ -748,6 +748,7 @@ impl PullRequest {
             approved,
             draft,
             merged,
+            ..Actors::default()
         }
     }
 

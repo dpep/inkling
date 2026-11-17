@@ -497,6 +497,7 @@ impl Watches {
                     title: sighting.title.clone(),
                     detail: moved.detail,
                     job: moved.job,
+                    own: moved.own,
                     audience: audience.clone(),
                 });
             }

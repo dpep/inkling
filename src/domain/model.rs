@@ -81,6 +81,14 @@ pub enum Reference {
     /// No site: `acli` is authenticated to exactly one, and carrying a field
     /// nothing reads would imply a multi-site story that doesn't exist.
     JiraIssue { key: String },
+    /// One Slack message, watched for replies and reactions. `ts` is the
+    /// message's own; `thread` is the root it replies to, when it is a reply —
+    /// replies are read from the root, so a reply alone can't find them.
+    SlackMessage {
+        channel: String,
+        ts: String,
+        thread: Option<String>,
+    },
 }
 
 impl fmt::Display for Reference {
@@ -93,6 +101,10 @@ impl fmt::Display for Reference {
                 number,
             } => write!(f, "{host}/{owner}/{repo}#{number}"),
             Reference::JiraIssue { key } => f.write_str(key),
+            // Channel and ts alone: they name the message, and they are what
+            // an agent hands Slack's own tools to read it. The thread root is
+            // how to read it, not which message it is.
+            Reference::SlackMessage { channel, ts, .. } => write!(f, "slack:{channel}/{ts}"),
         }
     }
 }
@@ -213,5 +225,15 @@ mod tests {
         assert_eq!(ReactionName::new(":LGTM:"), ReactionName::new("lgtm"));
         assert_eq!(ReactionName::new("  eyes  "), ReactionName::new("eyes"));
         assert_eq!(ReactionName::new(":shipit:").as_str(), "shipit");
+    }
+
+    #[test]
+    fn a_slack_message_is_named_by_channel_and_ts_alone() {
+        let reply = Reference::SlackMessage {
+            channel: "C0123ABC".into(),
+            ts: "1786596050.245879".into(),
+            thread: Some("1786596000.123456".into()),
+        };
+        assert_eq!(reply.to_string(), "slack:C0123ABC/1786596050.245879");
     }
 }

@@ -64,9 +64,12 @@ fn line(event: &Event) -> String {
         "{} | {} {} → {}",
         event.reference, event.axis, event.from, event.to
     );
-    // A state's detail is who caused it ("by @x"), a check's is its name.
+    // A state's or a reply's detail is who caused it ("by @x"), a reaction's
+    // its emoji, a check's its name.
     match (&event.detail, event.axis) {
-        (Some(by), Axis::State) => text.push_str(&format!(" {by}")),
+        (Some(by), Axis::State | Axis::Replies | Axis::Reactions) => {
+            text.push_str(&format!(" {by}"))
+        }
         (Some(detail), _) => text.push_str(&format!(": {detail}")),
         (None, _) => {}
     }
@@ -158,9 +161,10 @@ fn worth_a_turn(event: &Event) -> bool {
     let started = match event.axis {
         Axis::Checks => event.to == CheckState::Pending.as_str(),
         Axis::State => event.from == State::Draft.as_str() && event.to == State::Open.as_str(),
-        Axis::Status => false,
+        Axis::Status | Axis::Replies | Axis::Reactions => false,
     };
-    !started
+    // What the reader did themself — a reply only they wrote — is a receipt.
+    !started && !event.own
 }
 
 /// Where a session's inbox is reached. A seam rather than an abstraction: it

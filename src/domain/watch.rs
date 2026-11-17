@@ -16,7 +16,7 @@ use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Jira's `statusCategory.key`. The only ordering Jira guarantees across
@@ -54,6 +54,16 @@ pub enum Standing {
         status: String,
         category: Category,
     },
+    /// A Slack message: its reactions, as emoji → how many, and the replies
+    /// after it in its thread, as ts → who wrote it. Counts rather than names
+    /// for reactions because that is all the bridge can read; reply authors
+    /// because "who replied" is the news, and the ts says which are new.
+    Message {
+        #[serde(default)]
+        reactions: BTreeMap<String, u32>,
+        #[serde(default)]
+        replies: BTreeMap<String, String>,
+    },
 }
 
 impl Standing {
@@ -66,6 +76,8 @@ impl Standing {
         match self {
             Standing::PullRequest { state, .. } => state.is_terminal(),
             Standing::Issue { category, .. } => *category == Category::Done,
+            // A conversation never finishes; the watch's deadline ends it.
+            Standing::Message { .. } => false,
         }
     }
 }
@@ -81,6 +93,10 @@ pub enum Axis {
     Checks,
     /// A Jira issue's status.
     Status,
+    /// How many replies a Slack message has.
+    Replies,
+    /// How many of one emoji a Slack message carries.
+    Reactions,
 }
 
 impl Axis {
@@ -89,6 +105,8 @@ impl Axis {
             Axis::State => "state",
             Axis::Checks => "checks",
             Axis::Status => "status",
+            Axis::Replies => "replies",
+            Axis::Reactions => "reactions",
         }
     }
 }
@@ -150,7 +168,8 @@ pub struct Sighting {
 
 /// Who moved a pull request, as `@login`, or `login (bot)` for an app: a
 /// review bot satisfying the requirement, or automation sending a pull
-/// request back to draft, is different news from a person.
+/// request back to draft, is different news from a person. For a Slack
+/// message, how to name the people in it, and which of them is the reader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Actors {
     /// Whose approvals stand.
@@ -159,6 +178,10 @@ pub struct Actors {
     pub draft: Option<String>,
     /// Who merged it.
     pub merged: Option<String>,
+    /// Slack user id → the name a push says, for whoever a reading met.
+    pub names: BTreeMap<String, String>,
+    /// The Slack user the credentials belong to, when known.
+    pub me: Option<String>,
 }
 
 impl Actors {
@@ -175,6 +198,19 @@ impl Actors {
         };
         Some(format!("by {who}"))
     }
+
+    /// `@name` for a Slack user id, or the id when no reading named them.
+    fn named(&self, id: &str) -> String {
+        format!("@{}", self.names.get(id).map_or(id, String::as_str))
+    }
+
+    /// Whether everyone in `ids` is the reader: what they did themselves is
+    /// in the feed, and not worth a turn. Nobody at all is not the reader.
+    fn only_me(&self, ids: &BTreeSet<&String>) -> bool {
+        self.me
+            .as_ref()
+            .is_some_and(|me| !ids.is_empty() && ids.iter().all(|id| *id == me))
+    }
 }
 
 /// A change worth telling somebody about.
@@ -187,6 +223,8 @@ pub struct Transition {
     pub detail: Option<String>,
     /// The Actions job behind that check, so its log is one command away.
     pub job: Option<u64>,
+    /// Made only by the reader themself: recorded, but not worth a turn.
+    pub own: bool,
 }
 
 /// A transition, once it has a place in the sequence.
@@ -206,6 +244,8 @@ pub struct Event {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
     /// Who was watching this reference when it moved.
     ///
     /// Snapshotted rather than looked up later: a finished watch is removed,
@@ -263,6 +303,7 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                     to: now.as_str().into(),
                     detail: after.by.of(*was, *now),
                     job: None,
+                    own: false,
                 });
             }
             if had != has {
@@ -272,6 +313,7 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                     to: checks_label(*has).into(),
                     detail: after.failing.as_ref().map(|f| f.name.clone()),
                     job: after.failing.as_ref().and_then(|f| f.job),
+                    own: false,
                 });
             }
             moved
@@ -285,13 +327,73 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
                 to: now.clone(),
                 detail: None,
                 job: None,
+                own: false,
             }]
         }
+        (
+            Standing::Message {
+                reactions: had,
+                replies: were,
+            },
+            Standing::Message {
+                reactions: has,
+                replies: are,
+            },
+        ) => conversation(had, were, has, are, &after.by),
         // Same status, or a reference that somehow changed kind — which it
         // can't, since a watch is keyed by the reference itself.
         _ => Vec::new(),
     };
     Reading { standing, moved }
+}
+
+/// What moved on a Slack message: one transition for its replies, naming who
+/// wrote the new ones, and one per emoji whose count changed.
+///
+/// Nobody is named for a reaction, because the bridge reads a count and not
+/// who reacted — so a reaction is never known to be the reader's own.
+fn conversation(
+    had: &BTreeMap<String, u32>,
+    were: &BTreeMap<String, String>,
+    has: &BTreeMap<String, u32>,
+    are: &BTreeMap<String, String>,
+    by: &Actors,
+) -> Vec<Transition> {
+    let mut moved = Vec::new();
+    let new: BTreeSet<&String> = are
+        .iter()
+        .filter(|(ts, _)| !were.contains_key(*ts))
+        .map(|(_, who)| who)
+        .collect();
+    if !new.is_empty() || were.len() != are.len() {
+        let names: Vec<String> = new.iter().map(|id| by.named(id)).collect();
+        moved.push(Transition {
+            axis: Axis::Replies,
+            from: were.len().to_string(),
+            to: are.len().to_string(),
+            detail: (!names.is_empty()).then(|| format!("by {}", names.join(", "))),
+            job: None,
+            own: by.only_me(&new),
+        });
+    }
+    let emoji: BTreeSet<&String> = had.keys().chain(has.keys()).collect();
+    for name in emoji {
+        let (was, now) = (
+            had.get(name).copied().unwrap_or(0),
+            has.get(name).copied().unwrap_or(0),
+        );
+        if was != now {
+            moved.push(Transition {
+                axis: Axis::Reactions,
+                from: was.to_string(),
+                to: now.to_string(),
+                detail: Some(format!(":{name}:")),
+                job: None,
+                own: false,
+            });
+        }
+    }
+    moved
 }
 
 /// A pull request whose head commit has no check rollup keeps the rollup it
@@ -420,6 +522,7 @@ mod tests {
             approved: vec!["@alice".into(), "buildsworth (bot)".into()],
             draft: Some("@dpep".into()),
             merged: Some("@carol".into()),
+            ..Actors::default()
         };
         let of = |was, now| by.of(was, now);
         assert_eq!(
@@ -679,6 +782,87 @@ mod tests {
         }
     }
 
+    fn message(reactions: &[(&str, u32)], replies: &[(&str, &str)]) -> Standing {
+        Standing::Message {
+            reactions: reactions.iter().map(|(e, n)| (e.to_string(), *n)).collect(),
+            replies: replies
+                .iter()
+                .map(|(ts, who)| (ts.to_string(), who.to_string()))
+                .collect(),
+        }
+    }
+
+    fn seen_message(standing: Standing) -> Sighting {
+        Sighting {
+            standing,
+            title: String::new(),
+            failing: None,
+            head: None,
+            by: Actors {
+                names: [("U1", "alice"), ("U2", "bob"), ("U9", "dpepper")]
+                    .iter()
+                    .map(|(id, name)| (id.to_string(), name.to_string()))
+                    .collect(),
+                me: Some("U9".into()),
+                ..Actors::default()
+            },
+        }
+    }
+
+    #[test]
+    fn new_replies_say_how_many_and_who_wrote_them() {
+        let before = message(&[], &[("1.000001", "U1"), ("1.000002", "U9")]);
+        let after = seen_message(message(
+            &[],
+            &[
+                ("1.000001", "U1"),
+                ("1.000002", "U9"),
+                ("1.000003", "U2"),
+                ("1.000004", "U1"),
+            ],
+        ));
+        let moved = changed(Some(&before), &after);
+        assert_eq!(labels(&moved), [("replies", "2", "4")]);
+        assert_eq!(moved[0].detail.as_deref(), Some("by @alice, @bob"));
+        assert!(!moved[0].own);
+    }
+
+    #[test]
+    fn a_reply_only_the_reader_wrote_is_their_own() {
+        let before = message(&[], &[]);
+        let after = seen_message(message(&[], &[("1.000001", "U9")]));
+        let moved = changed(Some(&before), &after);
+        assert_eq!(moved[0].detail.as_deref(), Some("by @dpepper"));
+        assert!(moved[0].own, "recorded, not worth a turn");
+
+        let with_others = seen_message(message(&[], &[("1.000001", "U9"), ("1.000002", "U1")]));
+        assert!(
+            !changed(Some(&before), &with_others)[0].own,
+            "anybody else in it makes it news"
+        );
+    }
+
+    #[test]
+    fn each_emoji_that_moved_is_its_own_transition_and_names_nobody() {
+        let before = message(&[("eyes", 1), ("tada", 2)], &[]);
+        let after = seen_message(message(&[("tada", 2), ("white_check_mark", 1)], &[]));
+        let moved = changed(Some(&before), &after);
+        assert_eq!(
+            labels(&moved),
+            [("reactions", "1", "0"), ("reactions", "0", "1")]
+        );
+        assert_eq!(moved[0].detail.as_deref(), Some(":eyes:"));
+        assert_eq!(moved[1].detail.as_deref(), Some(":white_check_mark:"));
+        assert!(moved.iter().all(|t| !t.own), "who reacted can't be read");
+    }
+
+    #[test]
+    fn a_quiet_message_is_not_an_event_and_never_finishes() {
+        let standing = message(&[("eyes", 1)], &[("1.000001", "U1")]);
+        assert!(changed(Some(&standing), &seen_message(standing.clone())).is_empty());
+        assert!(!standing.is_finished());
+    }
+
     fn log(seqs: &[u64]) -> Vec<Event> {
         seqs.iter()
             .map(|seq| Event {
@@ -691,6 +875,7 @@ mod tests {
                 title: String::new(),
                 detail: None,
                 job: None,
+                own: false,
                 audience: BTreeSet::new(),
             })
             .collect()
