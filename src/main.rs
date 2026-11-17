@@ -420,6 +420,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
         // Before the config load, so a config that won't parse is this hook's
         // failure rather than the session's — see `swallowing`.
         Command::Hook { event } => {
+            if inside_bridge(std::env::var_os(slack_claude::BRIDGE_ENV)) {
+                return Ok(0);
+            }
             return Ok(swallowing(*event, || {
                 let config = Config::load(&path).map_err(|e| e.to_string())?;
                 hook(*event, &config, &cli.common)
@@ -560,12 +563,14 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let watches = watch_store(&cli.common);
             let github = GitHubProvider::from_config(&config.github, token);
             let jira = inkling::adapters::jira_acli::JiraProvider::new();
+            let slack = slack_threads(&config, store.path())?;
             let clock = SystemClock;
             let work = inkling::push::Tick {
                 poller: inkling::watch::Poller {
                     store: &watches,
                     github: &github,
                     jira: &jira,
+                    slack: Some(&slack),
                     clock: &clock,
                 },
                 sessions: &inkling::push::RealSessions,
@@ -686,7 +691,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 // swallowed into the baseline, which is the one thing the
                 // caller just asked not to happen.
                 if !references.is_empty() {
-                    match poll(&config, &watches, &clock, None, "watch") {
+                    let slack = slack_threads(&config, store.path())?;
+                    match poll(&config, &watches, &clock, None, Some(&slack), "watch") {
                         Ok(polled) => {
                             for line in finished_already(&references, &polled, &watches.read()) {
                                 println!("{line}");
@@ -782,7 +788,15 @@ fn run(cli: &Cli) -> Result<i32, String> {
             if watches.read().due(clock.now(), refresh) {
                 // A provider that can't be reached is a log line, not a
                 // failure — a blip must not cost an agent its turn.
-                if let Err(error) = poll(&config, &watches, &clock, Some(refresh), "events") {
+                let slack = slack_threads(&config, store.path())?;
+                if let Err(error) = poll(
+                    &config,
+                    &watches,
+                    &clock,
+                    Some(refresh),
+                    Some(&slack),
+                    "events",
+                ) {
                     tracing::warn!(%error, "could not refresh watches");
                 }
             }
@@ -1253,6 +1267,15 @@ fn wait_targets(
     }
     // A Jira issue has no merge ladder to threshold against, so `--until`
     // could say nothing about one. Watching it is the answer that exists.
+    if let Some(message) = references
+        .iter()
+        .find(|r| matches!(r, inkling::domain::model::Reference::SlackMessage { .. }))
+    {
+        return Err(format!(
+            "{message}: wait takes pull requests — for a Slack message use \
+             `inkling watch` and `inkling events`"
+        ));
+    }
     if let Some(issue) = references
         .iter()
         .find(|r| matches!(r, inkling::domain::model::Reference::JiraIssue { .. }))
@@ -1484,6 +1507,14 @@ fn payload<R: std::io::Read + Send + 'static>(
     })
 }
 
+/// Whether this process is a hook of the bridge's own `claude -p` child. That
+/// child is a Claude Code session running the user's hooks; inkling's must do
+/// nothing there, or every Slack read subscribes a throwaway session and the
+/// watch it was reading for gets a sibling.
+fn inside_bridge(marker: Option<std::ffi::OsString>) -> bool {
+    marker.is_some_and(|value| !value.is_empty())
+}
+
 /// Run a hook, and cost the calling session nothing whatever happens.
 ///
 /// A hook's exit code is a decision in Claude Code's protocol, not a status: 2
@@ -1529,7 +1560,7 @@ fn refresh_within(
     let path = path.to_path_buf();
     let polled = within(budget, move || {
         let store = inkling::adapters::watches_json::WatchStore::new(path);
-        poll(&config, &store, &SystemClock, Some(refresh), "prompt")
+        poll(&config, &store, &SystemClock, Some(refresh), None, "prompt")
     });
     match polled {
         Some(Ok(_)) => {}
@@ -1591,8 +1622,44 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
 /// process alive, like every other hook path.
 const PUSH_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Watch what a Bash command was about: a pull request named by URL, or one a
-/// `git push` just updated.
+type Noticed = (
+    Vec<(inkling::domain::model::Reference, &'static str)>,
+    Vec<inkling::domain::detect::Pushed>,
+);
+
+/// What a tool call was about: from Bash, a pull request named by URL, an
+/// issue named to `acli`, a branch `git push` updated, or a message
+/// `chat.postMessage` posted; from the Slack MCP send tool, the message it
+/// posted.
+///
+/// Cheapest checks first, and in this order: this runs after every tool call,
+/// and the overwhelming majority of them have nothing to do with any of it.
+fn noticed(input: &HookInput, config: &Config) -> Noticed {
+    use inkling::domain::{detect, slack};
+    if input.tool_name != "Bash" {
+        let send = slack_claude::ToolNames::new(config.slack.mcp.as_ref()).send;
+        let posted = match input.tool_name == send {
+            true => slack::posted_via_tool(&input.tool_input, &input.tool_response),
+            false => None,
+        };
+        return (
+            posted.map(|r| (r, "slack send")).into_iter().collect(),
+            Vec::new(),
+        );
+    }
+    let command = field(&input.tool_input, "command");
+    if !detect::worth_reading(command) && !command.contains(slack::POST_METHOD) {
+        return (Vec::new(), Vec::new());
+    }
+    let stdout = field(&input.tool_response, "stdout");
+    let output = format!("{stdout}\n{}", field(&input.tool_response, "stderr"));
+    let mut touched = detect::touched(command, &output, &config.github.hosts);
+    touched.extend(slack::posted_via_api(command, stdout).map(|r| (r, slack::POST_METHOD)));
+    let pushed = detect::pushed(command, &output, &config.github.hosts);
+    (touched, pushed)
+}
+
+/// Watch what a tool call was about — see `noticed`.
 ///
 /// A push is matched against this session's own watches first, which costs
 /// nothing and is the common case — the second push to a branch. Only a
@@ -1600,24 +1667,7 @@ const PUSH_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1
 /// request for, is looked up.
 fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), String> {
     use inkling::domain::detect;
-    // Cheapest checks first, and in this order: this runs after every tool
-    // call, and the overwhelming majority of them have nothing to do with a
-    // pull request. Nothing below the gate is reached unless the command is
-    // plainly about one.
-    if input.tool_name != "Bash" {
-        return Ok(());
-    }
-    let command = field(&input.tool_input, "command");
-    if !detect::worth_reading(command) {
-        return Ok(());
-    }
-    let output = format!(
-        "{}\n{}",
-        field(&input.tool_response, "stdout"),
-        field(&input.tool_response, "stderr")
-    );
-    let touched = detect::touched(command, &output, &config.github.hosts);
-    let pushed = detect::pushed(command, &output, &config.github.hosts);
+    let (touched, pushed) = noticed(input, config);
     if touched.is_empty() && pushed.is_empty() {
         return Ok(());
     }
@@ -1690,7 +1740,7 @@ fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), 
         tracing::info!(
             %reference,
             owner,
-            tool = "Bash",
+            tool = input.tool_name,
             matched = why,
             deadline = stamp(deadline),
             "watch registered automatically"
@@ -1918,7 +1968,7 @@ fn watch_target(
 
     match parse_target(target, hosts)? {
         Target::Channel(channel) => Err(format!(
-            "{channel}: watch takes pull requests and Jira issues, not channels"
+            "{channel}: watch takes pull requests, Jira issues and Slack messages, not channels"
         )),
         Target::Reference(reference) => Ok(reference),
         Target::Partial {
@@ -1937,6 +1987,7 @@ fn poll(
     store: &inkling::adapters::watches_json::WatchStore,
     clock: &SystemClock,
     refresh: Option<TimeDelta>,
+    slack: Option<&dyn inkling::ports::MessageProvider>,
     why: &str,
 ) -> Result<inkling::watch::Polled, String> {
     let token = Secret::resolve(
@@ -1949,6 +2000,7 @@ fn poll(
         store,
         github: &GitHubProvider::from_config(&config.github, token),
         jira: &inkling::adapters::jira_acli::JiraProvider::new(),
+        slack,
         clock,
     };
     match refresh {
@@ -1956,6 +2008,35 @@ fn poll(
         None => poller.poll(TimeDelta::zero(), why),
     }
     .map_err(|e| e.to_string())
+}
+
+/// Slack messages, read through the claude → Slack MCP bridge. Building it
+/// costs nothing; who the reader is in Slack is found out, and cached in
+/// `state.json`, only when a message is actually read.
+fn slack_threads(
+    config: &Config,
+    state: &std::path::Path,
+) -> Result<inkling::adapters::slack_thread::SlackThreads<slack_claude::ClaudeRunner>, String> {
+    let slack = slack_claude::from_config(config, None).map_err(|e| e.to_string())?;
+    let config = config.clone();
+    let state = state.to_path_buf();
+    Ok(inkling::adapters::slack_thread::SlackThreads::new(
+        slack,
+        move || {
+            if let Some(id) = &config.slack.user_id {
+                return Some(id.clone());
+            }
+            let slack = slack_claude::from_config(&config, None).ok()?;
+            resolve_identity(&slack, &JsonStore::new(state.clone()))
+                .map_err(|error| {
+                    tracing::warn!(
+                        error,
+                        "could not find out who you are in slack; your own replies will be pushed"
+                    )
+                })
+                .ok()
+        },
+    ))
 }
 
 /// One line's worth of where a watched thing stands.
@@ -2494,8 +2575,8 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        HookEvent, classify, ellipsize, finished_already, payload, swallowing, wait_targets,
-        watch_target, watch_targets, within,
+        Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge,
+        noticed, payload, swallowing, wait_targets, watch_target, watch_targets, within,
     };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
@@ -2771,6 +2852,83 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
         assert_eq!(read.as_deref(), Ok(json));
+    }
+
+    #[test]
+    fn hooks_do_nothing_inside_the_bridge_s_own_claude() {
+        assert!(inside_bridge(Some("1".into())));
+        assert!(!inside_bridge(None));
+        assert!(!inside_bridge(Some("".into())), "set but empty is unset");
+    }
+
+    fn tool_call(json: serde_json::Value) -> HookInput {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn slack_message(channel: &str, ts: &str) -> inkling::domain::model::Reference {
+        inkling::domain::model::Reference::SlackMessage {
+            channel: channel.into(),
+            ts: ts.into(),
+            thread: None,
+        }
+    }
+
+    #[test]
+    fn the_slack_send_tool_watches_what_it_posted() {
+        let input = tool_call(serde_json::json!({
+            "session_id": "s",
+            "tool_name": "mcp__claude_ai_Slack__slack_send_message",
+            "tool_input": {"channel_id": "C0123ABCD", "message": "ready for review?"},
+            "tool_response": [{"type": "text", "text": "Message sent: https://acme.slack.com/archives/C0123ABCD/p1786596050245879"}]
+        }));
+        let (touched, pushed) = noticed(&input, &Config::default());
+        assert_eq!(
+            touched,
+            [(
+                slack_message("C0123ABCD", "1786596050.245879"),
+                "slack send"
+            )]
+        );
+        assert!(pushed.is_empty());
+    }
+
+    #[test]
+    fn another_tool_or_another_server_s_send_watches_nothing() {
+        let input = tool_call(serde_json::json!({
+            "session_id": "s",
+            "tool_name": "mcp__other__slack_send_message",
+            "tool_input": {"channel_id": "C0123ABCD", "message": "hi"},
+            "tool_response": "https://acme.slack.com/archives/C0123ABCD/p1786596050245879"
+        }));
+        assert!(noticed(&input, &Config::default()).0.is_empty());
+    }
+
+    #[test]
+    fn a_curl_to_chat_post_message_watches_what_it_posted() {
+        let input = tool_call(serde_json::json!({
+            "session_id": "s",
+            "tool_name": "Bash",
+            "tool_input": {"command": "curl -s https://slack.com/api/chat.postMessage -H @auth -d @msg.json"},
+            "tool_response": {"stdout": r#"{"ok":true,"channel":"C0123ABCD","ts":"1786596050.245879"}"#, "stderr": ""}
+        }));
+        assert_eq!(
+            noticed(&input, &Config::default()).0,
+            [(
+                slack_message("C0123ABCD", "1786596050.245879"),
+                "chat.postMessage"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_slack_message_can_be_watched_but_not_waited_on() {
+        let permalink = "https://acme.slack.com/archives/C0123ABCD/p1786596050245879";
+        assert_eq!(
+            watch_target(permalink, &hosts(), &[]),
+            Ok(slack_message("C0123ABCD", "1786596050.245879"))
+        );
+        let error = wait_targets(&[permalink.to_string()], &hosts(), &[]).unwrap_err();
+        assert!(error.contains("inkling watch"), "{error}");
     }
 
     #[test]

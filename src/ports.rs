@@ -9,7 +9,7 @@ use crate::domain::wait::CheckState;
 use crate::domain::watch::{Actors, Category, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Where to look for messages.
 ///
@@ -92,6 +92,8 @@ pub trait MessageSource {
 pub enum ProviderError {
     #[error("github request failed: {0}")]
     Transport(String),
+    #[error("slack read failed: {0}")]
+    Slack(String),
 }
 
 /// Why one reference couldn't be resolved, while its siblings could.
@@ -174,6 +176,31 @@ pub trait IssueProvider {
 
 /// One issue's outcome, in-band like `Lookup`.
 pub type IssueLookup = (String, Result<IssueStatus, RefError>);
+
+/// What a Slack message has gathered since it was posted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MessageStatus {
+    /// Emoji → how many. The bridge reads counts, not who reacted.
+    pub reactions: BTreeMap<String, u32>,
+    /// The replies after it in its thread: ts → the user id that wrote it.
+    pub replies: BTreeMap<String, String>,
+    /// User id → name, for everyone the read met, so a push names people.
+    pub names: BTreeMap<String, String>,
+}
+
+/// One message's outcome, in-band like `Lookup`.
+pub type MessageLookup = (Reference, Result<MessageStatus, RefError>);
+
+/// Slack messages, a third provider beside pull requests and issues for the
+/// same reason those two are separate: nothing in its answer is shaped like
+/// theirs.
+pub trait MessageProvider {
+    fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError>;
+
+    /// The Slack user the credentials belong to, so what the reader did
+    /// themself can be told apart. `None` when it can't be found out.
+    fn me(&self) -> Option<String>;
+}
 
 /// Where a wait gets its readings.
 ///

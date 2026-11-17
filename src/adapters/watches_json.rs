@@ -63,6 +63,20 @@ pub fn read_every(quiet: TimeDelta) -> TimeDelta {
     (quiet / QUIET_SHARE).clamp(FASTEST_READ, SLOWEST_READ)
 }
 
+/// The least time between two attempts to read a Slack message, whatever the
+/// schedule says. Each attempt is a `claude -p` call that costs money, so the
+/// floor counts attempts rather than successes: a bridge that keeps failing
+/// must not be retried on every tick.
+pub const SLACK_READ_FLOOR: TimeDelta = TimeDelta::minutes(5);
+
+/// The least time between attempts to read this kind of reference.
+fn attempt_floor(reference: &Reference) -> TimeDelta {
+    match reference {
+        Reference::SlackMessage { .. } => SLACK_READ_FLOOR,
+        _ => TimeDelta::zero(),
+    }
+}
+
 /// How long a subscriber record outlives its last sign of life.
 ///
 /// Deliberately longer than the event log, and counted in days rather than
@@ -138,6 +152,10 @@ pub struct Watch {
     /// a new pull request after this one's watch expires is looked up afresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<Head>,
+    /// When a reading was last attempted, successful or not. Only a source
+    /// with an attempt floor looks at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tried_at: Option<DateTime<Utc>>,
 }
 
 impl Watch {
@@ -151,9 +169,13 @@ impl Watch {
     /// Measured from the last reading rather than from now, so the answer is
     /// a fixed instant a server can sleep until.
     pub fn next_read(&self, floor: TimeDelta) -> DateTime<Utc> {
-        match &self.seen {
+        let scheduled = match &self.seen {
             None => self.since,
             Some(seen) => seen.at + read_every(seen.at - self.quiet_since()).max(floor),
+        };
+        match self.tried_at {
+            Some(tried) => scheduled.max(tried + attempt_floor(&self.reference)),
+            None => scheduled,
         }
     }
 }
@@ -246,6 +268,7 @@ impl Watches {
                 owners: BTreeSet::new(),
                 stirred_at: None,
                 head: None,
+                tried_at: None,
             });
         entry.deadline = entry.deadline.max(deadline);
         entry.owners.insert(owner.to_string());
@@ -305,6 +328,15 @@ impl Watches {
             }
         }
         (stirred, unknown)
+    }
+
+    /// Note that these were asked about at `at`, whatever came back.
+    pub fn tried(&mut self, references: &[Reference], at: DateTime<Utc>) {
+        for reference in references {
+            if let Some(watch) = self.watches.get_mut(&reference.to_string()) {
+                watch.tried_at = Some(at);
+            }
+        }
     }
 
     /// Note where a watched pull request's commits come from.
@@ -1151,6 +1183,68 @@ mod tests {
         assert!(
             watches.due(now() + TimeDelta::seconds(60), TimeDelta::seconds(60)),
             "the reading aged out"
+        );
+    }
+
+    fn slack() -> Reference {
+        Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            thread: None,
+        }
+    }
+
+    fn seen_message() -> Sighting {
+        Sighting {
+            standing: Standing::Message {
+                reactions: Default::default(),
+                replies: Default::default(),
+            },
+            title: String::new(),
+            failing: None,
+            head: None,
+            by: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_slack_message_is_read_no_more_than_every_five_minutes_even_when_touched() {
+        // Every read is a paid `claude -p` call; the schedule's one-minute
+        // floor is for GitHub, where a read is one batched query.
+        let mut watches = Watches::default();
+        watches.watch(&slack(), "s-1", forever(), now());
+        assert!(watches.due(now(), TimeDelta::zero()), "never read");
+        watches.tried(&[slack()], now());
+        watches.record(&[(slack(), seen_message())], now());
+
+        let later = now() + TimeDelta::minutes(2);
+        watches.watch(&slack(), "s-1", forever(), later);
+        assert!(
+            !watches.due(later, TimeDelta::zero()),
+            "a touch doesn't beat the floor"
+        );
+        assert_eq!(watches.next_read(), Some(now() + SLACK_READ_FLOOR));
+    }
+
+    #[test]
+    fn a_slack_read_that_keeps_failing_waits_out_the_floor_too() {
+        // Never baselined, so the schedule says due — but each attempt cost
+        // as much as a success would have.
+        let mut watches = Watches::default();
+        watches.watch(&slack(), "s-1", forever(), now());
+        watches.tried(&[slack()], now());
+        assert!(!watches.due(now() + TimeDelta::minutes(4), TimeDelta::zero()));
+        assert!(watches.due(now() + SLACK_READ_FLOOR, TimeDelta::zero()));
+    }
+
+    #[test]
+    fn an_attempt_floor_is_slack_s_alone() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now());
+        watches.tried(&[pr(3)], now());
+        assert!(
+            watches.due(now(), TimeDelta::zero()),
+            "a failed github read retries next tick"
         );
     }
 

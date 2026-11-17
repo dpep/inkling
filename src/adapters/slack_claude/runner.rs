@@ -7,7 +7,7 @@
 //! the promise a capability rather than an instruction.
 
 use std::io;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -122,6 +122,21 @@ impl ClaudeRunner {
     }
 }
 
+/// Set on every `claude` this spawns. The child is a Claude Code session and
+/// runs the user's hooks, inkling's among them; this is how they know to do
+/// nothing, rather than subscribing the bridge and watching what it read.
+pub const BRIDGE_ENV: &str = "INKLING_BRIDGE";
+
+impl ClaudeRunner {
+    fn command(&self, prompt: &str, allowed_tools: &[&str], attempt: usize) -> Command {
+        let mut command = Command::new(&self.command);
+        command
+            .args(self.args(prompt, allowed_tools, attempt))
+            .env(BRIDGE_ENV, "1");
+        command
+    }
+}
+
 impl Runner for ClaudeRunner {
     fn run(
         &self,
@@ -129,14 +144,22 @@ impl Runner for ClaudeRunner {
         allowed_tools: &[&str],
         attempt: usize,
     ) -> Result<String, RunnerError> {
-        let output = Command::new(&self.command)
-            .args(self.args(prompt, allowed_tools, attempt))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|source| RunnerError::Spawn {
+        // Bounded: a watch read happens on the resident server's tick, which
+        // a hung `claude` would otherwise stop for good.
+        let output = crate::subprocess::output_within(
+            &mut self.command(prompt, allowed_tools, attempt),
+            self.timeout,
+        )
+        .map_err(|source| match source.kind() {
+            io::ErrorKind::TimedOut => RunnerError::TimedOut {
+                command: self.command.clone(),
+                timeout: self.timeout,
+            },
+            _ => RunnerError::Spawn {
                 command: self.command.clone(),
                 source,
-            })?;
+            },
+        })?;
 
         if !output.status.success() {
             return Err(RunnerError::Failed {
@@ -229,6 +252,17 @@ mod tests {
         assert!(first.iter().any(|a| a == SYSTEM_PROMPT));
         assert!(!second.iter().any(|a| a == SYSTEM_PROMPT));
         assert!(second.iter().any(|a| a.contains("(attempt 2)")));
+    }
+
+    #[test]
+    fn the_child_is_told_it_is_the_bridge() {
+        // Its hooks are the user's, inkling's included; without this every
+        // bridge call would subscribe a throwaway session.
+        let command = ClaudeRunner::default().command("x", &["t"], 0);
+        let marked = command
+            .get_envs()
+            .any(|(key, value)| key == BRIDGE_ENV && value.is_some());
+        assert!(marked);
     }
 
     #[test]

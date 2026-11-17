@@ -583,6 +583,79 @@ mod tests {
         );
     }
 
+    fn slack() -> Reference {
+        Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            thread: None,
+        }
+    }
+
+    fn conversation(reactions: &[(&str, u32)], replies: &[(&str, &str)]) -> Sighting {
+        Sighting {
+            standing: Standing::Message {
+                reactions: reactions.iter().map(|(e, n)| (e.to_string(), *n)).collect(),
+                replies: replies
+                    .iter()
+                    .map(|(ts, who)| (ts.to_string(), who.to_string()))
+                    .collect(),
+            },
+            title: String::new(),
+            failing: None,
+            head: None,
+            by: Actors {
+                names: [("U1", "alice"), ("U9", "dpepper")]
+                    .iter()
+                    .map(|(id, name)| (id.to_string(), name.to_string()))
+                    .collect(),
+                me: Some("U9".into()),
+                ..Actors::default()
+            },
+        }
+    }
+
+    fn talking() -> Watches {
+        let mut watches = Watches::default();
+        watches.watch(&slack(), "s", forever(), now());
+        watches.record(&[(slack(), conversation(&[], &[]))], now());
+        watches.attach("s", address("/tmp/a"), now());
+        watches
+    }
+
+    #[test]
+    fn a_reply_says_who_and_how_many_and_never_what() {
+        let mut watches = talking();
+        watches.record(
+            &[(
+                slack(),
+                conversation(&[("white_check_mark", 1)], &[("1.000001", "U1")]),
+            )],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert_eq!(
+            sessions.texts(),
+            ["inkling: 2 changes\n\
+              - slack:C0123ABCD/1786596050.245879 | replies 0 → 1 by @alice\n\
+              - slack:C0123ABCD/1786596050.245879 | reactions 0 → 1 :white_check_mark:"]
+        );
+    }
+
+    #[test]
+    fn a_reply_only_the_reader_wrote_waits_in_the_feed() {
+        // Recorded, so a prompt still shows it, but not worth a turn.
+        let mut watches = talking();
+        watches.record(
+            &[(slack(), conversation(&[], &[("1.000001", "U9")]))],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert!(sessions.texts().is_empty());
+        assert_eq!(watches.take("s", now()).len(), 1);
+    }
+
     fn checked(watches: &mut Watches, checks: CheckState) {
         watches.record(&[(pr(3), sighting(State::Open, Some(checks)))], now());
     }

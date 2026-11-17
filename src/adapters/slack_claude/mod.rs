@@ -11,10 +11,13 @@
 mod parse;
 mod runner;
 
+#[cfg(test)]
+pub use parse::REAL_THREAD;
 pub use parse::{
-    Identity, Reaction, SearchHit, parse_channel_id, parse_identity, parse_reactions, parse_search,
+    Identity, Reaction, SearchHit, ThreadEntry, parse_channel_id, parse_identity, parse_reactions,
+    parse_search, parse_thread,
 };
-pub use runner::{ClaudeRunner, Runner, RunnerError, extract_result};
+pub use runner::{BRIDGE_ENV, ClaudeRunner, Runner, RunnerError, extract_result};
 
 use crate::config::SlackMcp;
 use crate::domain::model::{Message, MessageId, ReactionName};
@@ -133,7 +136,7 @@ impl<R: Runner> SlackClaude<R> {
     }
 
     #[cfg(test)]
-    fn without_delay(mut self) -> Self {
+    pub(crate) fn without_delay(mut self) -> Self {
         self.retry_delay = Duration::ZERO;
         self
     }
@@ -175,6 +178,20 @@ impl<R: Runner> SlackClaude<R> {
         }
         Err(format!("after {ATTEMPTS} attempts: {last}"))
     }
+}
+
+/// Slack's codes for a thread that isn't there to read. They arrive through
+/// the bridge intact (docs/slack-mcp-spike.md), so they are matched, not
+/// guessed at.
+const GONE: [&str; 3] = ["thread_not_found", "message_not_found", "channel_not_found"];
+const GONE_MARK: &str = "gone";
+
+/// Why a thread couldn't be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityError {
+    /// Slack says it isn't there, or not to these credentials.
+    Gone(String),
+    Failed(String),
 }
 
 /// Whether a bad reply is worth another try.
@@ -460,6 +477,52 @@ impl<R: Runner> SlackClaude<R> {
             })
             .map_err(SourceError::Search)?;
         Ok(hits.into_iter().map(SearchHit::into_message).collect())
+    }
+
+    /// Who wrote each message of a thread and what reactions it carries —
+    /// never what it says. `thread()` asks for text, which a watch must not
+    /// hold: it would be one careless format string from a push.
+    ///
+    /// `wanted` is the message being watched. A reply that leaves it out is a
+    /// model that dropped a row, not a deleted message, so it is retried.
+    pub fn activity(
+        &self,
+        channel_id: &str,
+        root_ts: &str,
+        wanted: &str,
+    ) -> Result<Vec<ThreadEntry>, ActivityError> {
+        let tool = &self.tools.read_thread;
+        let prompt = format!(
+            "Call {tool} with these exact arguments:\n\
+             channel_id: {channel_id:?}\n\
+             message_ts: {root_ts:?}\n\
+             limit: 100\n\
+             response_format: \"detailed\"\n\n\
+             Then output ONLY this JSON, no commentary and no code fence:\n\
+             {{\"messages\": [{{\"ts\": \"...\", \"user_id\": \"...\", \
+             \"user_name\": \"...\", \"reactions\": {{\"name\": 1}}}}]}}\n\n\
+             List the parent message first, then every reply in order. `ts` \
+             is the Message TS. `user_id` is the ID in parentheses after the \
+             author. `user_name` is the author's name as shown before any \
+             <email>; never include the email. `reactions` maps each reaction \
+             name, exactly as shown and without colons, to its count; use {{}} \
+             for a message with none. Do not include message text.\n\
+             If the tool fails, output only its error code.",
+        );
+        self.attempt(&prompt, &[tool.as_str()], |raw| {
+            if GONE.iter().any(|code| raw.contains(code)) {
+                return Err(Retry::Fatal(format!("{GONE_MARK}: {}", raw.trim())));
+            }
+            match parse_thread(raw) {
+                Ok(entries) if entries.iter().any(|e| e.ts == wanted) => Ok(entries),
+                Ok(_) => Err(Retry::Again(format!("the read left out {wanted}"))),
+                Err(error) => Err(Retry::Again(error)),
+            }
+        })
+        .map_err(|error| match error.starts_with(GONE_MARK) {
+            true => ActivityError::Gone(error),
+            false => ActivityError::Failed(error),
+        })
     }
 
     /// Post a message, optionally as a thread reply.

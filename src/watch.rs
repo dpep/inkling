@@ -15,14 +15,18 @@
 use crate::adapters::lock::FileLock;
 use crate::adapters::watches_json::WatchStore;
 use crate::domain::model::Reference;
-use crate::domain::watch::{Event, Sighting, Standing};
-use crate::ports::{Clock, IssueProvider, StatusProvider, StoreError};
+use crate::domain::watch::{Actors, Event, Sighting, Standing};
+use crate::ports::{Clock, IssueProvider, MessageProvider, StatusProvider, StoreError};
 use chrono::TimeDelta;
 
 pub struct Poller<'a> {
     pub store: &'a WatchStore,
     pub github: &'a dyn StatusProvider,
     pub jira: &'a dyn IssueProvider,
+    /// `None` leaves Slack messages unread by this caller. A read is a
+    /// `claude -p` call of seconds to a minute, which a prompt hook's budget
+    /// can't hold; the resident server and the explicit commands read them.
+    pub slack: Option<&'a dyn MessageProvider>,
     pub clock: &'a dyn Clock,
 }
 
@@ -74,7 +78,13 @@ impl Poller<'_> {
     /// belongs to the caller that might be redundant rather than to this.
     pub fn poll(&self, floor: TimeDelta, why: &str) -> Result<Polled, StoreError> {
         let observed_at = self.clock.now();
-        let references = self.store.read().due_now(observed_at, floor);
+        let references: Vec<Reference> = self
+            .store
+            .read()
+            .due_now(observed_at, floor)
+            .into_iter()
+            .filter(|r| self.slack.is_some() || !matches!(r, Reference::SlackMessage { .. }))
+            .collect();
         if references.is_empty() {
             tracing::debug!(why, "nothing is due");
             return Ok(Polled {
@@ -83,15 +93,15 @@ impl Poller<'_> {
             });
         }
 
-        let pulls = references
-            .iter()
-            .filter(|r| matches!(r, Reference::GitHubPullRequest { .. }))
-            .count();
+        let count = |is: fn(&Reference) -> bool| references.iter().filter(|r| is(r)).count();
+        let pulls = count(|r| matches!(r, Reference::GitHubPullRequest { .. }));
+        let messages = count(|r| matches!(r, Reference::SlackMessage { .. }));
         let mut failures = Vec::new();
         let sightings = self.sightings(&references, &mut failures);
         let elapsed = (self.clock.now() - observed_at).num_milliseconds();
 
         let events = self.store.update(self.clock.now(), |watches| {
+            watches.tried(&references, observed_at);
             watches.record(&sightings, observed_at)
         })?;
 
@@ -101,7 +111,8 @@ impl Poller<'_> {
             // Split by provider because they cost differently: pull requests
             // are one batched query, issues one `acli` apiece.
             github = pulls,
-            jira = references.len() - pulls,
+            jira = references.len() - pulls - messages,
+            slack = messages,
             read = sightings.len(),
             events = events.len(),
             failures = failures.len(),
@@ -149,9 +160,10 @@ impl Poller<'_> {
 
     /// Ask each provider about the references it answers for.
     ///
-    /// Routing by variant in one place, rather than a registry: with two
-    /// providers a registry is indirection around a two-armed match, and the
-    /// third one is when it starts paying for itself.
+    /// Routing by variant in one place, rather than a registry. Three
+    /// providers is where docs said a registry would start paying; it still
+    /// doesn't, because each arm differs in what it builds, not just whom it
+    /// asks.
     fn sightings(
         &self,
         references: &[Reference],
@@ -236,6 +248,48 @@ impl Poller<'_> {
             }
         }
 
+        let messages: Vec<Reference> = references
+            .iter()
+            .filter(|r| matches!(r, Reference::SlackMessage { .. }))
+            .cloned()
+            .collect();
+        if let Some(slack) = self.slack.filter(|_| !messages.is_empty()) {
+            match slack.read(&messages) {
+                Ok(lookups) => {
+                    let me = slack.me();
+                    for (reference, status) in lookups {
+                        match status {
+                            Ok(status) => seen.push((
+                                reference,
+                                Sighting {
+                                    standing: Standing::Message {
+                                        reactions: status.reactions,
+                                        replies: status.replies,
+                                    },
+                                    title: String::new(),
+                                    failing: None,
+                                    head: None,
+                                    by: Actors {
+                                        names: status.names,
+                                        me: me.clone(),
+                                        ..Actors::default()
+                                    },
+                                },
+                            )),
+                            Err(error) => {
+                                name(failures, &reference, &error);
+                                failures.push(format!("{reference}: {error}"));
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, messages = messages.len(), "slack unreachable");
+                    failures.push(error.to_string());
+                }
+            }
+        }
+
         seen
     }
 }
@@ -247,7 +301,9 @@ mod tests {
     use crate::domain::model::State;
     use crate::domain::wait::CheckState;
     use crate::domain::watch::{Axis, Category};
-    use crate::ports::{IssueLookup, IssueStatus, ProviderError, RefError};
+    use crate::ports::{
+        IssueLookup, IssueStatus, MessageLookup, MessageStatus, ProviderError, RefError,
+    };
     use crate::testing::{FixedClock, ScriptedStatusProvider};
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -291,6 +347,57 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ScriptedMessages {
+        statuses: RefCell<HashMap<String, MessageStatus>>,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl ScriptedMessages {
+        fn replied(&self, reference: &Reference, replies: &[(&str, &str)]) {
+            self.statuses.borrow_mut().insert(
+                reference.to_string(),
+                MessageStatus {
+                    replies: replies
+                        .iter()
+                        .map(|(ts, who)| (ts.to_string(), who.to_string()))
+                        .collect(),
+                    names: [("U1".to_string(), "alice".to_string())].into(),
+                    ..MessageStatus::default()
+                },
+            );
+        }
+    }
+
+    impl MessageProvider for ScriptedMessages {
+        fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
+            self.calls.set(self.calls.get() + messages.len());
+            let statuses = self.statuses.borrow();
+            Ok(messages
+                .iter()
+                .map(|r| {
+                    let status = statuses.get(&r.to_string()).cloned();
+                    (
+                        r.clone(),
+                        status.ok_or(RefError::Other("bridge failed".into())),
+                    )
+                })
+                .collect())
+        }
+
+        fn me(&self) -> Option<String> {
+            Some("U9".into())
+        }
+    }
+
+    fn slack() -> Reference {
+        Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            thread: None,
+        }
+    }
+
     fn pr(number: u64) -> Reference {
         Reference::GitHubPullRequest {
             host: "github.com".into(),
@@ -325,6 +432,7 @@ mod tests {
         store: WatchStore,
         github: ScriptedStatusProvider,
         jira: ScriptedIssues,
+        slack: ScriptedMessages,
         clock: FixedClock,
         _serial: std::sync::MutexGuard<'static, ()>,
     }
@@ -336,6 +444,7 @@ mod tests {
                 store: WatchStore::new(scratch(name)),
                 github: ScriptedStatusProvider::new(),
                 jira: ScriptedIssues::default(),
+                slack: ScriptedMessages::default(),
                 clock: FixedClock::at("2026-09-20T12:00:00Z"),
             }
         }
@@ -345,6 +454,7 @@ mod tests {
                 store: &self.store,
                 github: &self.github,
                 jira: &self.jira,
+                slack: Some(&self.slack),
                 clock: &self.clock,
             }
         }
@@ -401,6 +511,47 @@ mod tests {
         let axes: Vec<_> = polled.events.iter().map(|e| e.axis).collect();
         assert!(axes.contains(&Axis::Checks), "{axes:?}");
         assert!(axes.contains(&Axis::Status), "{axes:?}");
+    }
+
+    #[test]
+    fn a_slack_reply_from_someone_else_is_news_and_names_them() {
+        let h = Harness::new("slack");
+        h.slack.replied(&slack(), &[]);
+        h.watch(&slack());
+        assert!(h.poll().events.is_empty(), "baseline");
+
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        h.slack.replied(&slack(), &[("1786596060.000001", "U1")]);
+        let polled = h.poll();
+        assert_eq!(polled.events.len(), 1);
+        assert_eq!(polled.events[0].axis, Axis::Replies);
+        assert_eq!(polled.events[0].detail.as_deref(), Some("by @alice"));
+        assert!(!polled.events[0].own);
+    }
+
+    #[test]
+    fn a_caller_without_the_bridge_leaves_slack_unread() {
+        // The prompt hook: a read of seconds to a minute can't fit its budget.
+        let h = Harness::new("no-bridge");
+        h.watch(&slack());
+        let poller = Poller {
+            slack: None,
+            ..h.poller()
+        };
+        assert!(poller.poll(TimeDelta::zero(), "test").unwrap().skipped);
+        assert_eq!(h.slack.calls.get(), 0);
+    }
+
+    #[test]
+    fn a_failing_slack_read_is_not_retried_every_tick() {
+        // Each attempt is a paid `claude -p` call, success or not.
+        let h = Harness::new("slack-failing");
+        h.watch(&slack());
+        let polled = h.poll();
+        assert_eq!(polled.failures.len(), 1);
+        h.poll();
+        assert_eq!(h.slack.calls.get(), 1, "a minute later is inside the floor");
     }
 
     #[test]
