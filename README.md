@@ -4,7 +4,7 @@ Keep an eye on things.
 
 Inkling tells a Claude Code session when something it cares about changes. A pull
 request's checks go red or green, it gets approved, it merges; a Jira issue
-moves column. The news lands in the session as one line, mid-turn, without
+moves column; somebody replies to a Slack message you posted. The news lands in the session as one line, mid-turn, without
 anyone asking:
 
 ```
@@ -30,14 +30,18 @@ hooks expect to find it on `PATH`. Then wire them up in Claude Code's
     "SessionStart":     [{ "hooks": [{ "type": "command", "command": "inkling hook session-start" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "inkling hook session-end" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "inkling hook prompt" }] }],
-    "PostToolUse":      [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "inkling hook post-tool", "async": true }] }]
+    "PostToolUse":      [{ "matcher": "Bash|mcp__claude_ai_Slack__slack_send_message", "hooks": [{ "type": "command", "command": "inkling hook post-tool", "async": true }] }]
   }
 }
 ```
 
 That's it. Open a pull request or push to one with `gh` or `git`, and its next
 transition arrives in the session on its own. No config file is needed: GitHub
-credentials come from `gh auth token`, and Jira goes through `acli`.
+credentials come from `gh auth token`, Jira goes through `acli`, and Slack goes
+through Claude Code's own Slack connector, so Claude Code must be logged in with
+it. The `PostToolUse` matcher names the Slack send tool so that posting a
+message watches it; with a different `[slack.mcp]` server, name its tool
+instead.
 
 What each hook does:
 
@@ -45,8 +49,9 @@ What each hook does:
 - `session-end` unsubscribes it.
 - `prompt` prints anything the push didn't deliver. It is the safety net, not
   the main path.
-- `post-tool` watches whatever pull request or issue a command was about, so
-  you never run `inkling watch` yourself. Optional, but it is what makes
+- `post-tool` watches whatever pull request or issue a command was about, and
+  any Slack message the session posted, so you never run `inkling watch`
+  yourself. Optional, but it is what makes
   Inkling disappear into the background.
 
 Each hook reads the payload on stdin and takes the session id from it. A hook
@@ -92,6 +97,7 @@ later what changed.
 
 ```sh
 inkling watch you/repo#42 AI-123    # a pull request and a Jira issue
+inkling watch https://acme.slack.com/archives/C0123ABCD/p1786596050245879
 inkling watch you/repo#42 --ttl 2h  # default is 72h
 inkling watch                       # what's being watched
 inkling unwatch 42                  # short forms work once it is watched; or --all
@@ -105,6 +111,8 @@ went red:
 github.com/dpep/inkling#3  checks  pending → failure  test / build
 github.com/dpep/inkling#3  state   open → merged      by @dpep
 AI-123                     status  To Do → In Progress
+slack:C0123ABCD/1786596050.245879  replies    2 → 4  by @alice, @bob
+slack:C0123ABCD/1786596050.245879  reactions  0 → 1  :white_check_mark:
 ```
 
 An event is a transition, never a snapshot. A watch's first reading sets a
@@ -124,6 +132,25 @@ last event.
 
 Jira issues are a key (`AI-123`) or an `.atlassian.net/browse/` URL. Jira goes
 through `acli`, which must be on `PATH` and authenticated.
+
+### Slack messages
+
+A Slack message is its permalink (Slack's *Copy link*), always in full:
+`https://<workspace>.slack.com/archives/<channel>/p<digits>`, with
+`?thread_ts=…` when it is a reply. Inkling names it back as
+`slack:<channel>/<ts>`, which `unwatch` also takes and Slack's own tools read.
+
+It reports new replies in the message's thread — after it, if it is itself a
+reply — and who wrote them, and each emoji whose count changes. Never what
+anybody wrote: that is somebody else's prose, and to read it you use Slack.
+Reactions are counts, so they can't say who reacted. A reply only you wrote is
+in `events` but isn't pushed; reactions can't be told apart, so yours are.
+
+Each reading is a `claude -p` call through Claude Code's Slack connector:
+about 2¢, and anywhere from a few seconds to a minute. So a Slack message is
+read at most every 5 minutes, whatever else the schedule says, and only by the
+resident server and by `watch` and `events` themselves — never by the prompt
+hook, which can't wait that long. `wait` doesn't take one.
 
 ### Everyone in their own lane
 
@@ -189,7 +216,7 @@ one is up.
 A watch is read at 1/24 of how long it has been quiet: every minute while it
 is moving, hourly once it has sat still for a day. It goes back to every
 minute the moment a session touches it again (`gh pr …`, a `git push` to its
-branch). The server sleeps until the next watch is due, and registering one
+branch). A Slack message is never read more often than every 5 minutes. The server sleeps until the next watch is due, and registering one
 wakes it. `inkling status` counts upstream reads beside the transitions they
 caught.
 
@@ -215,6 +242,12 @@ nobody asked for.
 - `acli jira workitem`: a Jira key only where it is an argument. Never a
   key-shaped word in output, where `UTF-8`, `SHA-256` and `CVE-2024` all
   qualify.
+- The Slack send tool (`mcp__claude_ai_Slack__slack_send_message`, or your
+  `[slack.mcp]` server's): the message it posted, by the permalink in its
+  result into the channel it was told to post to. A link inside the message
+  doesn't count.
+- `curl … chat.postMessage`: the `channel` and `ts` of the Web API's JSON reply,
+  when it says `"ok": true`. The `slack` CLI isn't recognized.
 - `git push`: every open pull request whose head is exactly the repository and
   branch git reports it pushed to. A fork's pull request upstream counts; a
   stranger's branch of the same name never does.
@@ -291,7 +324,8 @@ Everything lives in `~/.local/state/inkling/`:
   written `0600` because it holds session tokens. Deleting it forgets every
   watch and every place.
 - `waits.json` coordinates `inkling wait` processes.
-- `state.json` is the parked Slack reactions' state; nothing else writes it.
+- `state.json` is the parked Slack reactions' state, and caches who you are in
+  Slack once a watched message has been read.
 - The resident server's lock and status file sit beside them, so `--watches`
   moves the whole lot somewhere else.
 

@@ -658,7 +658,105 @@ finished standing drops its own watch. So `gh pr merge` auto-watches
 something that quietly disappears a tick later, which is the correct amount
 of noise.
 
+## Slack messages
+
+Built 2026-11-17, for one agent need: *I posted or asked something in Slack —
+tell me when someone replies or reacts.* `inkling watch <permalink>` watches
+one message, and the `post-tool` hook watches a message the session just
+posted.
+
+**The standing** is two things: the message's reactions, as emoji → count, and
+the replies after it in its thread, as ts → who wrote it. Two axes, like a pull
+request's:
+
+```
+slack:C0123ABCD/1786596050.245879  replies    2 → 4  by @alice, @bob
+slack:C0123ABCD/1786596050.245879  reactions  0 → 1  :white_check_mark:
+```
+
+- **Who replied is the news, so authors are kept and counts derived.** A new
+  ts in the map is a new reply and names its author; the count alone couldn't
+  say who. Names come from the same thread read — the tool prints each
+  author's name beside their id — so there are no profile lookups.
+- **A reaction names nobody.** Measured 2026-11-17: `slack_read_thread` with
+  `response_format: "detailed"` prints `Reactions: low-priority (1),
+  problem-solved (1)` — counts only, no users. So a reaction transition is one
+  per emoji whose count moved, and cannot say who, nor whether it was you.
+- **A reply's replies are the later ones.** A permalink to a reply carries
+  `thread_ts`; the thread is read from that root and only replies after the
+  watched message count. A thread is one conversation, and what came before
+  was already there when you asked.
+- **The reference is `slack:<channel>/<ts>`**, which is what Slack's own tools
+  take to read the message — the agent's next step. The thread root is how to
+  read it, not which message it is, so it isn't in the name. Always given in
+  full: the short forms are pull requests only.
+- **A conversation never finishes.** The watch ends at its deadline.
+
+**Why the 5-minute floor.** Every read is a `claude -p` call through the
+claude → Slack MCP bridge: ~2¢ ($0.021 twice, 2026-11-17), and 9s or 75s of
+wall time for the same read a minute apart. The schedule's one-minute floor
+was set for GitHub, where a read is one batched query worth one rate-limit
+point; for Slack it would be 60 paid calls an hour per message while it moves.
+So `watches_json::SLACK_READ_FLOOR` puts five minutes between *attempts*,
+whatever the schedule or a touch says — attempts, not successes, because a
+failing read costs as much as a good one and a broken connector must not be
+retried every tick. Two things follow:
+
+- **Only the server and the explicit commands read Slack.** The prompt hook
+  gives a refresh 3s; a bridge call can't fit, and abandoning one mid-flight
+  still pays for it. `Poller::slack` is `None` there, and Slack watches are
+  left for whoever has the time: the resident server, `inkling watch`, and
+  `inkling events` at a terminal (which can therefore take a minute).
+- **One call per watched message.** The thread tool reads one thread; a
+  channel read would batch, but carries neither reply authors nor anything
+  past its page. Fine at the handful a session posts.
+
+**Why no prose.** A push lands inside an agent's turn, and a Slack message's
+text is untrusted prose — somebody else's, and a prompt-injection surface. So
+the bridge is never *asked* for text (`SlackClaude::activity`'s prompt says not
+to include it, and `ThreadEntry` has no field to hold it if the model adds some
+anyway), and a push says who, how many, which emoji, and the reference. To read
+what was said, the agent uses Slack itself — a step it chooses.
+
+**Your own replies are receipts.** A reply transition made only by the Slack
+user the credentials belong to is recorded with `own` and `push::worth_a_turn`
+passes it over; it still shows at the next prompt. Anyone else in the same
+transition makes it news, and they are named. Who you are is
+`slack.user_id`, or found out once with `whoami` and cached in `state.json` —
+lazily, on the first read. Reactions can't be told apart, per above, so your
+own reactions push.
+
+**The hook.** `post-tool` matches the Slack MCP send tool by name, built from
+`[slack.mcp]` (`ToolNames::send`, `mcp__claude_ai_Slack__slack_send_message` by
+default), and Bash `curl`s to `chat.postMessage`:
+
+- **The MCP tool:** the channel is the call's `channel_id`; the ts can only
+  come from the result, so the result is searched for a permalink into that
+  channel (a DM to a user id lands in a `D` channel, so there any DM permalink
+  counts). A permalink the session wrote into the message itself is skipped,
+  and more than one candidate watches nothing. *Unverified:* no real send
+  result was recorded (dogfood.md, 2026-11-17), so that the result carries a
+  permalink at all is the guess the first real send tests.
+- **`chat.postMessage`:** the Web API's documented reply, `{"ok": true,
+  "channel", "ts", "message": {"thread_ts"}}`, read as JSON from stdout or not
+  at all. The `slack` CLI isn't recognized: nothing here could say what it
+  prints. `domain::slack::posted_via_api` is the seam for it.
+
+**The bridge's own hooks.** The `claude -p` child is a Claude Code session and
+runs the user's hooks, inkling's included — measured: a `SessionStart` hook in
+the child sees an environment variable set on it. The runner sets
+`INKLING_BRIDGE=1` and `inkling hook` returns before reading anything, so a
+read never subscribes a throwaway session or watches what it read.
+
 ## Not built, and what would change that
+
+- **Watching a Slack channel.** A channel is a stream, not a thing that moves
+  between standings: "tell me about #eng" needs a filter — from whom, about
+  what — before any of it is news, and every candidate filter is a guess. One
+  message is the unit that has an answer. What would change this: a dogfood
+  line about wanting to hear of a thread nobody in the session started.
+- **Who reacted.** Needs the Web API (`reactions.get`) — see the Slack app in
+  docs/deferred.md.
 
 - **A global view of every reader's events.** There is deliberately no
   `events --all`. Every read names a reader, which is the property that keeps
@@ -674,9 +772,9 @@ of noise.
   repository with a tracked upstream is not, and resolving it means asking.
   What would change this: dogfood lines about a `gh pr` command that should
   have watched something and didn't.
-- **Tools other than Bash.** An Edit that writes a PR number, an MCP call to
-  GitHub. Bash is where references appear today; the gate is one string
-  comparison, so a second tool is a small change when one earns it.
+- **Tools other than Bash and the Slack send tool.** An Edit that writes a PR
+  number, an MCP call to GitHub. The Slack send tool was the second one that
+  earned it (above); the gate is still a string comparison per tool.
 - **Choosing which events push, or are recorded at all.** One hardcoded rule
   decides what is worth a turn. A `[push]` table naming axes or transitions
   is the obvious next step and is deliberately not here: every knob is a
@@ -793,7 +891,7 @@ and cursor move writes its own. Read them with `inkling logs -g polled` or
 `-g transition`.
 
 ```
-polled watches why="serve" watched=5 github=4 jira=1 read=5 events=1 failures=0 elapsed_ms=412
+polled watches why="serve" watched=5 github=4 jira=1 slack=0 read=5 events=1 failures=0 elapsed_ms=412
 transition reference="github.com/dpep/inkling#3" axis="checks" from="pending" to="failure" seq=7 audience=1
 watch registered reference="github.com/dpep/inkling#3" owner="abc-123" deadline="2026-09-21T20:44:00Z"
 subscribed subscriber="abc-123" socket="/tmp/cc-socks/9317.sock" reattached=false

@@ -4,6 +4,38 @@ What using inkling on inkling's own work has taught us. One dated line per
 finding: what happened, what was expected. Newest first. When a finding is
 fixed, say where and leave the line.
 
+## 2026-11-17
+
+- Building the Slack source: `slack_read_thread` (and `read_channel`) with
+  `response_format: "detailed"` prints reactions as `low-priority (1)` — a
+  count, not who reacted. Expected emoji → users, so a push could say
+  `:white_check_mark: by @alice` and a reaction of my own could stay quiet.
+  Neither is possible over the MCP bridge: reaction pushes name nobody, and my
+  own reactions push. The Web API's `reactions.get` has the users.
+- Good surprise: the thread read prints each author's name beside their id
+  (`From: dpepper <email> (U0E48AHQA)`), so naming who replied costs no
+  profile lookup. The prompt asks for the name and explicitly not the email.
+- Two thread reads through `claude -p`, same prompt, a minute apart: $0.021
+  and $0.021, 9s and 75s of wall time. The cache never warmed (102k tokens of
+  cache creation both times), unlike the $0.018-warm the spike measured.
+  Expected ~4–15s; one read in two took over a minute.
+- The bridge child is a full Claude Code session and fires SessionStart hooks
+  in `-p` mode — checked with a hook that printed `INKLING_BRIDGE` from a
+  child given it (it printed `1`). So every bridge call `run` made had also
+  run the installed inkling's hooks against the real store. Fixed: the
+  runner sets `INKLING_BRIDGE` and `inkling hook` returns at once on it.
+- `ClaudeRunner.timeout` (180s) was never applied — `run` used
+  `Command::output`. Harmless for a cron `run`, a stalled tick for a server.
+  Fixed: bounded by `subprocess::output_within`.
+- Couldn't record a `slack_send_message` result: posting a fixture message,
+  even to my own DM, was refused by the session's permission classifier, and
+  no earlier transcript on this machine holds one. The send hook looks for a
+  permalink into the named channel anywhere in the result; that the result
+  carries one is a guess until the first real send through the hook.
+- Inkling's hooks ship in the myclaude plugin (`hooks/hooks.json`), not from
+  this repo, and its `PostToolUse` matcher is `Bash`. Until it also matches the
+  Slack send tool, the README's matcher change does nothing for plugin users.
+
 ## 2026-11-14
 
 - Rewriting the README without Slack: the short reference forms (`42`, `#42`,

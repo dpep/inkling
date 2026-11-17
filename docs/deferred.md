@@ -4,20 +4,31 @@ Things deliberately not built, each with what was measured and what would
 change the answer. The point is to avoid re-deriving the evidence — most of
 these were decided against with numbers, not taste.
 
-## Slack reactions, parked
+## Slack reactions, parked; the bridge is a watch source
 
 **Parked, 2026-11-14.** v1 — `inkling run` reacting to pull-request links in
 Slack with their state — worked end to end. Usage showed no demand: the binary
 wasn't even installed for weeks, and nothing in crontab runs it. The event
 feed for agents is the product now.
 
-Kept compiling and hidden rather than deleted: `run` is hidden from `--help`
-and `slackmcp` is undocumented. The claude → Slack MCP bridge underneath may be
-useful elsewhere. Don't extend it.
+Kept compiling and hidden rather than deleted: `run` is hidden from `--help`,
+`slackmcp` is undocumented, and nothing inkling does adds a reaction.
 
-**Revisit when** something needs Slack: extract the bridge into its own crate
-rather than growing it here. Or when the upkeep shows up — `ignore_checks` and
-the commit-status work both had to keep reactions working — then delete it
+**2026-11-17: the bridge is used again, as a source.** An agent that posts or
+asks something in Slack wants to hear when someone replies or reacts, so a
+Slack message is now something to watch, read through the same claude → Slack
+MCP bridge (`SlackClaude::activity`, `adapters/slack_thread.rs`; the design is
+in [watching.md](watching.md#slack-messages)). That is Slack as a source, not
+a sink: `run` and the reactions it adds stay parked, and the reasoning above
+still holds for them. The bridge was extended only where the source needed it
+— a text-free thread read, a hook guard, a timeout — not extracted.
+
+**Revisit when** the bridge's cost or flakiness shows up for Slack watches —
+`inkling logs -g polled` counts `slack=` reads, and each is ~2¢ and up to a
+minute; failures land beside them. That is the case for
+[a real Slack app](#becoming-a-real-slack-app), which also reads who reacted —
+the bridge can't. For `run`: when the upkeep shows up — `ignore_checks` and
+the commit-status work both had to keep reactions working — delete it
 outright. Git history keeps it.
 
 ## Tuning how often a watch is read

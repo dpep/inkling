@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
+  `replies 2 → 4 by @alice, @bob` and `reactions 0 → 1 :white_check_mark:` — who and how many,
+  never what anybody wrote. A reply only you wrote stays in `events` without a push. Reads go
+  through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read
+  at most every 5 minutes, and only by the resident server, `watch` and `events`. **To have
+  posting a message watch it, add the Slack send tool to the `PostToolUse` matcher:**
+  `"matcher": "Bash|mcp__claude_ai_Slack__slack_send_message"` (the myclaude plugin's
+  `hooks.json` needs the same change). A `curl` to `chat.postMessage` is watched through the
+  existing `Bash` matcher.
+- **Inkling's hooks do nothing inside its own Slack bridge.** The bridge's `claude -p` child ran
+  the user's hooks, inkling's included; it now carries `INKLING_BRIDGE=1` and they return at once.
+  The bridge's call is also bounded by its timeout now, rather than waited on indefinitely.
+
 - **`42`, `#42` and `repo#42` now find what you are watching.** The short forms only ever matched
   pull requests the Slack reactions had seen, so `inkling wait 42` and `inkling unwatch 42` failed
   for a pull request you had watched by its full name. They now match your watches too, and still
