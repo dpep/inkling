@@ -934,9 +934,11 @@ retried every tick. Two things follow:
   read alone: 0.4¢ warm, 2¢ cold). The channel read is `oldest` = the watched
   ts (exclusive, so exactly what came after), and a reply missing the
   `channel` key is a model that skipped the second call, so it is retried
-  rather than read as a quiet channel. One that parsed without the watched
-  message is `NotFound`, not retried: a deleted reply's thread still reads,
-  with no error code to match. The two reads are kept apart in the
+  rather than read as a quiet channel. One whose thread has rows but not the
+  watched message is `NotFound`, not retried: a deleted reply's thread still
+  reads, with no error code to match. A thread with no rows at all — a model
+  without the Slack tools echoing the JSON template — read nothing, and is
+  retried like any failed read. The two reads are kept apart in the
   reply, so a whole-channel watch could reuse the channel half unfiltered.
 - **A channel read is one page: the newest 100.** A conversation busier than
   that since the watched message drops its earliest messages from the read,

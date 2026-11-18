@@ -390,10 +390,18 @@ mod tests {
         let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
         assert_eq!(prompts.borrow().len(), 1);
+    }
 
-        let (slack, _) = threads(&[r#"{"messages":[],"channel":[]}"#]);
+    #[test]
+    fn a_read_with_no_thread_rows_is_retried_not_gone() {
+        // A model without the Slack tools may echo the template, whose rows
+        // are dropped as unreadable: nothing was read, so nothing is missing.
+        let template = r#"I can't reach Slack. The output would look like: {"messages": [{"ts": "...", "user_id": "...", "user_name": "...", "reactions": {"name": 1}}], "channel": [{"ts": "...", "user_id": "...", "user_name": "...", "mentions": ["U..."]}]}"#;
+        let empty = r#"{"messages":[],"channel":[]}"#;
+        let (slack, prompts) = threads(&[template, empty, THREAD]);
         let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
-        assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
+        assert!(read.unwrap()[0].1.is_ok());
+        assert_eq!(prompts.borrow().len(), 3);
     }
 
     #[test]
