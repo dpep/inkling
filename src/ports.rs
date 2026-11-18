@@ -92,6 +92,8 @@ pub trait MessageSource {
 pub enum ProviderError {
     #[error("github request failed: {0}")]
     Transport(String),
+    #[error("jira request failed: {0}")]
+    Jira(String),
     #[error("slack read failed: {0}")]
     Slack(String),
 }

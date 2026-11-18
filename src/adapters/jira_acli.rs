@@ -121,7 +121,7 @@ impl<S: Shell> IssueProvider for JiraProvider<S> {
                     // Nothing else will work either, so this is the whole
                     // provider failing rather than one issue.
                     Err(Failure::Unavailable(message)) => {
-                        return Err(ProviderError::Transport(message));
+                        return Err(ProviderError::Jira(message));
                     }
                 };
                 Ok((key.clone(), status))
@@ -323,7 +323,8 @@ mod tests {
         let provider = JiraProvider::with_shell(Canned::of(vec![Err(Failure::Unavailable(
             "running `acli`: No such file or directory".into(),
         ))]));
-        assert!(provider.read(&["AI-1".to_string()]).is_err());
+        let error = provider.read(&["AI-1".to_string()]).unwrap_err();
+        assert!(error.to_string().starts_with("jira "), "{error}");
     }
 
     #[test]
