@@ -273,9 +273,6 @@ pub struct Discussion {
     /// Every remark made at or after this is in `remarks`. `None` when all of
     /// them are; otherwise a burst bigger than a page may reach past it.
     pub complete_after: Option<DateTime<Utc>>,
-    /// `total` leaves out reviews beyond the page, so it is a floor. Without
-    /// that, a burst past the page still has an exact count.
-    pub floor: bool,
 }
 
 /// One reading of one reference, as a poll hands it over.
@@ -720,11 +717,11 @@ fn commented(
         _ => Made::Others,
     };
     // The oldest of a full page is itself new, so the burst may reach further
-    // back than the page did — which only GitHub's totals can make up for.
-    let partial = said.floor
-        && said
-            .complete_after
-            .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
+    // back than the page did. GitHub's totals make up the number, but not for
+    // a comment deleted meanwhile, so it is a floor.
+    let partial = said
+        .complete_after
+        .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
     let moved = Transition {
         axis: Axis::Comments,
         from: (had.count + unsaid).to_string(),
@@ -1640,8 +1637,6 @@ mod tests {
                 remarks: page.clone(),
                 total: 41,
                 complete_after: Some(page[0].at),
-                // More reviews than a page: what wasn't read wasn't summed.
-                floor: true,
             }),
             ..commenting(State::Open, &[], 0)
         };
@@ -1692,9 +1687,11 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_past_the_page_is_exact_when_github_counted_all_of_it() {
-        // Conversation comments past the page: totalCount says how many, so
-        // only the names are the page's.
+    fn a_burst_past_the_page_is_at_least_what_github_counted() {
+        // Conversation comments past the page: totalCount gives the number,
+        // but a comment deleted since the last reading hides one new one, and
+        // nothing the page shows can tell. Recorded as a hunt repro: one of
+        // ten deleted, then 31 new, read as exactly 30.
         let base = reading(
             None,
             &commenting(State::Open, &[remark("a", "10:00:00", "@alice")], 1),
@@ -1708,13 +1705,12 @@ mod tests {
                 remarks: page.clone(),
                 total: 31,
                 complete_after: Some(page[0].at),
-                floor: false,
             }),
             ..commenting(State::Open, &[], 0)
         };
         let moved = changed(Some(&base), &burst);
         assert_eq!(labels(&moved), [("comments", "1", "31")]);
-        assert!(!moved[0].partial, "the count is GitHub's, not a floor");
+        assert!(moved[0].partial, "the count is GitHub's less any deletions");
     }
 
     #[test]

@@ -903,7 +903,6 @@ impl PullRequest {
         }
         if let Some(reviews) = &self.reviews {
             horizons.extend(reviews.horizon(|r| r.submitted_at));
-            said.floor = reviews.total_count > reviews.nodes.len() as u64;
             for review in &reviews.nodes {
                 let Some(at) = review.submitted_at else {
                     continue;
@@ -1834,7 +1833,6 @@ mod tests {
         );
         assert_eq!(said.total, 8, "five comments and copilot's three reviews");
         assert_eq!(said.complete_after, None, "both pages held everything");
-        assert!(!said.floor);
         let who: Vec<&str> = said.remarks.iter().map(|r| r.by.as_str()).collect();
         assert_eq!(
             who,
@@ -1877,7 +1875,6 @@ mod tests {
         );
         assert!(said.remarks[..11].iter().all(|r| r.lines == 0 && r.body));
         assert_eq!(said.total, 11 + 50 + 2 + 3 + 1 + 4);
-        assert!(said.floor, "125 reviews, and only a page of them summed");
     }
 
     #[test]
