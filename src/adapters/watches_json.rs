@@ -240,8 +240,9 @@ pub enum Unwatched {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscriber {
     pub cursor: u64,
-    /// Last time this subscriber asked, or was pushed to. A cursor with no
-    /// sign of life for `SUBSCRIBER_RETENTION` is dropped.
+    /// Last time this subscriber asked, was pushed to, or answered a probe. A
+    /// cursor with no sign of life for `SUBSCRIBER_RETENTION`, and nothing
+    /// left to hear, is dropped.
     pub seen_at: DateTime<Utc>,
     /// Where a running session is listening, while one is. Absent means pull
     /// only — which is every subscriber that predates `inkling subscribe`,
@@ -826,6 +827,13 @@ impl Watches {
         }
     }
 
+    /// A probe found this subscriber listening: a sign of life.
+    pub fn answered(&mut self, subscriber: &str, now: DateTime<Utc>) {
+        if let Some(entry) = self.subscribers.get_mut(subscriber) {
+            entry.seen_at = now;
+        }
+    }
+
     /// How many more messages this session may be sent right now.
     ///
     /// Zero is not a failure and nothing is dropped: the transitions stay in
@@ -857,12 +865,14 @@ impl Watches {
             live
         });
         self.events.retain(|event| now - event.at < retention);
-        // A departed reader that still owns a watch is kept: dropping it
-        // would forget the departure and quietly resume that watch's reads.
-        let watches = &self.watches;
+        // Quiet is only a reason to forget a reader with nothing left to
+        // hear. One that owns a watch or is owed news keeps its cursor (and a
+        // departed one its departure, or that watch would quietly resume).
+        let (watches, events) = (&self.watches, &self.events);
         self.subscribers.retain(|id, subscriber| {
             now - subscriber.seen_at < SUBSCRIBER_RETENTION
-                || (subscriber.departed && watches.values().any(|w| w.owners.contains(id)))
+                || watches.values().any(|w| w.owners.contains(id))
+                || !crate::domain::watch::addressed(events, subscriber.cursor, id).is_empty()
         });
         Pruned {
             watches: before.0 - self.watches.len(),
@@ -1780,6 +1790,7 @@ mod tests {
             "a session waiting for something is silent by definition"
         );
 
+        watches.unwatch(&pr(3), "quiet");
         watches.collect_garbage(now() + TimeDelta::days(8), RETENTION);
         assert!(
             watches.subscribers.is_empty(),
@@ -2326,6 +2337,36 @@ mod tests {
         watches.unwatch(&pr(3), "s-1");
         watches.collect_garbage(week, RETENTION);
         assert!(!watches.knows("s-1"));
+    }
+
+    #[test]
+    fn a_reader_quiet_for_a_week_keeps_what_it_is_still_owed() {
+        // Found by the hunt: a `--ttl 30d` watch, nobody asking for eight
+        // days, then a transition an hour old was dropped with its reader.
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", now() + TimeDelta::days(30), now());
+        watches.watch(&pr(4), "s-1", now() + TimeDelta::days(30), now());
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+        watches.record(&[(pr(4), seen_pull(State::Open, None))], now());
+        let week = now() + SUBSCRIBER_RETENTION + TimeDelta::hours(1);
+        watches.record(&[(pr(3), seen_pull(State::Approved, None))], week);
+        // #4 finishing removes its watch; its merge is still owed.
+        watches.record(&[(pr(4), seen_pull(State::Merged, None))], week);
+
+        watches.collect_garbage(week, RETENTION);
+        watches.unwatch(&pr(3), "s-1");
+        watches.collect_garbage(week, RETENTION);
+        assert_eq!(watches.take("s-1", week).len(), 2);
+    }
+
+    #[test]
+    fn a_reader_with_nothing_left_is_forgotten_after_a_week() {
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.unwatch(&pr(3), "s-1");
+        let week = now() + SUBSCRIBER_RETENTION + TimeDelta::hours(1);
+        watches.collect_garbage(week, RETENTION);
+        assert!(!watches.knows("s-1"), "an address alone doesn't keep it");
     }
 
     #[test]

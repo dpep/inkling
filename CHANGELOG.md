@@ -32,6 +32,10 @@
   stands down for the newer build. The store is now version 2, so the build you are replacing
   refuses it too — expected during `make install`. Builds from before this change still can't
   tell, so don't run one against a store this build has written.
+- **A long watch no longer forgets its reader after a quiet week.** A reader silent for seven days
+  was dropped even while it owned a watch, so a `--ttl 30d` watch lost news still inside
+  retention, and a session waiting quietly lost its push address. A reader is now kept while it
+  owns a watch or is owed news, and a session that answers the server's probe counts as alive.
 - **An ended session's watches are paused until it comes back.** Once every session watching
   something has ended, Inkling stops reading it, so a session you closed stops paying for Slack
   reads (about 2¢ each). `claude --resume` makes those watches due at once, and the first reading

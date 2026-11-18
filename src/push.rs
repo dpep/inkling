@@ -393,6 +393,9 @@ impl Outcome {
         if let Some(seq) = self.cursor {
             watches.pushed(&self.subscriber, seq, self.written, now);
         }
+        if self.probed && !self.detach {
+            watches.answered(&self.subscriber, now);
+        }
         if self.detach {
             watches.detach(&self.subscriber);
         }
@@ -1585,6 +1588,17 @@ mod tests {
             sessions.texts().is_empty(),
             "a probe that said something would start a turn"
         );
+    }
+
+    #[test]
+    fn a_session_that_answers_a_probe_is_alive() {
+        // A session waiting on something is silent by definition; answering
+        // is the sign of life it can give.
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now() - TimeDelta::days(3));
+
+        deliver(&FakeSessions::default(), &mut watches);
+        assert_eq!(watches.subscribers["s"].seen_at, now());
     }
 
     #[test]

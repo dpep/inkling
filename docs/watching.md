@@ -651,9 +651,14 @@ session posts. So a closed session kept paying for news nobody could hear.
   would turn "we can't tell" into "they've gone" and lose news someone is
   waiting for. One such owner, or one attached owner, keeps a watch live.
   Failing open costs reads; failing closed costs news.
-- **A departed reader's record outlives `SUBSCRIBER_RETENTION` while it owns
-  a watch.** Otherwise a watch with a `--ttl` past seven days would forget
-  the departure and quietly start reading again.
+- **A reader's record outlives `SUBSCRIBER_RETENTION` while it owns a watch
+  or is owed news.** Seven quiet days are only a reason to forget a reader
+  with nothing left to hear. It was first written for departed readers — a
+  watch with a `--ttl` past seven days would forget the departure and quietly
+  start reading again — and then found (2026-11-18) to bite every quiet reader:
+  a `--ttl 30d` watch silent for eight days lost an hour-old transition with
+  its cursor, and an attached session lost its address and its pushes. A probe
+  the session answers counts as a sign of life too.
 - **The server needs no change of its own.** `should_serve` already counts
   only attached subscribers' watches, and an attached owner can't have a
   paused watch, so paused watches were never a reason to stay. What did
