@@ -125,6 +125,10 @@ pub const PAGE_LIMIT: usize = 20;
 /// `slack_read_channel`'s maximum page.
 pub const CHANNEL_PAGE: usize = 100;
 
+/// `slack_read_thread`'s maximum page. It lists oldest first, so a thread
+/// longer than a page loses its newest replies, the ones that are news.
+const THREAD_PAGE: usize = 1000;
+
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
         Self::with_tools(runner, ToolNames::default())
@@ -147,9 +151,10 @@ impl<R: Runner> SlackClaude<R> {
     }
 
     /// Run a prompt and interpret the reply, retrying when the reply doesn't
-    /// make sense. Transport errors are retried too; a typed refusal from
-    /// Slack — a missing emoji, a deleted message — is not, since repeating
-    /// it would just cost time.
+    /// make sense. Transport errors are retried too, except a timeout: a hang
+    /// costs the whole timeout again. A typed refusal from Slack — a missing
+    /// emoji, a deleted message — is not, since repeating it would just cost
+    /// time.
     fn attempt<T>(
         &self,
         prompt: &str,
@@ -175,6 +180,7 @@ impl<R: Runner> SlackClaude<R> {
                     Err(Retry::Fatal(error)) => return Err(error),
                     Err(Retry::Again(error)) => last = error,
                 },
+                Err(error @ RunnerError::TimedOut { .. }) => return Err(error.to_string()),
                 Err(error) => last = error.to_string(),
             }
             if attempt + 1 < ATTEMPTS {
@@ -501,8 +507,10 @@ impl<R: Runner> SlackClaude<R> {
     /// Both reads go in one `claude -p`: a second tool call costs a turn, not
     /// another session.
     ///
-    /// `wanted` is the message being watched. A reply that leaves it out is a
-    /// model that dropped a row, not a deleted message, so it is retried.
+    /// `wanted` is the message being watched. A read that parsed but leaves
+    /// it out is gone: a deleted reply's thread still reads, with no error
+    /// code. A model that merely dropped the row looks the same, so the
+    /// caller must not end a watch on one such reading.
     pub fn activity(
         &self,
         channel_id: &str,
@@ -525,7 +533,7 @@ impl<R: Runner> SlackClaude<R> {
              channel_id: {channel_id:?}\n\
              message_ts: {root_ts:?}\n\
              {from}\
-             limit: 100\n\
+             limit: {THREAD_PAGE}\n\
              response_format: \"detailed\"\n\n\
              Then call {channel_tool} with these exact arguments:\n\
              channel_id: {channel_id:?}\n\
@@ -552,12 +560,12 @@ impl<R: Runner> SlackClaude<R> {
             &prompt,
             &[thread_tool, channel_tool],
             |raw| match parse_activity(raw) {
-                Ok(read) if !read.thread.iter().any(|e| e.ts == wanted) => {
-                    Err(Retry::Again(format!("the read left out {wanted}")))
-                }
                 Ok(read) if read.channel.is_none() => {
                     Err(Retry::Again("the read left out the channel".into()))
                 }
+                Ok(read) if !read.thread.iter().any(|e| e.ts == wanted) => Err(Retry::Fatal(
+                    format!("{GONE_MARK}: the read left out {wanted}"),
+                )),
                 Ok(read) => Ok(read),
                 Err(error) => Err(unparsed(raw, error)),
             },
@@ -800,6 +808,28 @@ mod tests {
             .add(&MessageId::new("C1", "1.0"), &ReactionName::new("nope"))
             .unwrap_err();
         assert!(matches!(error, SinkError::InvalidEmoji(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_bridge_timeout_is_not_retried() {
+        // Retries are for the hiccup that answers in seconds; a hang costs
+        // the whole timeout again on every try.
+        struct Hangs(RefCell<usize>);
+        impl Runner for Hangs {
+            fn run(&self, _: &str, _: &[&str], _: usize) -> Result<String, RunnerError> {
+                *self.0.borrow_mut() += 1;
+                Err(RunnerError::TimedOut {
+                    command: "claude".into(),
+                    timeout: Duration::from_secs(180),
+                })
+            }
+        }
+        let slack = SlackClaude::new(Hangs(RefCell::new(0))).without_delay();
+        let error = slack
+            .add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"))
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(*slack.runner.0.borrow(), 1);
     }
 
     #[test]

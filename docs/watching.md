@@ -909,7 +909,9 @@ retried every tick. Two things follow:
   read alone: 0.4¢ warm, 2¢ cold). The channel read is `oldest` = the watched
   ts (exclusive, so exactly what came after), and a reply missing the
   `channel` key is a model that skipped the second call, so it is retried
-  rather than read as a quiet channel. The two reads are kept apart in the
+  rather than read as a quiet channel. One that parsed without the watched
+  message is `NotFound`, not retried: a deleted reply's thread still reads,
+  with no error code to match. The two reads are kept apart in the
   reply, so a whole-channel watch could reuse the channel half unfiltered.
 - **A channel read is one page: the newest 100.** A conversation busier than
   that since the watched message drops its earliest messages from the read,
@@ -932,10 +934,14 @@ Having no text field isn't enough on its own: the model has read the messages, s
 any field it writes that a push renders — a display name, an emoji — is
 somewhere a message could steer prose into (a bug hunt forged a whole
 `inkling:` line through a name, 2026-11-17). So `parse::sane` keeps only what
-has Slack's shape: a ts of exactly ten and six digits, a `U`/`W`/`B` id, a
-name of letters, digits, `._- ` up to 40 characters (or none, and the id is
-said instead), an emoji of `a-z0-9_+-':` up to 64. An entry with a bad ts or id
-is dropped.
+has Slack's shape: a ts of exactly ten and six digits, an id of 9–20
+uppercase letters and digits (a person's, a bot's or an app's), a name of
+up to 40 characters with no control character, backtick, `|`, `,` or bidi
+override (or none, and the id is said instead), an emoji of letters, digits
+and `_+-':` up to 64. A name can still be ordinary words chosen to read as
+an instruction; that is the price of accepting `Dan O'Brien` and `Ana 🌴`. An entry with a bad ts is
+dropped; a bad id is blanked and the entry kept, since a dropped row reads as
+a deleted message. A reply with no id is from "someone".
 
 **Your own replies are receipts — "own" is what this session posted.** Changed
 2026-11-17. The first rule was by author: a reply whose author was the user the
@@ -990,19 +996,23 @@ same shared-identity flaw, unfixed here.
 
 `slack.user_id` (or `whoami`, cached in `state.json`) is still read, lazily:
 it is how a channel message that @mentions the reader is recognized as a
-reply.
+reply. A failed `whoami` is remembered there too, and not asked again by any
+process for five minutes: each try is paid.
 
 **The hook.** `post-tool` matches the Slack MCP send tool by name, built from
 `[slack.mcp]` (`ToolNames::send`, `mcp__claude_ai_Slack__slack_send_message` by
 default), and Bash `curl`s to `chat.postMessage`:
 
-- **The MCP tool:** the channel is the call's `channel_id`; the ts can only
-  come from the result, so the result is searched for a permalink into that
-  channel (a DM to a user id lands in a `D` channel, so there any DM permalink
+- **The MCP tool:** the result's `message_context` names the channel id and
+  ts outright (recorded from the first real send, dogfood.md), even when the
+  call named the channel by handle. Without one, the channel is the call's
+  `channel_id` and the result is searched for a permalink into that channel
+  (a DM to a user id lands in a `D` channel, so there any DM permalink
   counts). A permalink the session wrote into the message itself is skipped,
-  and more than one candidate watches nothing. *Unverified:* no real send
-  result was recorded (dogfood.md, 2026-11-17), so that the result carries a
-  permalink at all is the guess the first real send tests.
+  and more than one candidate watches nothing.
+- **Not `slack_schedule_message`:** a scheduled message has no ts until it is
+  delivered, so there is nothing to watch or hold a receipt for. A scheduled
+  post pushes as someone else's reply.
 - **`chat.postMessage`:** the Web API's documented reply, `{"ok": true,
   "channel", "ts", "message": {"thread_ts"}}`, read as JSON from stdout or not
   at all. The `slack` CLI isn't recognized: nothing here could say what it

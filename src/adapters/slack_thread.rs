@@ -283,6 +283,16 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_is_read_to_the_tools_maximum() {
+        // Oldest first, so a smaller page never reaches the newest replies.
+        let (slack, prompts) = threads(&[THREAD]);
+        let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let prompt = &prompts.borrow()[0];
+        let thread = &prompt[..prompt.find("Then call").unwrap()];
+        assert!(thread.contains("limit: 1000\n"), "{thread}");
+    }
+
+    #[test]
     fn the_prompt_never_asks_for_what_a_message_says() {
         let (slack, prompts) = threads(&[THREAD]);
         let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
@@ -292,12 +302,17 @@ mod tests {
     }
 
     #[test]
-    fn a_read_that_drops_the_watched_message_is_retried() {
+    fn a_read_that_parsed_without_the_watched_message_is_not_found_and_not_retried() {
+        // A deleted reply's thread still reads, with no error code to match.
         let dropped = r#"{"messages":[{"ts":"1786596060.000001","user_id":"U00000002","reactions":{}}],"channel":[]}"#;
         let (slack, prompts) = threads(&[dropped, THREAD]);
         let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
-        assert!(read.unwrap()[0].1.is_ok());
-        assert_eq!(prompts.borrow().len(), 2);
+        assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
+        assert_eq!(prompts.borrow().len(), 1);
+
+        let (slack, _) = threads(&[r#"{"messages":[],"channel":[]}"#]);
+        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
     }
 
     #[test]

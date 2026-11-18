@@ -928,7 +928,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             // lock, which caching the answer takes for a moment.
             let mut config = config;
             if config.slack.user_id.is_none() {
-                config.slack.user_id = Some(resolve_identity(&slack, &store)?);
+                config.slack.user_id = Some(resolve_identity(&slack, &store, clock.now())?);
             }
 
             // One writer at a time. The snapshot is rewritten whole, so two
@@ -1063,11 +1063,26 @@ fn init(path: &std::path::Path, force: bool) -> Result<i32, String> {
 fn resolve_identity<R: slack_claude::Runner>(
     slack: &slack_claude::SlackClaude<R>,
     store: &JsonStore,
+    now: DateTime<Utc>,
 ) -> Result<String, String> {
-    if let Some(id) = store.load().map_err(|e| e.to_string())?.user_id {
+    let known = store.load().map_err(|e| e.to_string())?;
+    if let Some(id) = known.user_id {
         return Ok(id);
     }
-    let me = slack.whoami().map_err(|e| e.to_string())?;
+    let retry = inkling::adapters::watches_json::SLACK_READ_FLOOR;
+    if let Some(at) = known.user_id_failed_at.filter(|at| now - *at < retry) {
+        return Err(format!(
+            "it failed at {at}; asking again after {}",
+            at + retry
+        ));
+    }
+    let me = match slack.whoami() {
+        Ok(me) => me,
+        Err(error) => {
+            let _ = store.update(|snapshot| snapshot.user_id_failed_at = Some(now));
+            return Err(error.to_string());
+        }
+    };
 
     // whoami already carries the name, so seed it here rather than paying a
     // second profile call for the one author who appears on every message.
@@ -1078,6 +1093,7 @@ fn resolve_identity<R: slack_claude::Runner>(
     };
     let cached = store.update(|snapshot| {
         snapshot.user_id = Some(me.id.clone());
+        snapshot.user_id_failed_at = None;
         if !name.is_empty() {
             snapshot.users.insert(me.id.clone(), name);
         }
@@ -2164,7 +2180,7 @@ fn slack_threads(
                 return Some(id.clone());
             }
             let slack = slack_claude::from_config(&config, None).ok()?;
-            resolve_identity(&slack, &JsonStore::new(state.clone()))
+            resolve_identity(&slack, &JsonStore::new(state.clone()), SystemClock.now())
                 .map_err(|error| {
                     tracing::warn!(
                         error,
@@ -3544,5 +3560,42 @@ mod tests {
     fn cutting_counts_characters_not_bytes() {
         // Truncating by byte would split a multi-byte glyph in half.
         assert_eq!(ellipsize("émoji—dash ok", 6), "émoji…");
+    }
+
+    #[test]
+    fn a_failed_whoami_is_not_asked_again_by_the_next_process_inside_the_window() {
+        use inkling::adapters::slack_claude::{Runner, RunnerError, SlackClaude};
+        use std::cell::Cell;
+        use std::rc::Rc;
+        struct Refuses(Rc<Cell<usize>>);
+        impl Runner for Refuses {
+            fn run(&self, _: &str, _: &[&str], _: usize) -> Result<String, RunnerError> {
+                self.0.set(self.0.get() + 1);
+                // A timeout isn't retried, so no retry delay to sleep through.
+                Err(RunnerError::TimedOut {
+                    command: "claude".into(),
+                    timeout: std::time::Duration::from_secs(180),
+                })
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("inkling-whoami-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::JsonStore::new(dir.join("state.json"));
+        let calls = Rc::new(Cell::new(0));
+        // A fresh bridge each time, as each CLI process builds its own.
+        let ask = |now| {
+            let slack = SlackClaude::new(Refuses(calls.clone()));
+            super::resolve_identity(&slack, &store, now)
+        };
+        let now: chrono::DateTime<chrono::Utc> = "2026-11-17T12:00:00Z".parse().unwrap();
+
+        assert!(ask(now).is_err());
+        let paid = calls.get();
+        assert!(ask(now + chrono::TimeDelta::minutes(1)).is_err());
+        assert_eq!(calls.get(), paid, "inside the window, nothing is paid");
+        assert!(ask(now + chrono::TimeDelta::minutes(6)).is_err());
+        assert!(calls.get() > paid, "asked again once it has passed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

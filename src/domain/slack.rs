@@ -174,8 +174,10 @@ pub fn posted_via_api(command: &str, stdout: &str) -> Option<Reference> {
 
 /// The message a Slack MCP send tool just posted.
 ///
-/// The channel is the one the call named; the ts can only come from the
-/// result, so that is searched for a permalink into that channel. Two guards
+/// The result's `message_context` names it outright, channel id and ts,
+/// even when the call named the channel by handle. Without one, the channel
+/// is the one the call named, and the result is searched for a permalink
+/// into that channel for the ts. Two guards
 /// keep prose out: a permalink the session itself wrote into the message is
 /// not the message, and more than one candidate is no answer at all. A DM
 /// sent to a user id lands in a `D` channel nobody named, so there any DM
@@ -190,6 +192,13 @@ pub fn posted_via_tool(input: &Value, response: &Value) -> Option<Reference> {
         .get("thread_ts")
         .and_then(Value::as_str)
         .filter(|root| is_ts(root));
+    if let Some((posted, ts)) = context(response) {
+        return Some(Reference::SlackMessage {
+            channel: posted,
+            thread: thread.filter(|root| *root != ts).map(str::to_string),
+            ts,
+        });
+    }
 
     let mut found: Vec<Reference> = Vec::new();
     for text in strings(response) {
@@ -219,6 +228,43 @@ pub fn posted_via_tool(input: &Value, response: &Value) -> Option<Reference> {
     match found.as_slice() {
         [one] => Some(one.clone()),
         _ => None,
+    }
+}
+
+/// The one well-formed `message_context` in a send result, however nested.
+fn context(response: &Value) -> Option<(String, String)> {
+    let mut found = Vec::new();
+    contexts(response, &mut found, 0);
+    found.sort();
+    found.dedup();
+    match found.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+fn contexts(value: &Value, out: &mut Vec<(String, String)>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            if let Ok(inner @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(text) {
+                contexts(&inner, out, depth + 1);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| contexts(v, out, depth + 1)),
+        Value::Object(fields) => {
+            let field = |name| value.pointer(&format!("/message_context/{name}"))?.as_str();
+            if let (Some(channel), Some(ts)) = (field("channel_id"), field("message_ts"))
+                && is_channel(channel)
+                && is_ts(ts)
+            {
+                out.push((channel.to_string(), ts.to_string()));
+            }
+            fields.values().for_each(|v| contexts(v, out, depth + 1));
+        }
+        _ => {}
     }
 }
 
@@ -503,6 +549,26 @@ mod tests {
                 Some("1786596000.123456")
             ))
         );
+    }
+
+    #[test]
+    fn the_send_result_s_message_context_names_what_was_posted() {
+        // The shape of the first real send (dogfood.md); a channel named by
+        // handle has no permalink into "the channel named" to match.
+        let response = json!([{"type": "text", "text": r#"{"message_link":"https:\/\/acme.slack.com\/archives\/C0123ABCD\/p1786596050245879","message_context":{"message_ts":"1786596050.245879","channel_id":"C0123ABCD"}}"#}]);
+        let input =
+            json!({"channel_id": "#general", "message": "hi", "thread_ts": "1786596000.123456"});
+        assert_eq!(
+            posted_via_tool(&input, &response),
+            Some(message(
+                "C0123ABCD",
+                "1786596050.245879",
+                Some("1786596000.123456")
+            ))
+        );
+
+        let bad = json!({"message_context": {"message_ts": "soon", "channel_id": "C0123ABCD"}});
+        assert_eq!(posted_via_tool(&sent("#general", "hi"), &bad), None);
     }
 
     #[test]

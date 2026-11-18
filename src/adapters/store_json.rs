@@ -36,6 +36,10 @@ pub struct Snapshot {
     /// Whose credentials these are, resolved once rather than configured.
     #[serde(default)]
     pub user_id: Option<String>,
+    /// When finding that out last failed: each try is paid, and every CLI
+    /// process would otherwise pay again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id_failed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
