@@ -921,9 +921,11 @@ any field it writes that a push renders — a display name, an emoji — is
 somewhere a message could steer prose into (a bug hunt forged a whole
 `inkling:` line through a name, 2026-11-17). So `parse::sane` keeps only what
 has Slack's shape: a ts of exactly ten and six digits, an id of 9–20
-uppercase letters and digits (a person's, a bot's or an app's), a
-name of letters, digits, `._- ` up to 40 characters (or none, and the id is
-said instead), an emoji of `a-z0-9_+-':` up to 64. An entry with a bad ts is
+uppercase letters and digits (a person's, a bot's or an app's), a name of
+up to 40 characters with no control character, backtick, `|`, `,` or bidi
+override (or none, and the id is said instead), an emoji of letters, digits
+and `_+-':` up to 64. A name can still be ordinary words chosen to read as
+an instruction; that is the price of accepting `Dan O'Brien` and `Ana 🌴`. An entry with a bad ts is
 dropped; a bad id is blanked and the entry kept, since a dropped row reads as
 a deleted message. A reply with no id is from "someone".
 

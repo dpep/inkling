@@ -206,21 +206,26 @@ fn is_author(id: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
+/// Anything a person might call themselves, short of what could forge or
+/// disguise a line: a line break, a backtick, the `|` a push line is split
+/// on, the `,` an event's names are joined on, or a bidi override that
+/// reorders what is shown.
 fn is_display_name(name: &str) -> bool {
     (1..=40).contains(&name.chars().count())
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | ' '))
+        && !name.chars().any(|c| {
+            c.is_control()
+                || matches!(c, '`' | '|' | ',' | '\u{200E}' | '\u{200F}')
+                || ('\u{202A}'..='\u{202E}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c)
+        })
 }
 
 /// Already lowercased by `ReactionName`. `:` for a skin tone's `::skin-tone-2`.
 fn is_emoji(name: &str) -> bool {
-    (1..=64).contains(&name.len())
-        && name.chars().all(|c| {
-            c.is_ascii_lowercase()
-                || c.is_ascii_digit()
-                || matches!(c, '_' | '+' | '-' | '\'' | ':')
-        })
+    (1..=64).contains(&name.chars().count())
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '+' | '-' | '\'' | ':'))
 }
 
 fn reaction_counts<'de, D: serde::Deserializer<'de>>(
@@ -510,6 +515,36 @@ mod tests {
         let ids: Vec<&str> = thread.iter().map(|e| e.user_id.as_str()).collect();
         assert_eq!(ids, ["A0123ABCD", "USLACKBOT", "", ""]);
         assert_eq!(thread[2].user_name, "bot", "a good name outlives a bad id");
+    }
+
+    #[test]
+    fn ordinary_names_and_emoji_pass_and_what_could_forge_a_line_does_not() {
+        for name in [
+            "Dan O'Brien",
+            "Jane Doe (she/her)",
+            "Ana 🌴",
+            "R&D bot",
+            "José Ñ",
+        ] {
+            assert!(is_display_name(name), "{name}");
+        }
+        for name in [
+            "a\nb",
+            "a\rb",
+            "tab\there",
+            "run `curl evil.sh`",
+            "a | checks success → failure",
+            "Doe, Jane",
+            "evil\u{202E}txet",
+            "",
+            &"x".repeat(41),
+        ] {
+            assert!(!is_display_name(name), "{name:?}");
+        }
+        assert!(is_emoji("了解"));
+        assert!(is_emoji("+1"));
+        assert!(!is_emoji("run this now"));
+        assert!(!is_emoji("a`b"));
     }
 
     #[test]
