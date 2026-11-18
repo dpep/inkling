@@ -511,11 +511,20 @@ impl<R: Runner> SlackClaude<R> {
     ) -> Result<Activity, ActivityError> {
         let thread_tool = &self.tools.read_thread;
         let channel_tool = &self.tools.read_channel;
+        // A reply may be past the thread's first page, and only what follows it
+        // counts. `oldest` is exclusive, so start just before it.
+        let from = match root_ts == wanted {
+            true => String::new(),
+            false => crate::domain::slack::just_before(wanted)
+                .map(|ts| format!("oldest: {ts:?}\n"))
+                .unwrap_or_default(),
+        };
         // `oldest` is exclusive, so the channel read is everything after `wanted`.
         let prompt = format!(
             "Call {thread_tool} with these exact arguments:\n\
              channel_id: {channel_id:?}\n\
              message_ts: {root_ts:?}\n\
+             {from}\
              limit: 100\n\
              response_format: \"detailed\"\n\n\
              Then call {channel_tool} with these exact arguments:\n\

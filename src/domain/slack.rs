@@ -129,6 +129,16 @@ pub fn ts_key(ts: &str) -> Option<(u64, u32)> {
     Some((seconds.parse().ok()?, micros.parse().ok()?))
 }
 
+/// The ts one microsecond earlier, for an exclusive bound that keeps `ts`.
+pub fn just_before(ts: &str) -> Option<String> {
+    let (seconds, micros) = ts_key(ts)?;
+    let (seconds, micros) = match micros {
+        0 => (seconds.checked_sub(1)?, 999_999),
+        n => (seconds, n - 1),
+    };
+    Some(format!("{seconds}.{micros:06}"))
+}
+
 /// Whether `ts` was posted after `than`. Unparseable is never later.
 pub fn later(ts: &str, than: &str) -> bool {
     matches!((ts_key(ts), ts_key(than)), (Some(a), Some(b)) if a > b)
@@ -355,6 +365,18 @@ mod tests {
         ] {
             assert_eq!(parse_channel(arg), None, "{arg}");
         }
+    }
+
+    #[test]
+    fn just_before_is_one_microsecond_earlier() {
+        assert_eq!(
+            just_before("1786596050.245879").as_deref(),
+            Some("1786596050.245878")
+        );
+        assert_eq!(
+            just_before("1786596050.000000").as_deref(),
+            Some("1786596049.999999")
+        );
     }
 
     #[test]

@@ -271,6 +271,10 @@ mod tests {
         let status = slack.read(&[reply]).unwrap()[0].1.clone().unwrap();
 
         assert!(prompts.borrow()[0].contains(r#"message_ts: "1786596000.123456""#));
+        assert!(
+            prompts.borrow()[0].contains(r#"oldest: "1786596050.245878""#),
+            "a reply past the first page of its thread is still read"
+        );
         assert_eq!(status.reactions, BTreeMap::from([("eyes".into(), 1)]));
         assert_eq!(
             status.replies,
