@@ -274,7 +274,7 @@ pub struct Subscriber {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub departed: bool,
     /// Muted by `inkling unsubscribe`: still attached and probed, never
-    /// pushed to. Undone only by attaching.
+    /// pushed to. Undone only by `unmute`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsubscribed: bool,
 }
@@ -532,14 +532,14 @@ impl Watches {
             && watch.owners.iter().all(|owner| self.departed(owner))
     }
 
-    /// Whether this reader has no address, and not by its own choice: what a
-    /// hook from a live session attaches again.
+    /// Whether this reader has no address: what a hook from a live session
+    /// attaches again.
     pub fn lost_address(&self, subscriber: &str) -> bool {
         subscriber != TERMINAL
             && self
                 .subscribers
                 .get(subscriber)
-                .is_some_and(|entry| entry.address.is_none() && !entry.unsubscribed)
+                .is_some_and(|entry| entry.address.is_none())
     }
 
     fn departed(&self, owner: &str) -> bool {
@@ -916,6 +916,8 @@ impl Watches {
     ///
     /// The same goes for its watches: any it paused on leaving are stirred,
     /// due at once, and read against the baseline they kept.
+    ///
+    /// A muted session stays muted: only `unmute` undoes `unsubscribe`.
     pub fn attach(
         &mut self,
         subscriber: &str,
@@ -929,7 +931,6 @@ impl Watches {
             .collect();
         let entry = self.meet(subscriber, now);
         entry.departed = false;
-        entry.unsubscribed = false;
         let replaced = entry.address.replace(address).is_some();
         for key in paused {
             if let Some(watch) = self.watches.get_mut(&key) {
@@ -962,6 +963,13 @@ impl Watches {
         };
         entry.unsubscribed |= entry.address.is_some();
         entry.address.is_some()
+    }
+
+    /// Push to this session again.
+    pub fn unmute(&mut self, subscriber: &str) {
+        if let Some(entry) = self.subscribers.get_mut(subscriber) {
+            entry.unsubscribed = false;
+        }
     }
 
     /// Detach, but only from `address`: a session that resumed onto a new
@@ -2633,6 +2641,22 @@ mod tests {
             watches.paused(&watches.watches[&pr(3).key()]),
             "until it ends"
         );
+    }
+
+    #[test]
+    fn a_hook_attaches_a_muted_session_again_still_muted() {
+        // A probe can take a live session for gone; its next hook must not
+        // undo the mute along with the mistake.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.unsubscribe("s-1");
+        watches.detach("s-1");
+        assert!(watches.lost_address("s-1"));
+
+        watches.attach("s-1", address("/tmp/s"), now());
+        assert!(watches.subscribers["s-1"].unsubscribed);
+        watches.unmute("s-1");
+        assert!(!watches.subscribers["s-1"].unsubscribed);
     }
 
     #[test]

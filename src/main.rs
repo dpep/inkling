@@ -534,7 +534,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
         }
         Command::Subscribe { session } => {
             let id = session_id(session.as_deref())?;
-            let replaced = subscribe(&id, &config, &cli.common)?;
+            let replaced = subscribe(&id, &config, &cli.common, true)?;
             println!(
                 "{} {}",
                 match replaced {
@@ -1671,9 +1671,12 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
     let watches = watch_store(common);
     match event {
         HookEvent::SessionStart => {
-            if attaches_at_start(&input, &watches.read()) {
-                subscribe(&input.session_id, config, common)?;
-            }
+            subscribe(
+                &input.session_id,
+                config,
+                common,
+                unmutes_at_start(&input.source),
+            )?;
             Ok(())
         }
         HookEvent::SessionEnd => {
@@ -1722,18 +1725,10 @@ fn refreshes_at_prompt(
         && !inkling::serve::read_status(serve).running
 }
 
-/// Whether `SessionStart` attaches. An unsubscribed session stays so through
-/// a compaction or `/clear`, which carry the same session on; only starting
-/// or resuming it comes back.
-fn attaches_at_start(
-    input: &HookInput,
-    watches: &inkling::adapters::watches_json::Watches,
-) -> bool {
-    matches!(input.source.as_str(), "startup" | "resume")
-        || !watches
-            .subscribers
-            .get(&input.session_id)
-            .is_some_and(|subscriber| subscriber.unsubscribed)
+/// Whether `SessionStart` undoes an unsubscribe: starting or resuming the
+/// session does; a compaction, the same session carrying on, doesn't.
+fn unmutes_at_start(source: &str) -> bool {
+    matches!(source, "startup" | "resume")
 }
 
 /// What a prompt owes the session, worded and grouped as a push is, so news
@@ -1956,10 +1951,12 @@ fn look_up_pushes(
 /// Attach a session's inbox. Reports whether it replaced an address that was
 /// already there — a resumed session, with a new process and a new socket.
 ///
+/// `unmute` undoes an `inkling unsubscribe`; otherwise a muted session stays so.
+///
 /// One local write under the lock, plus a spawn when there is something to
 /// serve. A SessionEnd hook runs on a short timeout in a session that is
 /// closing, and its sibling here has to be the same shape.
-fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String> {
+fn subscribe(id: &str, config: &Config, common: &Common, unmute: bool) -> Result<bool, String> {
     let socket = std::env::var_os(SOCKET_ENV).ok_or_else(|| {
         format!("{SOCKET_ENV} is not set — subscribe runs inside a Claude Code session")
     })?;
@@ -1978,7 +1975,12 @@ fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String>
 
     let clock = SystemClock;
     let replaced = watch_store(common)
-        .update(clock.now(), |file| file.attach(id, address, clock.now()))
+        .update(clock.now(), |file| {
+            if unmute {
+                file.unmute(id);
+            }
+            file.attach(id, address, clock.now())
+        })
         .map_err(|e| e.to_string())?;
 
     tracing::info!(
@@ -1991,10 +1993,10 @@ fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String>
     Ok(replaced)
 }
 
-/// Attach again a session the store holds no address for, unless it asked
-/// to be unsubscribed. Only a live session fires hooks, and a probe can be
-/// wrong: macOS refuses a connection to a listener whose backlog is full
-/// exactly as it does to a dead one.
+/// Attach again a session the store holds no address for, muted if it was.
+/// Only a live session fires hooks, and a probe can be wrong: macOS refuses a
+/// connection to a listener whose backlog is full exactly as it does to a
+/// dead one.
 fn revive(id: &str, config: &Config, common: &Common) {
     let Some(socket) = std::env::var_os(SOCKET_ENV) else {
         return;
@@ -2002,7 +2004,7 @@ fn revive(id: &str, config: &Config, common: &Common) {
     if !watch_store(common).lost_address(id, std::path::Path::new(&socket)) {
         return;
     }
-    match subscribe(id, config, common) {
+    match subscribe(id, config, common, false) {
         Ok(_) => tracing::info!(
             subscriber = id,
             "a session with no address fired a hook; attached again"
@@ -3059,27 +3061,13 @@ mod tests {
     #[test]
     fn only_a_return_to_the_session_undoes_an_unsubscribe() {
         // Found by the hunt: a compaction's SessionStart re-attached it.
-        let mut watches = Watches::default();
-        let address = inkling::adapters::session_socket::SessionAddress::new(
-            std::path::Path::new("/tmp/s"),
-            None,
-        );
-        watches.attach("s-1", address, chrono::Utc::now());
-        watches.unsubscribe("s-1");
-        let start = |source: &str| {
-            let input = tool_call(serde_json::json!({"session_id": "s-1", "source": source}));
-            super::attaches_at_start(&input, &watches)
-        };
-        assert!(start("startup"));
-        assert!(start("resume"));
-        assert!(!start("compact"));
-        assert!(!start("clear"));
-        assert!(!start(""), "an older Claude Code says nothing");
-
-        let input = tool_call(serde_json::json!({"session_id": "s-2", "source": "compact"}));
+        // A /clear needs no rule: Claude Code gives it a new session id.
+        assert!(super::unmutes_at_start("startup"));
+        assert!(super::unmutes_at_start("resume"));
+        assert!(!super::unmutes_at_start("compact"));
         assert!(
-            super::attaches_at_start(&input, &watches),
-            "any other session attaches"
+            !super::unmutes_at_start(""),
+            "an older Claude Code says nothing"
         );
     }
 
