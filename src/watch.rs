@@ -13,12 +13,12 @@
 //! is not long-lived, so there is nothing to take over from.
 
 use crate::adapters::lock::FileLock;
-use crate::adapters::watches_json::{Seen, Watch, WatchStore};
+use crate::adapters::watches_json::{Seen, Watch, WatchStore, Watches};
 use crate::domain::model::Reference;
 use crate::domain::slack::ts_key;
 use crate::domain::watch::{Actors, Event, Sighting, Standing};
 use crate::ports::{Clock, IssueProvider, MessageProvider, RefError, StatusProvider, StoreError};
-use chrono::TimeDelta;
+use chrono::{DateTime, TimeDelta, Utc};
 
 pub struct Poller<'a> {
     pub store: &'a WatchStore,
@@ -68,6 +68,15 @@ fn is_slack(reference: &Reference) -> bool {
     )
 }
 
+/// Whether anything a caller without the bridge would read is due: what the
+/// prompt hook asks before paying for a GitHub token.
+pub fn due_without_bridge(watches: &Watches, now: DateTime<Utc>, floor: TimeDelta) -> bool {
+    watches
+        .due_now(now, floor)
+        .iter()
+        .any(|reference| !is_slack(reference))
+}
+
 fn name(so_far: &[String], reference: &Reference, error: &impl std::fmt::Display) {
     match so_far.len() < NAMED_FAILURES {
         true => tracing::warn!(%reference, %error, "could not read watch"),
@@ -101,14 +110,21 @@ impl Poller<'_> {
     /// lock below exists only to save a redundant request, which is why it
     /// belongs to the caller that might be redundant rather than to this.
     pub fn poll(&self, floor: TimeDelta, why: &str) -> Result<Polled, StoreError> {
+        self.poll_then(floor, why, &mut || {})
+    }
+
+    /// `poll`, in two steps. GitHub and Jira are read and recorded first;
+    /// `between` runs once they are, and only if Slack reads follow — so the
+    /// server can push a red PR rather than hold it behind a bridge call of
+    /// a minute or more.
+    pub fn poll_then(
+        &self,
+        floor: TimeDelta,
+        why: &str,
+        between: &mut dyn FnMut(),
+    ) -> Result<Polled, StoreError> {
         let observed_at = self.clock.now();
-        let references: Vec<Reference> = self
-            .store
-            .read()
-            .due_now(observed_at, floor)
-            .into_iter()
-            .filter(|r| self.slack.is_some() || !is_slack(r))
-            .collect();
+        let references = self.wanted(&self.store.read(), observed_at, floor);
         if references.is_empty() {
             tracing::debug!(why, "nothing is due");
             return Ok(Polled {
@@ -120,16 +136,45 @@ impl Poller<'_> {
         let count = |is: fn(&Reference) -> bool| references.iter().filter(|r| is(r)).count();
         let pulls = count(|r| matches!(r, Reference::GitHubPullRequest { .. }));
         let messages = count(is_slack);
-        let (mut failures, mut gone) = (Vec::new(), Vec::new());
-        let sightings = self.sightings(&references, &mut failures, &mut gone);
-        let elapsed = (self.clock.now() - observed_at).num_milliseconds();
+        let (slow, quick): (Vec<Reference>, Vec<Reference>) =
+            references.iter().cloned().partition(is_slack);
+        let mut failures = Vec::new();
+        let mut sightings = Vec::new();
+        let mut events = Vec::new();
 
-        let events = self.store.update(self.clock.now(), |watches| {
-            watches.tried(&references, observed_at);
-            let mut events = watches.record(&sightings, observed_at);
-            events.extend(watches.gone(&gone, observed_at));
-            events
-        })?;
+        if !quick.is_empty() {
+            let mut gone = Vec::new();
+            let read = self.sightings(&quick, &mut failures, &mut gone);
+            events.extend(self.store.update(self.clock.now(), |watches| {
+                watches.tried(&quick, observed_at);
+                let mut events = watches.record(&read, observed_at);
+                events.extend(watches.gone(&gone, observed_at));
+                events
+            })?);
+            sightings.extend(read);
+        }
+        if !slow.is_empty() {
+            between();
+            // Claimed before paying: a poller arriving mid-read finds these
+            // tried and waits out the floor instead of reading them again.
+            let read_at = self.clock.now();
+            let claimed = self.store.update(read_at, |watches| {
+                let due = watches.due_now(read_at, floor);
+                let claimed: Vec<Reference> =
+                    slow.into_iter().filter(|r| due.contains(r)).collect();
+                watches.tried(&claimed, read_at);
+                claimed
+            })?;
+            let mut gone = Vec::new();
+            let read = self.sightings(&claimed, &mut failures, &mut gone);
+            events.extend(self.store.update(self.clock.now(), |watches| {
+                let mut events = watches.record(&read, read_at);
+                events.extend(watches.gone(&gone, read_at));
+                events
+            })?);
+            sightings.extend(read);
+        }
+        let elapsed = (self.clock.now() - observed_at).num_milliseconds();
 
         tracing::info!(
             why,
@@ -163,7 +208,18 @@ impl Poller<'_> {
     /// has better things to do than queue for a result it can read a moment
     /// later.
     pub fn poll_if_stale(&self, floor: TimeDelta, why: &str) -> Result<Polled, StoreError> {
-        if !self.store.read().due(self.clock.now(), floor) {
+        self.poll_if_stale_then(floor, why, &mut || {})
+    }
+
+    /// `poll_if_stale`, with `poll_then`'s `between`.
+    pub fn poll_if_stale_then(
+        &self,
+        floor: TimeDelta,
+        why: &str,
+        between: &mut dyn FnMut(),
+    ) -> Result<Polled, StoreError> {
+        let now = self.clock.now();
+        if self.wanted(&self.store.read(), now, floor).is_empty() {
             tracing::debug!(why, "readings are fresh");
             return Ok(Polled {
                 skipped: true,
@@ -181,7 +237,17 @@ impl Poller<'_> {
                 ..Polled::default()
             });
         };
-        self.poll(floor, why)
+        self.poll_then(floor, why, between)
+    }
+
+    /// What this caller would read now: everything due, less what needs a
+    /// bridge it doesn't have.
+    fn wanted(&self, watches: &Watches, now: DateTime<Utc>, floor: TimeDelta) -> Vec<Reference> {
+        watches
+            .due_now(now, floor)
+            .into_iter()
+            .filter(|r| self.slack.is_some() || !is_slack(r))
+            .collect()
     }
 
     /// Ask each provider about the references it answers for.
@@ -1010,6 +1076,115 @@ mod tests {
         ) -> Result<(), crate::adapters::session_socket::DeliverError> {
             Ok(())
         }
+    }
+
+    /// The scripted bridge, with a look at the world at the moment a paid
+    /// read starts.
+    struct Spy<'a> {
+        inner: &'a ScriptedMessages,
+        on_read: Box<dyn Fn() + 'a>,
+    }
+
+    impl MessageProvider for Spy<'_> {
+        fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
+            (self.on_read)();
+            self.inner.read(messages)
+        }
+        fn channel(&self, channel: &str, oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
+            (self.on_read)();
+            self.inner.channel(channel, oldest)
+        }
+    }
+
+    #[test]
+    fn github_news_is_recorded_and_pushed_before_the_slack_reads_begin() {
+        // Found by the hunt: a red PR sat in memory for a minute or more
+        // while the same poll waited on `claude -p` for a Slack message.
+        use crate::serve::Work;
+        let h = Harness::new("quick-first");
+        h.github.set(&pr(3), State::Open);
+        h.slack.replied(&slack(), &[]);
+        h.watch(&pr(3));
+        h.watch(&slack());
+        h.poll();
+        h.store
+            .update(h.clock.now(), |w| {
+                w.attach(
+                    "test",
+                    crate::adapters::session_socket::SessionAddress::new("/tmp/t", None),
+                    h.clock.now(),
+                )
+            })
+            .unwrap();
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        h.github.set(&pr(3), State::Merged);
+
+        let sessions = Listening::default();
+        let pushed_before_read = std::cell::Cell::new(None);
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| pushed_before_read.set(Some(sessions.sent.borrow().len()))),
+        };
+        let tick = crate::push::Tick {
+            poller: Poller {
+                slack: Some(&spy),
+                ..h.poller()
+            },
+            sessions: &sessions,
+            clock: &h.clock,
+        };
+        tick.tick().unwrap();
+
+        assert_eq!(pushed_before_read.get(), Some(1), "merged was pushed first");
+    }
+
+    #[test]
+    fn a_slack_read_is_claimed_before_it_is_paid_for() {
+        // Found by the hunt: `tried_at` was stamped after the read, so a
+        // second poller during a minute-long read paid for it again.
+        let h = Harness::new("claimed");
+        h.slack.replied(&slack(), &[]);
+        h.watch(&slack());
+        let claimed = std::cell::Cell::new(false);
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| {
+                claimed.set(
+                    h.store
+                        .read()
+                        .due_now(h.clock.now(), TimeDelta::zero())
+                        .is_empty(),
+                )
+            }),
+        };
+        Poller {
+            slack: Some(&spy),
+            ..h.poller()
+        }
+        .poll(TimeDelta::zero(), "test")
+        .unwrap();
+        assert!(claimed.get(), "another poller would have read it too");
+    }
+
+    #[test]
+    fn only_slack_due_is_nothing_due_for_a_caller_without_the_bridge() {
+        // The prompt hook resolved a GitHub token to read nothing.
+        let h = Harness::new("bridge-only");
+        h.watch(&slack());
+        let watches = h.store.read();
+        assert!(!due_without_bridge(
+            &watches,
+            h.clock.now(),
+            TimeDelta::zero()
+        ));
+        h.watch(&pr(3));
+        let watches = h.store.read();
+        assert!(due_without_bridge(
+            &watches,
+            h.clock.now(),
+            TimeDelta::zero()
+        ));
     }
 
     #[test]

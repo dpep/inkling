@@ -558,8 +558,35 @@ impl Tick<'_> {
         let started = self.clock.now();
         // The schedule alone decides: a watch a prompt hook just read is not
         // due again, so there is no refresh window to keep.
-        let polled = self.poller.poll_if_stale(TimeDelta::zero(), "serve")?;
+        // GitHub and Jira news goes out before the slow Slack reads start.
+        let mut early = Ok(());
+        let polled = self
+            .poller
+            .poll_if_stale_then(TimeDelta::zero(), "serve", &mut || {
+                early = self.deliver().map(|_| ());
+            })?;
+        early?;
+        let (beat, outcomes, attached) = self.deliver()?;
 
+        tracing::debug!(
+            polled = !polled.skipped,
+            watched = polled.watched,
+            transitions = polled.events.len(),
+            attached,
+            probed = outcomes.iter().filter(|o| o.probed).count(),
+            written = outcomes.iter().map(|o| o.written).sum::<usize>(),
+            detached = outcomes.iter().filter(|o| o.detach).count(),
+            elapsed_ms = (self.clock.now() - started).num_milliseconds(),
+            pulse = beat.pulse.as_str(),
+            next = beat.next.map(|t| t.to_rfc3339()),
+            "serve tick"
+        );
+        Ok(beat)
+    }
+
+    /// Tell everyone attached what they are owed, and say whether the
+    /// server is still needed.
+    fn deliver(&self) -> Result<(Beat, Vec<Outcome>, usize), StoreError> {
         // Delivery happens between the two store operations rather than
         // inside one: a connect is bounded in seconds, and the data lock is
         // what every prompt hook waits on.
@@ -580,21 +607,7 @@ impl Tick<'_> {
                 next: file.next_read(),
             }
         })?;
-
-        tracing::debug!(
-            polled = !polled.skipped,
-            watched = polled.watched,
-            transitions = polled.events.len(),
-            attached,
-            probed = outcomes.iter().filter(|o| o.probed).count(),
-            written = outcomes.iter().map(|o| o.written).sum::<usize>(),
-            detached = outcomes.iter().filter(|o| o.detach).count(),
-            elapsed_ms = (self.clock.now() - started).num_milliseconds(),
-            pulse = beat.pulse.as_str(),
-            next = beat.next.map(|t| t.to_rfc3339()),
-            "serve tick"
-        );
-        Ok(beat)
+        Ok((beat, outcomes, attached))
     }
 }
 

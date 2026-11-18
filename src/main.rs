@@ -1616,7 +1616,7 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             // The pull leg, and the reason push is allowed to be lossy: if a
             // message was held or refused, this is where it turns up.
             let refresh = TimeDelta::seconds(60);
-            if watches.read().due(clock.now(), refresh) {
+            if inkling::watch::due_without_bridge(&watches.read(), clock.now(), refresh) {
                 refresh_within(REFRESH_BUDGET, config.clone(), watches.path(), refresh);
             }
             let due = watches
