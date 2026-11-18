@@ -410,7 +410,7 @@ baseline, `departed`, `tried_at`, `own`).
   from two other lanes while this rule was being merged.
 - **Version 3 adds `misses`** (see "A conversation never finishes") and
   `unsubscribed`; a version 2 file reads as having missed nothing and nobody
-  having asked to leave.
+  muted.
 - **Version 4 adds each reader's `told` set** of Slack replies. A version 3
   file reads with every set empty, so a reply told on one watch just before
   the upgrade can be told once more by another of that reader's watches
