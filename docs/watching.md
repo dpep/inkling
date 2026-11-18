@@ -338,6 +338,51 @@ serving pid=73832 …
 handed off to a new server from=73320 to=73832 reason="replaced" executable=…/inkling
 ```
 
+The server also looks before each tick, not only after one. A nap can span an
+install, and the new build's hooks may already have written a store the old
+code can't read; one tick of the old code against it was enough to lose the
+lot (next section).
+
+### An older build meets a newer store
+
+There is always a window with two builds at once: the resident server is
+mid-tick when `make install` lands, a stale worktree's binary runs `serve`, or
+an install from an older branch downgrades. Found 2026-11-18: a build from
+before channel watches read a store holding one, failed on the unknown variant,
+called the file corrupt, set it aside and started over — every watch, cursor
+and event gone. And an older build that *could* parse a newer file saved back
+less than it read: every field it had never heard of, dropped (a comment
+baseline, `departed`, `tried_at`, `own`).
+
+> A build never writes a store newer than itself. `version` is read before
+> anything else; a newer one is refused, left exactly as it is, and the
+> resident server stands down for the build that wrote it. `VERSION` changes
+> with *any* change to the shape, additive ones included.
+
+- **Refuse, not preserve.** The other design keeps what it can't parse as raw
+  JSON and writes it back untouched. It needs an opaque variant in every
+  stored enum and an unknown-fields bag on every struct, and it still lets an
+  older build *act* on state it half understands: record a pull request's
+  standing beside a comment baseline it never updates, or go on reading a
+  watch whose owner it can't tell has left. Preserving bytes is not
+  preserving meaning. Refusing costs the older build its writes
+  until the newer one takes over, which in the install window is seconds.
+- **The server stands down.** `Tick` turns `FutureVersion` into
+  `Pulse::Superseded`, and the loop exits `superseded` without handing off: its
+  launch path still holds the old build, so a successor would be itself. The
+  next hook — the installed build — starts the right server. If the launch path
+  *was* replaced, `replaced` wins and hands off as usual.
+- **A downgrade is loud, not lossy.** Every write from the older build fails
+  with `the watch store is from version N` and reads see nothing, until a
+  build at least as new is installed again. Nothing is set aside.
+- **What makes the rule hold is a tripwire.** The bug was a missed bump, not a
+  missing rule. `watches_json::tests::stored_shape` destructures every stored
+  type and matches every stored enum without a wildcard, so a new field or
+  variant stops the build until somebody looks at `VERSION`.
+- **Builds from before this rule still quarantine.** They parse everything
+  before looking at the version. Nothing this build does can reach them;
+  version 2 only parses for them if it holds nothing they lack.
+
 ## How often a watch is read
 
 > A watch is re-read at **1/24 of how long it has been quiet**, clamped to

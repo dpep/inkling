@@ -30,7 +30,11 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const VERSION: u32 = 1;
+/// The shape of the file. Bumped for *any* change to it, additive ones too:
+/// an older build refuses a newer file rather than parse what it can and save
+/// back less (docs/watching.md, "An older build meets a newer store").
+/// `tests::stored_shape` stops compiling when the shape moves.
+pub const VERSION: u32 = 2;
 
 /// The reader a person at a terminal is. Every watch has an owner and every
 /// read names one, so there is one rule rather than an owned path and an
@@ -882,6 +886,36 @@ fn log_pauses(before: &BTreeSet<String>, watches: &Watches) {
     }
 }
 
+enum Unparsed {
+    /// Written by a newer build. Never "corrupt": what this build can't parse
+    /// in it is that build's, so the file is left exactly as it is.
+    Newer(u32),
+    Broken(serde_json::Error),
+}
+
+/// The version first, then the rest: a newer file may hold variants this
+/// build has never heard of, and failing on those would read as damage.
+fn parse(raw: &str) -> Result<Watches, Unparsed> {
+    #[derive(Deserialize)]
+    struct Version {
+        #[serde(default)]
+        version: u32,
+    }
+    let found = serde_json::from_str::<Version>(raw)
+        .map_err(Unparsed::Broken)?
+        .version;
+    if found > VERSION {
+        return Err(Unparsed::Newer(found));
+    }
+    let mut watches: Watches = serde_json::from_str(raw).map_err(Unparsed::Broken)?;
+    // A channel was keyed by its name before 2026-11-17.
+    let rekeyed = std::mem::take(&mut watches.watches)
+        .into_values()
+        .map(|watch| (watch.reference.key(), watch));
+    watches.watches = rekeyed.collect();
+    Ok(watches)
+}
+
 /// `watches.json` and the lock around it.
 pub struct WatchStore {
     path: PathBuf,
@@ -928,17 +962,17 @@ impl WatchStore {
                 return Watches::default();
             }
         };
-        match serde_json::from_str::<Watches>(&raw) {
-            Ok(watches) if watches.version <= VERSION => watches,
-            Ok(watches) => {
+        match parse(&raw) {
+            Ok(watches) => watches,
+            Err(Unparsed::Newer(found)) => {
                 tracing::warn!(
-                    found = watches.version,
+                    found,
                     supported = VERSION,
-                    "the watch store is from a newer version; reading it as empty"
+                    "the watch store is from a newer build; reading it as empty"
                 );
                 Watches::default()
             }
-            Err(error) => {
+            Err(Unparsed::Broken(error)) => {
                 tracing::warn!(%error, "the watch store is unreadable; reading it as empty");
                 Watches::default()
             }
@@ -990,21 +1024,12 @@ impl WatchStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Watches::default()),
             Err(e) => return Err(StoreError::Read(e.to_string())),
         };
-        match serde_json::from_str::<Watches>(&raw) {
-            Ok(watches) if watches.version > VERSION => Err(StoreError::FutureVersion {
-                found: watches.version,
-            }),
-            Ok(mut watches) => {
-                // A channel was keyed by its name before 2026-11-17.
-                let rekeyed = std::mem::take(&mut watches.watches)
-                    .into_values()
-                    .map(|watch| (watch.reference.key(), watch));
-                watches.watches = rekeyed.collect();
-                Ok(watches)
-            }
+        match parse(&raw) {
+            Ok(watches) => Ok(watches),
+            Err(Unparsed::Newer(found)) => Err(StoreError::FutureVersion { found }),
             // Subscriptions and cursors can't be rebuilt from anywhere else,
             // so the unreadable file is kept for a look rather than replaced.
-            Err(error) => {
+            Err(Unparsed::Broken(error)) => {
                 let moved = self.quarantine();
                 tracing::warn!(%error, kept = ?moved, "watches file unreadable; starting over");
                 Ok(Watches::default())
@@ -2017,6 +2042,163 @@ mod tests {
         std::fs::write(&path, r#"{"version": 99}"#).unwrap();
         let store = WatchStore::new(&path);
         assert!(store.update(now(), |_| ()).is_err());
+    }
+
+    /// A tripwire rather than a test: it stops compiling when a stored type
+    /// gains a field or a variant. When it does, bump `VERSION`, then the
+    /// pattern. (`SessionAddress` keeps its fields private; it changes rarely.)
+    #[allow(dead_code)]
+    fn stored_shape(file: Watches, standing: Standing, axis: Axis, reference: Reference) {
+        const _: () = assert!(VERSION == 2, "update the patterns below for this version");
+        let Watches {
+            version: _,
+            watches,
+            events,
+            last_seq: _,
+            subscribers,
+        } = file;
+        for (_, watch) in watches {
+            let Watch {
+                reference: _,
+                since: _,
+                deadline: _,
+                seen,
+                owners: _,
+                stirred_at: _,
+                head,
+                tried_at: _,
+                receipts,
+            } = watch;
+            for (_, receipt) in receipts {
+                let crate::domain::watch::Receipts { posted: _, reacted } = receipt;
+                for crate::domain::watch::Reacted { emoji: _, at: _ } in reacted {}
+            }
+            let _ = seen.map(
+                |Seen {
+                     at: _,
+                     standing: _,
+                     title: _,
+                 }| (),
+            );
+            let _ = head.map(|crate::domain::watch::Head { repo: _, branch: _ }| ());
+        }
+        for event in events {
+            let Event {
+                seq: _,
+                at: _,
+                reference: _,
+                axis: _,
+                from: _,
+                to: _,
+                title: _,
+                detail: _,
+                job: _,
+                receipt_for: _,
+                partial: _,
+                lines: _,
+                after: _,
+                audience: _,
+            } = event;
+        }
+        for (_, subscriber) in subscribers {
+            let Subscriber {
+                cursor: _,
+                seen_at: _,
+                address: _,
+                pushes: _,
+                departed: _,
+            } = subscriber;
+        }
+        match standing {
+            Standing::PullRequest {
+                state,
+                checks,
+                comments,
+            } => {
+                match state {
+                    State::Closed
+                    | State::Draft
+                    | State::Open
+                    | State::Approved
+                    | State::Merged => {}
+                }
+                match checks {
+                    Some(CheckState::Failure | CheckState::Pending | CheckState::Success)
+                    | None => {}
+                }
+                let _ = comments.map(
+                    |crate::domain::watch::Comments {
+                         count: _,
+                         latest: _,
+                         at_latest: _,
+                     }| (),
+                );
+            }
+            Standing::Issue {
+                status: _,
+                category: Category::New | Category::Indeterminate | Category::Done,
+            } => {}
+            Standing::Message {
+                reactions: _,
+                replies: _,
+            } => {}
+            Standing::Channel {
+                count: _,
+                newest: _,
+                arrived: _,
+                more: _,
+            } => {}
+        }
+        match axis {
+            Axis::State
+            | Axis::Checks
+            | Axis::Status
+            | Axis::Replies
+            | Axis::Reactions
+            | Axis::Comments
+            | Axis::Messages => {}
+        }
+        match reference {
+            Reference::GitHubPullRequest {
+                host: _,
+                owner: _,
+                repo: _,
+                number: _,
+            }
+            | Reference::JiraIssue { key: _ }
+            | Reference::SlackMessage {
+                channel: _,
+                ts: _,
+                thread: _,
+            }
+            | Reference::SlackChannel {
+                channel: _,
+                name: _,
+            } => {}
+        }
+    }
+
+    #[test]
+    fn an_older_build_refuses_a_newer_store_rather_than_starting_over() {
+        // Found live: a build from before channel watches met a store with
+        // one, called it corrupt, and replaced every watch and cursor with
+        // nothing. What it can't parse in a newer file is the newer build's.
+        let path = scratch("newer-shape");
+        let newer = format!(
+            r#"{{"version": {}, "watches": {{"x": {{"reference": {{"kind": "carrier_pigeon"}}}}}}, "last_seq": 42}}"#,
+            VERSION + 1
+        );
+        std::fs::write(&path, &newer).unwrap();
+        let store = WatchStore::new(&path);
+
+        let refused = store.update(now(), |w| w.take("s-1", now()));
+        assert!(
+            matches!(refused, Err(StoreError::FutureVersion { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer, "untouched");
+        assert!(!path.with_extension("corrupt-0").exists());
+        assert!(store.read().watches.is_empty(), "and reads as nothing");
     }
 
     #[test]

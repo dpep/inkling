@@ -984,4 +984,47 @@ mod tests {
             "a reference that couldn't be read has no baseline to record"
         );
     }
+
+    /// Every session is listening, and what it was sent is kept.
+    #[derive(Default)]
+    struct Listening {
+        sent: RefCell<Vec<String>>,
+    }
+
+    impl crate::push::Sessions for Listening {
+        fn deliver(
+            &self,
+            _: &crate::adapters::session_socket::SessionAddress,
+            text: &str,
+        ) -> Result<
+            crate::adapters::session_socket::Written,
+            crate::adapters::session_socket::DeliverError,
+        > {
+            self.sent.borrow_mut().push(text.to_string());
+            Ok(crate::adapters::session_socket::Written)
+        }
+
+        fn probe(
+            &self,
+            _: &crate::adapters::session_socket::SessionAddress,
+        ) -> Result<(), crate::adapters::session_socket::DeliverError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_server_that_meets_a_newer_store_stands_down_for_it() {
+        use crate::serve::{Pulse, Work};
+        let h = Harness::new("superseded");
+        let newer = r#"{"version": 999, "watches": {"x": {"reference": {"kind": "pigeon"}}}}"#;
+        std::fs::write(h.store.path(), newer).unwrap();
+        let tick = crate::push::Tick {
+            poller: h.poller(),
+            sessions: &Listening::default(),
+            clock: &h.clock,
+        };
+
+        assert_eq!(tick.tick().unwrap().pulse, Pulse::Superseded);
+        assert_eq!(std::fs::read_to_string(h.store.path()).unwrap(), newer);
+    }
 }

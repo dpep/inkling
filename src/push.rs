@@ -29,7 +29,7 @@ use crate::adapters::watches_json::Watches;
 use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use crate::domain::watch::{Axis, Event, addressed, listed};
-use crate::ports::Clock;
+use crate::ports::{Clock, StoreError};
 use crate::serve::{Beat, Pulse, Ticked, Work};
 use crate::watch::Poller;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -529,6 +529,22 @@ pub struct Tick<'a> {
 
 impl Work for Tick<'_> {
     fn tick(&self) -> Ticked {
+        match self.beat() {
+            Err(StoreError::FutureVersion { found }) => {
+                tracing::warn!(
+                    found,
+                    supported = crate::adapters::watches_json::VERSION,
+                    "the watch store is from a newer build"
+                );
+                Ok(Pulse::Superseded.into())
+            }
+            beat => Ok(beat?),
+        }
+    }
+}
+
+impl Tick<'_> {
+    fn beat(&self) -> Result<Beat, StoreError> {
         let started = self.clock.now();
         // The schedule alone decides: a watch a prompt hook just read is not
         // due again, so there is no refresh window to keep.
@@ -564,10 +580,7 @@ impl Work for Tick<'_> {
             written = outcomes.iter().map(|o| o.written).sum::<usize>(),
             detached = outcomes.iter().filter(|o| o.detach).count(),
             elapsed_ms = (self.clock.now() - started).num_milliseconds(),
-            pulse = match beat.pulse {
-                Pulse::Busy => "busy",
-                Pulse::Idle => "idle",
-            },
+            pulse = beat.pulse.as_str(),
             next = beat.next.map(|t| t.to_rfc3339()),
             "serve tick"
         );

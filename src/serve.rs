@@ -42,6 +42,9 @@ pub enum Pulse {
     Busy,
     /// Nothing to do. Long enough of these and the server stands down.
     Idle,
+    /// The state on disk belongs to a newer build, so this one must not
+    /// touch it. Stands down at once.
+    Superseded,
 }
 
 /// What a successful tick found, and when it next wants to run.
@@ -50,6 +53,16 @@ pub struct Beat {
     pub pulse: Pulse,
     /// `None` is no opinion: come back after the interval.
     pub next: Option<DateTime<Utc>>,
+}
+
+impl Pulse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Pulse::Busy => "busy",
+            Pulse::Idle => "idle",
+            Pulse::Superseded => "superseded",
+        }
+    }
 }
 
 impl From<Pulse> for Beat {
@@ -179,6 +192,9 @@ pub enum Exit {
     Signalled,
     /// A new build was installed over the binary it is running.
     Replaced,
+    /// A newer build wrote the store, but this one's executable is unchanged:
+    /// a stale binary, or a downgrade. Handing off would start itself again.
+    Superseded,
 }
 
 impl Exit {
@@ -188,6 +204,7 @@ impl Exit {
             Exit::MaxLifetime => "max_lifetime",
             Exit::Signalled => "signalled",
             Exit::Replaced => "replaced",
+            Exit::Superseded => "superseded",
         }
     }
 }
@@ -400,8 +417,22 @@ impl Serve<'_> {
         let mut longest_tick = Duration::ZERO;
         // When the work last said it next wants to run.
         let mut next = None;
+        let mut superseded = false;
+
+        let replaced = || match (built, &self.config.executable) {
+            (Some(built), Some(path)) if build_of(path) != Some(built) => {
+                tracing::info!(executable = %path.display(), "a new build was installed; standing down for it");
+                true
+            }
+            _ => false,
+        };
 
         let exit = loop {
+            // Before as well as after: a nap can span an install, and the new
+            // build's hooks may already have written a store this one can't.
+            if replaced() {
+                break Exit::Replaced;
+            }
             let tick_started = self.clock.now();
             let outcome = self.work.tick();
             let now = self.clock.now();
@@ -421,14 +452,15 @@ impl Serve<'_> {
                     idle_since = match pulse {
                         Pulse::Busy => None,
                         Pulse::Idle => idle_since.or(Some(now)),
+                        Pulse::Superseded => {
+                            superseded = true;
+                            idle_since
+                        }
                     };
                     tracing::debug!(
                         tick = record.ticks,
                         elapsed_ms = tick_took.as_millis() as u64,
-                        outcome = match pulse {
-                            Pulse::Busy => "busy",
-                            Pulse::Idle => "idle",
-                        },
+                        outcome = pulse.as_str(),
                         idle_seconds = idle_since.map_or(0, |start| since(start, now).as_secs()),
                         "tick"
                     );
@@ -455,11 +487,12 @@ impl Serve<'_> {
             if since(started, now) >= self.config.max_lifetime {
                 break Exit::MaxLifetime;
             }
-            if let (Some(built), Some(path)) = (built, &self.config.executable)
-                && build_of(path) != Some(built)
-            {
-                tracing::info!(executable = %path.display(), "a new build was installed; standing down for it");
+            if replaced() {
                 break Exit::Replaced;
+            }
+            if superseded {
+                tracing::info!("a newer build owns the store; standing down for it");
+                break Exit::Superseded;
             }
             if self.shutdown.requested() {
                 break Exit::Signalled;
@@ -898,6 +931,77 @@ mod tests {
             !report.hands_off(),
             "the next hook with a reason starts one"
         );
+    }
+
+    /// Renames a new build over `exe` the first time it is asked to nap.
+    struct InstallsDuringNap<'a> {
+        clock: &'a FixedClock,
+        exe: PathBuf,
+    }
+
+    impl Sleeper for InstallsDuringNap<'_> {
+        fn sleep(&self, duration: Duration) {
+            let new = self.exe.with_extension("new");
+            std::fs::write(&new, "new build").unwrap();
+            std::fs::rename(&new, &self.exe).unwrap();
+            self.clock
+                .advance(chrono::TimeDelta::from_std(duration).unwrap());
+        }
+    }
+
+    #[test]
+    fn a_build_installed_during_a_nap_takes_over_before_another_tick() {
+        // Found by the hunt: the old server woke, ticked with the old code
+        // against a store the new build had already written, and only then
+        // looked at its executable.
+        let scratch = Scratch::new("installed-napping");
+        let exe = scratch.0.join("inkling");
+        std::fs::write(&exe, "old build").unwrap();
+        let clock = FixedClock::at("2026-09-20T12:00:00Z");
+        let sleeper = InstallsDuringNap {
+            clock: &clock,
+            exe: exe.clone(),
+        };
+        let ticks = Cell::new(0);
+        let work = || {
+            ticks.set(ticks.get() + 1);
+            Ok(Pulse::Busy.into())
+        };
+        let outcome = Serve {
+            config: Config {
+                executable: Some(exe),
+                ..scratch.config()
+            },
+            work: &work,
+            clock: &clock,
+            sleeper: &sleeper,
+            shutdown: &Never,
+        }
+        .run()
+        .unwrap();
+
+        let Outcome::Served(report) = outcome else {
+            panic!("nobody else held the lock")
+        };
+        assert_eq!(report.exit, Exit::Replaced);
+        assert_eq!(
+            ticks.get(),
+            1,
+            "no tick ran on the old code after the install"
+        );
+        assert!(report.hands_off());
+    }
+
+    #[test]
+    fn a_server_older_than_the_store_stands_down_and_does_not_hand_off() {
+        // Its own executable is the old build, so a successor would be
+        // itself. The next hook from the newer build starts the right one.
+        let scratch = Scratch::new("superseded");
+        let report = serve(scratch.config(), &(|| Ok(Pulse::Superseded.into())));
+
+        assert_eq!(report.exit, Exit::Superseded);
+        assert_eq!(report.ticks, 1);
+        assert!(!report.hands_off());
     }
 
     #[test]

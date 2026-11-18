@@ -25,6 +25,13 @@
   characters, when only one reader starts that way. An unknown id no longer claims its cursor was
   collected.
 
+- **An older build no longer wipes the watch store.** A build that met a `watches.json` written by
+  a newer one (a channel watch, say) called it corrupt, set it aside and started empty, losing
+  every watch and cursor; one that could parse it saved back without the fields it didn't know.
+  Now an older build refuses the file and leaves it untouched, and a resident server running one
+  stands down for the newer build. The store is now version 2, so the build you are replacing
+  refuses it too — expected during `make install`. Builds from before this change still can't
+  tell, so don't run one against a store this build has written.
 - **An ended session's watches are paused until it comes back.** Once every session watching
   something has ended, Inkling stops reading it, so a session you closed stops paying for Slack
   reads (about 2¢ each). `claude --resume` makes those watches due at once, and the first reading
