@@ -105,16 +105,19 @@ inkling events                      # what's moved, and nothing when nothing has
 ```
 
 One line per transition: from what, to what, and who caused it or which check
-went red:
+went red. What only accumulates — comments, replies, reactions — says how many
+and from whom instead:
 
 ```
 github.com/dpep/inkling#3  checks    pending → failure  test / build
-github.com/dpep/inkling#3  comments  3 → 5              by @alice, coderabbitai (bot)
+github.com/dpep/inkling#3  comments  2 comments from @alice and coderabbitai (bot)
 github.com/dpep/inkling#3  state     open → merged      by @dpep
 AI-123                     status    To Do → In Progress
-slack:C0123ABCD/1786596050.245879  replies    2 → 4  by @alice, @bob
-slack:C0123ABCD/1786596050.245879  reactions  0 → 1  :white_check_mark:
+slack:C0123ABCD/1786596050.245879  replies    2 replies from @alice and @bob
+slack:C0123ABCD/1786596050.245879  reactions  1 reaction :white_check_mark:
 ```
+
+Up to three people are named; past that, `12 comments from 7 people`.
 
 An event is a transition, never a snapshot. A watch's first reading sets a
 baseline and reports nothing: you just asked about it, so where it sits is not

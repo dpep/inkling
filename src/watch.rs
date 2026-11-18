@@ -530,7 +530,7 @@ mod tests {
         let polled = h.poll();
         assert_eq!(polled.events.len(), 1);
         assert_eq!(polled.events[0].axis, Axis::Replies);
-        assert_eq!(polled.events[0].detail.as_deref(), Some("by @alice"));
+        assert_eq!(polled.events[0].detail.as_deref(), Some("@alice"));
         assert!(!polled.events[0].own);
     }
 

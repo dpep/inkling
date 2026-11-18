@@ -41,40 +41,147 @@ use chrono::{DateTime, TimeDelta, Utc};
 /// request's title or the issue's summary: this lands inside an agent's turn,
 /// and prose somebody else wrote does not belong there.
 pub fn message(event: &Event) -> String {
-    format!("inkling: {}", line(event))
+    digest(&[event])
 }
 
 /// Everything one round owes a session, as one message: a merge queue that
 /// lands fifteen pull requests costs one turn, not fifteen.
 fn digest(events: &[&Event]) -> String {
-    match events {
-        [event] => message(event),
-        _ => {
-            let mut text = format!("inkling: {} changes", events.len());
-            for event in events {
-                text.push_str(&format!("\n- {}", line(event)));
+    match lines(events).as_slice() {
+        [line] => format!("inkling: {line}"),
+        lines => {
+            let mut text = format!("inkling: {} changes", lines.len());
+            for line in lines {
+                text.push_str(&format!("\n- {line}"));
             }
             text
         }
     }
 }
 
-fn line(event: &Event) -> String {
-    let mut text = format!(
-        "{} | {} {} → {}",
-        event.reference, event.axis, event.from, event.to
-    );
-    // A state's, a reply's or a comment's detail is who caused it ("by @x"),
-    // a reaction's its emoji, a check's its name.
-    match (&event.detail, event.axis) {
-        (Some(by), Axis::State | Axis::Replies | Axis::Reactions | Axis::Comments) => {
-            text.push_str(&format!(" {by}"))
+/// One line per change, with what one reading added to a message's emoji —
+/// one event per emoji — said once: `3 new reactions :dart: :+1:`.
+fn lines(events: &[&Event]) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut run: Vec<&Event> = Vec::new();
+    for event in events {
+        let joins = run.last().is_some_and(|last| {
+            last.reference == event.reference
+                && last.axis == Axis::Reactions
+                && event.axis == Axis::Reactions
+                && growth(last).is_some()
+                && growth(event).is_some()
+        });
+        if !joins && !run.is_empty() {
+            lines.push(line(&run));
+            run.clear();
         }
-        (Some(detail), _) => text.push_str(&format!(": {detail}")),
-        (None, _) => {}
+        run.push(event);
     }
+    if !run.is_empty() {
+        lines.push(line(&run));
+    }
+    lines
+}
+
+/// `run` is one event, or several reactions on one reference that grew.
+fn line(run: &[&Event]) -> String {
+    let event = run[0];
+    let moved = match run {
+        [_] => said(event),
+        _ => {
+            let count = run.iter().filter_map(|e| growth(e)).sum();
+            let emoji: Vec<&str> = run.iter().filter_map(|e| e.detail.as_deref()).collect();
+            tally(count, REACTION, false, &[], &emoji)
+        }
+    };
+    let mut text = format!("{} | {moved}", event.reference);
     if let Some(command) = more(event) {
         text.push_str(&format!(" ({command})"));
+    }
+    text
+}
+
+/// What moved, as a reader is told it: `open → merged by @x` for an axis
+/// that moves between standings, `2 comments from @alice` for one that
+/// accumulates.
+pub fn said(event: &Event) -> String {
+    if let Some(tallied) = tallied(event) {
+        return tallied;
+    }
+    let mut text = format!("{} {} → {}", event.axis, event.from, event.to);
+    // A state's detail is who caused it ("by @x"), a check's its name; an
+    // accumulating axis only lands here when it shrank.
+    match (&event.detail, event.axis) {
+        (Some(detail), Axis::Checks | Axis::Status) => text.push_str(&format!(": {detail}")),
+        (Some(detail), _) => text.push_str(&format!(" {detail}")),
+        (None, _) => {}
+    }
+    text
+}
+
+/// `2 comments from @alice`, when the event is an accumulating axis that
+/// grew. A shrink — a deleted Slack reply, a removed reaction — isn't news
+/// of more, and reads as `from → to`.
+pub fn tallied(event: &Event) -> Option<String> {
+    let count = growth(event)?;
+    let detail = event.detail.as_deref().unwrap_or_default();
+    Some(match event.axis {
+        Axis::Reactions => tally(count, REACTION, false, &[], &[detail]),
+        axis => {
+            let noun = if axis == Axis::Comments {
+                COMMENT
+            } else {
+                REPLY
+            };
+            // Events stored before this wording carried "by …".
+            let names = detail.strip_prefix("by ").unwrap_or(detail);
+            let names: Vec<&str> = names.split(", ").filter(|n| !n.is_empty()).collect();
+            tally(count, noun, event.partial, &names, &[])
+        }
+    })
+}
+
+/// How much an accumulating axis grew by, or `None` for any other axis and
+/// for one that didn't grow.
+fn growth(event: &Event) -> Option<u64> {
+    if !matches!(event.axis, Axis::Comments | Axis::Replies | Axis::Reactions) {
+        return None;
+    }
+    let (from, to) = (
+        event.from.parse::<u64>().ok()?,
+        event.to.parse::<u64>().ok()?,
+    );
+    (to > from).then(|| to - from)
+}
+
+/// A thing that accumulates, singular and plural.
+pub type Noun = (&'static str, &'static str);
+pub const COMMENT: Noun = ("comment", "comments");
+pub const REPLY: Noun = ("reply", "replies");
+pub const REACTION: Noun = ("reaction", "reactions");
+
+/// How many people a line names; past that it counts them.
+const NAMED: usize = 3;
+
+/// The one wording for anything that accumulates: `2 comments from @alice
+/// and coderabbitai (bot)`, `1 reaction :dart:`, `at least 40 comments from
+/// 7 people`. `partial` when the count is a floor. Every line is news, so
+/// there is no "new".
+pub fn tally(count: u64, noun: Noun, partial: bool, from: &[&str], tags: &[&str]) -> String {
+    let word = if count == 1 { noun.0 } else { noun.1 };
+    let at_least = if partial { "at least " } else { "" };
+    let mut text = format!("{at_least}{count} {word}");
+    match from {
+        [] => {}
+        [one] => text.push_str(&format!(" from {one}")),
+        [rest @ .., last] if from.len() <= NAMED => {
+            text.push_str(&format!(" from {} and {last}", rest.join(", ")))
+        }
+        _ => text.push_str(&format!(" from {} people", from.len())),
+    }
+    for tag in tags.iter().filter(|t| !t.is_empty()) {
+        text.push_str(&format!(" {tag}"));
     }
     text
 }
@@ -650,8 +757,79 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             ["inkling: 2 changes\n\
-              - slack:C0123ABCD/1786596050.245879 | replies 0 → 1 by @alice\n\
-              - slack:C0123ABCD/1786596050.245879 | reactions 0 → 1 :white_check_mark:"]
+              - slack:C0123ABCD/1786596050.245879 | 1 reply from @alice\n\
+              - slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark:"]
+        );
+    }
+
+    #[test]
+    fn what_one_reading_added_to_several_emoji_is_one_line() {
+        let mut watches = talking();
+        watches.record(
+            &[(slack(), conversation(&[("dart", 2), ("+1", 1)], &[]))],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert_eq!(
+            sessions.texts(),
+            ["inkling: slack:C0123ABCD/1786596050.245879 | 3 reactions :+1: :dart:"]
+        );
+    }
+
+    fn event(axis: Axis, from: &str, to: &str, detail: &str) -> Event {
+        Event {
+            seq: 1,
+            at: now(),
+            reference: slack(),
+            axis,
+            from: from.into(),
+            to: to.into(),
+            title: String::new(),
+            detail: Some(detail.into()).filter(|d: &String| !d.is_empty()),
+            job: None,
+            own: false,
+            partial: false,
+            audience: Default::default(),
+        }
+    }
+
+    #[test]
+    fn an_accumulating_axis_says_how_many_new_and_from_whom() {
+        let said = |e: &Event| super::said(e);
+        assert_eq!(
+            said(&event(Axis::Replies, "2", "3", "@a")),
+            "1 reply from @a"
+        );
+        assert_eq!(
+            said(&event(Axis::Comments, "0", "4", "@a, b (bot), @c")),
+            "4 comments from @a, b (bot) and @c"
+        );
+        assert_eq!(
+            said(&event(Axis::Comments, "0", "9", "@a, @b, @c, @d, @e")),
+            "9 comments from 5 people",
+            "past three, a count rather than a list"
+        );
+        assert_eq!(
+            said(&Event {
+                partial: true,
+                ..event(Axis::Comments, "1", "41", "@bob")
+            }),
+            "at least 40 comments from @bob"
+        );
+        // Stored before the wording changed.
+        assert_eq!(
+            said(&event(Axis::Replies, "2", "4", "by @alice, @bob")),
+            "2 replies from @alice and @bob"
+        );
+        // A shrink isn't new anything; state-like axes keep from → to.
+        assert_eq!(
+            said(&event(Axis::Reactions, "1", "0", ":eyes:")),
+            "reactions 1 → 0 :eyes:"
+        );
+        assert_eq!(
+            said(&event(Axis::State, "open", "merged", "by @dpep")),
+            "state open → merged by @dpep"
         );
     }
 
@@ -714,7 +892,7 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             [
-                "inkling: github.com/dpep/inkling#42 | comments 1 → 3 by @alice, coderabbitai (bot) \
+                "inkling: github.com/dpep/inkling#42 | 2 comments from @alice and coderabbitai (bot) \
               (gh pr view 42 --repo github.com/dpep/inkling --comments)"
             ]
         );

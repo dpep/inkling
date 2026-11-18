@@ -572,6 +572,7 @@ impl Watches {
                     detail: moved.detail,
                     job: moved.job,
                     own: moved.own,
+                    partial: moved.partial,
                     audience: audience.clone(),
                 });
             }

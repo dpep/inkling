@@ -8,8 +8,8 @@
   reports the net change since you left. The deadline keeps running either way. Watches you own at
   a terminal, or that belong to a session without the hooks, are never paused. `inkling watch`
   marks paused watches `(paused)`. `inkling status` counts them and lists their session as `ended`.
-- **New: a watched pull request reports new comments.** `github.com/you/repo#42 | comments 3 → 5
-  by @alice, coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)` — who and
+- **New: a watched pull request reports new comments.** `github.com/you/repo#42 | 2 comments
+  from @alice and coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)` — who and
   how many, never what anybody wrote. Conversation comments, line comments and reviews with a body
   count; an edited comment doesn't, so a coverage bot rewriting its comment on every push stays
   quiet, and a deleted one is never news. Comments only you wrote stay in `events` without a push.
@@ -17,9 +17,10 @@
   registered before this counts its comments at the next reading and reports only what comes after.
 
 - **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
-  `replies 2 → 4 by @alice, @bob` and `reactions 0 → 1 :white_check_mark:` — who and how many,
+  `2 replies from @alice and @bob` and `1 reaction :white_check_mark:` — who and how many,
   never what anybody wrote. A reply is a message in its thread, or a later one in the same
-  conversation: any in a DM, one that @mentions you in a channel. A reply only you wrote stays in `events` without a push. Reads go
+  conversation: any in a DM, one that @mentions you in a channel. A reply only you wrote stays in
+  `events` without a push. Reads go
   through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read
   at most every 5 minutes, and only by the resident server, `watch` and `events`. **To have
   posting a message watch it, add the Slack send tool to the `PostToolUse` matcher:**

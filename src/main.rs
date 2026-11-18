@@ -2236,13 +2236,19 @@ fn events_out(
 
     let rows: Vec<_> = events
         .iter()
-        .map(|event| {
-            (
+        .map(|event| match inkling::push::tallied(event) {
+            Some(tallied) => (
+                event.reference.to_string(),
+                event.axis.to_string(),
+                tallied,
+                String::new(),
+            ),
+            None => (
                 event.reference.to_string(),
                 event.axis.to_string(),
                 format!("{} → {}", event.from, event.to),
                 event.detail.clone().unwrap_or_else(|| event.title.clone()),
-            )
+            ),
         })
         .collect();
     let (name_width, axis_width) = widths(&rows);

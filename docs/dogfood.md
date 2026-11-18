@@ -40,6 +40,11 @@ fixed, say where and leave the line.
 - An existing DM watch (`…/1771013011.519909`) jumped `replies 0 → 3` on its first read after the
   change: every later message in the DM became a reply at once. All mine, so `own` and no push;
   with someone else's messages in there it would have pushed one stale-looking transition.
+- First live `comments` transition, on a stranger's fresh PR (cyuxSz/docs-site-lab#55) watched
+  from a scratch store: `comments 4 → 7 by coderabbitai (bot)` (pre-rewording), on the first
+  reading after coderabbit's review landed (~20s). Checked against GitHub: one review, a body plus
+  two line comments, so +3 is exact. In the same window coderabbit edited both its earlier
+  comments in place; neither counted. Good: the edit rule held on its first real bot.
 - Building PR comments: `gh pr view --comments` doesn't list line comments. On rippled#6493 one
   author has 29 reviews, 27 of them a lone line comment, and gh prints 7 entries for them.
   Expected the command a `comments` push ends in to show what it announced; for a reply in a

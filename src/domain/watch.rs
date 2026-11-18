@@ -322,6 +322,9 @@ pub struct Transition {
     pub job: Option<u64>,
     /// Made only by the reader themself: recorded, but not worth a turn.
     pub own: bool,
+    /// A count whose page didn't reach back to the last reading: at least
+    /// this many, maybe more.
+    pub partial: bool,
 }
 
 /// A transition, once it has a place in the sequence.
@@ -343,6 +346,8 @@ pub struct Event {
     pub job: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
     /// Who was watching this reference when it moved.
     ///
     /// Snapshotted rather than looked up later: a finished watch is removed,
@@ -423,6 +428,7 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                     detail: after.by.of(*was, *now),
                     job: None,
                     own: false,
+                    partial: false,
                 });
             }
             if had != has {
@@ -433,6 +439,7 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                     detail: after.failing.as_ref().map(|f| f.name.clone()),
                     job: after.failing.as_ref().and_then(|f| f.job),
                     own: false,
+                    partial: false,
                 });
             }
             moved
@@ -447,6 +454,7 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                 detail: None,
                 job: None,
                 own: false,
+                partial: false,
             }]
         }
         (
@@ -514,18 +522,14 @@ fn commented(
     let partial = said
         .complete_after
         .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
-    let names = names.join(", ");
-    let detail = match partial {
-        true => format!("at least {} new, by {names}", mark.count - had.count),
-        false => format!("by {names}"),
-    };
     let moved = Transition {
         axis: Axis::Comments,
         from: had.count.to_string(),
         to: mark.count.to_string(),
-        detail: Some(detail),
+        detail: Some(names.join(", ")),
         job: None,
         own,
+        partial,
     };
     (Some(mark), Some(moved))
 }
@@ -554,9 +558,10 @@ fn conversation(
             axis: Axis::Replies,
             from: were.len().to_string(),
             to: are.len().to_string(),
-            detail: (!names.is_empty()).then(|| format!("by {}", names.join(", "))),
+            detail: (!names.is_empty()).then(|| names.join(", ")),
             job: None,
             own: by.only_me(&new),
+            partial: false,
         });
     }
     let emoji: BTreeSet<&String> = had.keys().chain(has.keys()).collect();
@@ -573,6 +578,7 @@ fn conversation(
                 detail: Some(format!(":{name}:")),
                 job: None,
                 own: false,
+                partial: false,
             });
         }
     }
@@ -1027,7 +1033,7 @@ mod tests {
         ));
         let moved = changed(Some(&before), &after);
         assert_eq!(labels(&moved), [("replies", "2", "4")]);
-        assert_eq!(moved[0].detail.as_deref(), Some("by @alice, @bob"));
+        assert_eq!(moved[0].detail.as_deref(), Some("@alice, @bob"));
         assert!(!moved[0].own);
     }
 
@@ -1036,7 +1042,7 @@ mod tests {
         let before = message(&[], &[]);
         let after = seen_message(message(&[], &[("1.000001", "U9")]));
         let moved = changed(Some(&before), &after);
-        assert_eq!(moved[0].detail.as_deref(), Some("by @dpepper"));
+        assert_eq!(moved[0].detail.as_deref(), Some("@dpepper"));
         assert!(moved[0].own, "recorded, not worth a turn");
 
         let with_others = seen_message(message(&[], &[("1.000001", "U9"), ("1.000002", "U1")]));
@@ -1118,7 +1124,7 @@ mod tests {
         assert_eq!(labels(&moved), [("comments", "1", "3")]);
         assert_eq!(
             moved[0].detail.as_deref(),
-            Some("by coderabbitai (bot), @alice")
+            Some("coderabbitai (bot), @alice")
         );
         assert!(!moved[0].own);
     }
@@ -1161,7 +1167,7 @@ mod tests {
         let base = reading(None, &commenting(State::Open, std::slice::from_ref(&a), 1)).standing;
         let both = [a, remark("b", "10:00:00", "@bob")];
         let moved = changed(Some(&base), &commenting(State::Open, &both, 2));
-        assert_eq!(moved[0].detail.as_deref(), Some("by @bob"));
+        assert_eq!(moved[0].detail.as_deref(), Some("@bob"));
     }
 
     #[test]
@@ -1219,7 +1225,11 @@ mod tests {
         };
         let moved = changed(Some(&base), &burst);
         assert_eq!(labels(&moved), [("comments", "1", "41")]);
-        assert_eq!(moved[0].detail.as_deref(), Some("at least 40 new, by @bob"));
+        assert_eq!(moved[0].detail.as_deref(), Some("@bob"));
+        assert!(
+            moved[0].partial,
+            "the page didn't reach back to the last one counted"
+        );
     }
 
     #[test]
@@ -1250,6 +1260,7 @@ mod tests {
                 detail: None,
                 job: None,
                 own: false,
+                partial: false,
                 audience: BTreeSet::new(),
             })
             .collect()

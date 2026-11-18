@@ -718,9 +718,16 @@ posted.
 the replies after it, as ts → who wrote it. Two axes, like a pull request's:
 
 ```
-slack:C0123ABCD/1786596050.245879  replies    2 → 4  by @alice, @bob
-slack:C0123ABCD/1786596050.245879  reactions  0 → 1  :white_check_mark:
+slack:C0123ABCD/1786596050.245879 | 2 replies from @alice and @bob
+slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark:
 ```
+
+The event keeps both counts (`from: "2"`, `to: "4"`, in `--json` too); the
+line says the difference, since every line is news. What one reading added to
+several emoji is one line, `3 reactions :dart: :+1:`. A shrink — a deleted
+reply, a removed reaction — isn't more of anything, and reads `reactions 1 → 0
+:eyes:`. One helper, `push::tally`, words every axis that accumulates, so the
+next one reads the same.
 
 - **Who replied is the news, so authors are kept and counts derived.** A new
   ts in the map is a new reply and names its author; the count alone couldn't
@@ -835,7 +842,7 @@ Built 2026-11-17: a watched pull request reports new comments, from anyone, as
 a third axis beside `state` and `checks`:
 
 ```
-github.com/you/repo#42 | comments 3 → 5 by @alice, coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)
+github.com/you/repo#42 | 2 comments from @alice and coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)
 ```
 
 **What counts.** Conversation comments (`comments`, GitHub's issue comments),
@@ -878,7 +885,7 @@ replication lag between the two pages of one response.
 fewer than that, the adapter hands over the oldest time on the page
 (`Discussion::complete_after`). If even that is newer than `latest`, the
 reading may not reach back to the last one counted, and the line says so:
-`comments 1 → 41 at least 40 new, by @bob`. The count comes from GitHub's
+`at least 40 comments from @bob`, with `partial` set on the event. The count comes from GitHub's
 totals, so it is right for conversation comments however many came; reviews
 beyond the page aren't summed, so for a pull request with more than 30 reviews
 the count is a floor (care_fe#16618 has 125). The names are the page's.
