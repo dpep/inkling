@@ -268,8 +268,12 @@ request and nothing else.
 
 The common case is the cheap one, which is what makes this affordable on
 every prompt: one small file read, no lock, no network, no output. The GitHub
-token is resolved only when a poll is actually going to happen — resolving it
-shells out to `gh auth token`, which is not something to do on every prompt.
+token is resolved only when a pull request is actually about to be read —
+resolving it shells out to `gh auth token`, which is not something to do on
+every prompt. Resolving it at each read rather than once is also what keeps a
+missing or lapsed `gh` login GitHub's failure alone: Jira and Slack watches are
+still read, and the server starts without one and picks up a login made after
+it started.
 
 Measured 2026-09-20 against 14 live pull requests, which is what makes the
 case either way:
@@ -307,9 +311,7 @@ a second poller arriving during a minute-long read finds it inside the attempt
 floor instead of paying for the same reading again. That claim is why the poll
 lock is let go before the first Slack read: the lock only saves redundant
 GitHub requests. The worker checks for shutdown between reads, so a signal or
-a hand-off waits for at most the read in flight. The prompt hook asks only whether something *it* would
-read is due (`watch::due_without_bridge`) before resolving a GitHub token, so
-a Slack watch alone no longer costs every prompt a `gh auth token`.
+a hand-off waits for at most the read in flight.
 
 The event log is bounded by age (72h) rather than by what every live
 subscriber has passed: one dead session must not be able to pin it. It was

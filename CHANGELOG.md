@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+<!-- fix2-latency -->
+- **No GitHub login no longer means nothing is read.** A missing, lapsed or slow `gh auth token`
+  stopped every poll before it started, Jira and Slack included, and `inkling serve` refused to
+  start. The token is now fetched only when a pull request is due, and failing to get one fails
+  GitHub alone; the server starts without one and picks up a login made after it started.
+<!-- /fix2-latency -->
+
 - **A watch on something that isn't there any more ends, once.** A Slack message that was
   deleted, or a channel the connector can't see, used to be read (and paid for) every five minutes
   until its deadline; its first such read now says `state watched → gone` and the watch is dropped.

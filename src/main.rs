@@ -556,14 +556,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
         // Handled above, before the config load they must not depend on.
         Command::Hook { .. } | Command::Serve { ring: true } => unreachable!(),
         Command::Serve { ring: false } => {
-            let token = Secret::resolve(
-                config.github.token_env.as_deref(),
-                config.github.token_command.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-
             let watches = watch_store(&cli.common);
-            let github = GitHubProvider::from_config(&config.github, token);
+            let github = GitHubOnDemand(&config.github);
             let jira = inkling::adapters::jira_acli::JiraProvider::new();
             // Fails here rather than on the worker, where no one would see it.
             slack_threads(&config, store.path())?;
@@ -2120,15 +2114,9 @@ fn poll(
     slack: Option<&dyn inkling::ports::MessageProvider>,
     why: &str,
 ) -> Result<inkling::watch::Polled, String> {
-    let token = Secret::resolve(
-        config.github.token_env.as_deref(),
-        config.github.token_command.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
-
     let poller = inkling::watch::Poller {
         store,
-        github: &GitHubProvider::from_config(&config.github, token),
+        github: &GitHubOnDemand(&config.github),
         jira: &inkling::adapters::jira_acli::JiraProvider::new(),
         slack,
         clock,
@@ -2138,6 +2126,22 @@ fn poll(
         None => poller.poll(TimeDelta::zero(), why),
     }
     .map_err(|e| e.to_string())
+}
+
+/// GitHub, with the token resolved at each lookup: only a due pull request
+/// pays for `gh auth token`, a token that can't be had fails GitHub alone, and
+/// a resident server picks up a login made after it started.
+struct GitHubOnDemand<'a>(&'a inkling::config::GitHub);
+
+impl inkling::ports::StatusProvider for GitHubOnDemand<'_> {
+    fn lookup(
+        &self,
+        references: &[inkling::domain::model::Reference],
+    ) -> Result<Vec<inkling::ports::Lookup>, inkling::ports::ProviderError> {
+        let token = Secret::resolve(self.0.token_env.as_deref(), self.0.token_command.as_deref())
+            .map_err(|e| inkling::ports::ProviderError::Transport(e.to_string()))?;
+        GitHubProvider::from_config(self.0, token).lookup(references)
+    }
 }
 
 /// Slack messages, read through the claude → Slack MCP bridge. Building it
@@ -3455,5 +3459,67 @@ mod tests {
     fn cutting_counts_characters_not_bytes() {
         // Truncating by byte would split a multi-byte glyph in half.
         assert_eq!(ellipsize("émoji—dash ok", 6), "émoji…");
+    }
+
+    /// Every message reads the same; a test only needs a reading to land.
+    struct Quiet;
+
+    impl inkling::ports::MessageProvider for Quiet {
+        fn read(
+            &self,
+            messages: &[inkling::domain::model::Reference],
+        ) -> Result<Vec<inkling::ports::MessageLookup>, inkling::ports::ProviderError> {
+            Ok(messages
+                .iter()
+                .map(|r| (r.clone(), Ok(Default::default())))
+                .collect())
+        }
+    }
+
+    #[test]
+    fn without_a_github_token_the_other_watches_are_still_read() {
+        // A Slack-only user with no `gh` login had nothing read at all.
+        let dir = std::env::temp_dir().join(format!("inkling-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config =
+            inkling::config::Config::parse(super::STARTER_CONFIG, "config.toml").unwrap();
+        config.github.token_env = Some("INKLING_TEST_NO_SUCH_TOKEN".into());
+        let store = inkling::adapters::watches_json::WatchStore::new(dir.join("watches.json"));
+        let message = inkling::domain::model::Reference::SlackMessage {
+            channel: "D0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            thread: None,
+        };
+        let pull = super::watch_target("dpep/inkling#3", &hosts(), &[], &|_: &str| unreachable!())
+            .unwrap();
+        let now = chrono::Utc::now();
+        store
+            .update(now, |w| {
+                w.watch(&message, "test", now + chrono::TimeDelta::hours(1), now);
+                w.watch(&pull, "test", now + chrono::TimeDelta::hours(1), now);
+            })
+            .unwrap();
+
+        let polled = super::poll(
+            &config,
+            &store,
+            &super::SystemClock,
+            None,
+            Some(&Quiet),
+            "test",
+        )
+        .unwrap();
+
+        assert_eq!(polled.sightings.len(), 1, "the message was read");
+        assert!(
+            polled
+                .failures
+                .iter()
+                .any(|f| f.contains("INKLING_TEST_NO_SUCH_TOKEN")),
+            "{:?}",
+            polled.failures
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
