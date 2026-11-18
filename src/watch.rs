@@ -17,7 +17,7 @@ use crate::adapters::watches_json::{Seen, Watch, WatchStore};
 use crate::domain::model::Reference;
 use crate::domain::slack::ts_key;
 use crate::domain::watch::{Actors, Event, Sighting, Standing};
-use crate::ports::{Clock, IssueProvider, MessageProvider, StatusProvider, StoreError};
+use crate::ports::{Clock, IssueProvider, MessageProvider, RefError, StatusProvider, StoreError};
 use chrono::TimeDelta;
 
 pub struct Poller<'a> {
@@ -75,6 +75,21 @@ fn name(so_far: &[String], reference: &Reference, error: &impl std::fmt::Display
     }
 }
 
+/// A reference that couldn't be read. One that isn't there at all — deleted, or
+/// never visible to these credentials — will never be, so its watch is over.
+fn unreadable(
+    failures: &mut Vec<String>,
+    gone: &mut Vec<Reference>,
+    reference: &Reference,
+    error: RefError,
+) {
+    name(failures, reference, &error);
+    if error == RefError::NotFound {
+        gone.push(reference.clone());
+    }
+    failures.push(format!("{reference}: {error}"));
+}
+
 impl Poller<'_> {
     /// Read every live watch that is due and record what moved. `floor` is
     /// the youngest reading this caller will pay to replace; the schedule in
@@ -105,13 +120,15 @@ impl Poller<'_> {
         let count = |is: fn(&Reference) -> bool| references.iter().filter(|r| is(r)).count();
         let pulls = count(|r| matches!(r, Reference::GitHubPullRequest { .. }));
         let messages = count(is_slack);
-        let mut failures = Vec::new();
-        let sightings = self.sightings(&references, &mut failures);
+        let (mut failures, mut gone) = (Vec::new(), Vec::new());
+        let sightings = self.sightings(&references, &mut failures, &mut gone);
         let elapsed = (self.clock.now() - observed_at).num_milliseconds();
 
         let events = self.store.update(self.clock.now(), |watches| {
             watches.tried(&references, observed_at);
-            watches.record(&sightings, observed_at)
+            let mut events = watches.record(&sightings, observed_at);
+            events.extend(watches.gone(&gone, observed_at));
+            events
         })?;
 
         tracing::info!(
@@ -177,6 +194,7 @@ impl Poller<'_> {
         &self,
         references: &[Reference],
         failures: &mut Vec<String>,
+        gone: &mut Vec<Reference>,
     ) -> Vec<(Reference, Sighting)> {
         let mut seen = Vec::new();
 
@@ -206,8 +224,7 @@ impl Poller<'_> {
                                 },
                             )),
                             Err(error) => {
-                                name(failures, &reference, &error);
-                                failures.push(format!("{reference}: {error}"));
+                                unreadable(failures, gone, &reference, error);
                             }
                         }
                     }
@@ -247,8 +264,7 @@ impl Poller<'_> {
                                 },
                             )),
                             Err(error) => {
-                                name(failures, &reference, &error);
-                                failures.push(format!("{reference}: {error}"));
+                                unreadable(failures, gone, &reference, error);
                             }
                         }
                     }
@@ -288,8 +304,7 @@ impl Poller<'_> {
                                 },
                             )),
                             Err(error) => {
-                                name(failures, &reference, &error);
-                                failures.push(format!("{reference}: {error}"));
+                                unreadable(failures, gone, &reference, error);
                             }
                         }
                     }
@@ -302,7 +317,7 @@ impl Poller<'_> {
         }
 
         if let Some(slack) = self.slack {
-            self.channels(slack, references, &mut seen, failures);
+            self.channels(slack, references, &mut seen, failures, gone);
         }
         seen
     }
@@ -316,6 +331,7 @@ impl Poller<'_> {
         references: &[Reference],
         seen: &mut Vec<(Reference, Sighting)>,
         failures: &mut Vec<String>,
+        gone: &mut Vec<Reference>,
     ) {
         let watches = self.store.read();
         for reference in references {
@@ -370,8 +386,7 @@ impl Poller<'_> {
                     ));
                 }
                 Err(error) => {
-                    name(failures, reference, &error);
-                    failures.push(format!("{reference}: {error}"));
+                    unreadable(failures, gone, reference, error);
                 }
             }
         }
@@ -618,6 +633,29 @@ mod tests {
         let axes: Vec<_> = polled.events.iter().map(|e| e.axis).collect();
         assert!(axes.contains(&Axis::Checks), "{axes:?}");
         assert!(axes.contains(&Axis::Status), "{axes:?}");
+    }
+
+    #[test]
+    fn a_watch_whose_reference_is_gone_says_so_once_and_finishes() {
+        // A deleted message or a channel the connector can't see would
+        // otherwise be paid for every five minutes until its deadline.
+        let h = Harness::new("gone");
+        h.github.fail(&pr(3), RefError::NotFound);
+        h.watch(&pr(3));
+        let polled = h.poll();
+        assert_eq!(polled.failures.len(), 1);
+        assert_eq!(labels(&polled.events), [("state", "watched", "gone")]);
+        assert!(h.store.read().watches.is_empty());
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        assert!(h.poll().events.is_empty(), "once");
+    }
+
+    fn labels(events: &[Event]) -> Vec<(&str, &str, &str)> {
+        events
+            .iter()
+            .map(|e| (e.axis.as_str(), e.from.as_str(), e.to.as_str()))
+            .collect()
     }
 
     #[test]
@@ -903,7 +941,8 @@ mod tests {
     fn nothing_is_recorded_for_a_reference_whose_status_never_arrived() {
         let h = Harness::new("absent");
         h.watch(&pr(3));
-        h.github.fail(&pr(3), RefError::NotFound);
+        h.github
+            .fail(&pr(3), RefError::Other("rate limited".into()));
 
         h.poll();
         assert!(

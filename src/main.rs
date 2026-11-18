@@ -633,6 +633,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let watches = watch_store(&cli.common);
             let clock = SystemClock;
             let mut refused = Vec::new();
+            let mut unreadable = false;
             let owner = reader(None, TERMINAL, &watches.read());
 
             if !targets.is_empty() {
@@ -678,6 +679,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
                             for line in finished_already(&references, &polled, &watches.read()) {
                                 println!("{line}");
                             }
+                            for line in unread(&references, &polled) {
+                                println!("could not read {line}");
+                                unreadable = true;
+                            }
                         }
                         Err(error) => {
                             println!("could not read them just now: {error}");
@@ -695,8 +700,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             watch_out(&watches.read(), &owner, clock.now(), *json)?;
             // The good references are watched either way; the exit code is
-            // where a script learns that one of its arguments was not.
-            Ok(match refused.is_empty() {
+            // where a script learns that one of its arguments was not, or
+            // couldn't be read.
+            Ok(match refused.is_empty() && !unreadable {
                 true => 0,
                 false => 1,
             })
@@ -2183,6 +2189,24 @@ fn finished_already(
         .collect()
 }
 
+/// Why the references just asked for couldn't be read, if they couldn't —
+/// not the other watches the same poll happened to read.
+fn unread<'a>(
+    asked: &[inkling::domain::model::Reference],
+    polled: &'a inkling::watch::Polled,
+) -> Vec<&'a str> {
+    polled
+        .failures
+        .iter()
+        .filter(|line| {
+            asked
+                .iter()
+                .any(|reference| line.starts_with(&format!("{reference}: ")))
+        })
+        .map(String::as_str)
+        .collect()
+}
+
 fn watch_out(
     watches: &inkling::adapters::watches_json::Watches,
     owner: &str,
@@ -2771,7 +2795,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 mod tests {
     use super::{
         Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge,
-        noticed, payload, swallowing, wait_targets, watch_target, watch_targets, within,
+        noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
     };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
@@ -3114,6 +3138,22 @@ mod tests {
 
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("github.com/dpep/inkling#7: already merged"));
+    }
+
+    #[test]
+    fn watching_something_unreadable_says_why_about_it_alone() {
+        let polled = Polled {
+            failures: vec![
+                "github.com/dpep/inkling#7: not found or not visible".into(),
+                "github.com/dpep/inkling#70: rate limited".into(),
+                "github unreachable".into(),
+            ],
+            ..Polled::default()
+        };
+        assert_eq!(
+            unread(&[pr(7)], &polled),
+            ["github.com/dpep/inkling#7: not found or not visible"]
+        );
     }
 
     #[test]

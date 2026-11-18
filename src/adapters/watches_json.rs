@@ -19,7 +19,9 @@ use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
 use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
-use crate::domain::watch::{Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading};
+use crate::domain::watch::{
+    Axis, Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading,
+};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -649,6 +651,38 @@ impl Watches {
                 self.watches.remove(&key);
                 tracing::info!(reference = %reference, "watch finished");
             }
+        }
+        self.events.extend(fresh.iter().cloned());
+        fresh
+    }
+
+    /// Finish the watches on references that aren't there any more, each with
+    /// one event saying so — the same end a merged pull request gets, so a
+    /// deleted Slack message isn't paid for until its deadline.
+    pub fn gone(&mut self, references: &[Reference], observed_at: DateTime<Utc>) -> Vec<Event> {
+        let mut fresh = Vec::new();
+        for reference in references {
+            let Some(watch) = self.watches.remove(&reference.key()) else {
+                continue;
+            };
+            self.last_seq += 1;
+            tracing::info!(reference = %reference, seq = self.last_seq, "watch gone");
+            fresh.push(Event {
+                seq: self.last_seq,
+                at: observed_at,
+                reference: watch.reference,
+                axis: Axis::State,
+                from: "watched".into(),
+                to: "gone".into(),
+                title: watch.seen.map(|seen| seen.title).unwrap_or_default(),
+                detail: None,
+                job: None,
+                receipt_for: BTreeSet::new(),
+                partial: false,
+                lines: 0,
+                after: None,
+                audience: watch.owners,
+            });
         }
         self.events.extend(fresh.iter().cloned());
         fresh

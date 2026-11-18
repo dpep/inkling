@@ -778,7 +778,14 @@ was found.
   take to read the message — the agent's next step. The thread root is how to
   read it, not which message it is, so it isn't in the name. Always given in
   full: the short forms are pull requests only.
-- **A conversation never finishes.** The watch ends at its deadline.
+- **A conversation never finishes, but it can be gone.** The watch ends at
+  its deadline, or at the first read that says the message or channel isn't
+  there (`RefError::NotFound`: deleted, another workspace, a private channel
+  the connector can't see). That read records one `state watched → gone` and
+  drops the watch, the way `wait` already treats a vanished reference —
+  otherwise it was paid for every five minutes until the deadline, silently.
+  `inkling watch` prints why a reference it was just given couldn't be read,
+  and exits 1.
 
 **Why the 5-minute floor.** Every read is a `claude -p` call through the
 claude → Slack MCP bridge: ~2¢ ($0.021 twice, 2026-11-17), and 9s or 75s of
