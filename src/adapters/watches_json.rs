@@ -802,6 +802,19 @@ impl Watches {
         had
     }
 
+    /// Detach, but only from `address`: a session that resumed onto a new
+    /// socket since that one was found gone is still here.
+    pub fn detach_from(&mut self, subscriber: &str, address: &SessionAddress) -> bool {
+        let current = self
+            .subscribers
+            .get(subscriber)
+            .and_then(|entry| entry.address.as_ref());
+        match current == Some(address) {
+            true => self.detach(subscriber),
+            false => false,
+        }
+    }
+
     /// Every subscriber a push could reach, with where its cursor sits.
     pub fn attached(&self) -> Vec<(&str, &SessionAddress, u64)> {
         self.subscribers

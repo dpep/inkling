@@ -377,12 +377,17 @@ pub struct Outcome {
     pub written: usize,
     /// Nothing was owed, so liveness was the only question asked.
     pub probed: bool,
+    /// The address this round was about. The store may hold a newer one by
+    /// the time this is applied, and what was learned about this one says
+    /// nothing about that.
+    pub address: Option<SessionAddress>,
 }
 
 impl Outcome {
-    fn for_subscriber(subscriber: &str) -> Self {
+    fn for_subscriber(subscriber: &str, address: &SessionAddress) -> Self {
         Self {
             subscriber: subscriber.to_string(),
+            address: Some(address.clone()),
             ..Self::default()
         }
     }
@@ -396,8 +401,10 @@ impl Outcome {
         if self.probed && !self.detach {
             watches.answered(&self.subscriber, now);
         }
-        if self.detach {
-            watches.detach(&self.subscriber);
+        if self.detach
+            && let Some(address) = &self.address
+        {
+            watches.detach_from(&self.subscriber, address);
         }
     }
 }
@@ -456,7 +463,7 @@ fn push(
     due: &[&Event],
     clock: &dyn Clock,
 ) -> Outcome {
-    let mut outcome = Outcome::for_subscriber(subscriber);
+    let mut outcome = Outcome::for_subscriber(subscriber, address);
     let last = due.last().map(|event| event.seq);
     let started = clock.now();
     let sent = sessions.deliver(address, &digest(due));
@@ -497,7 +504,7 @@ fn push(
 }
 
 fn probe(sessions: &dyn Sessions, subscriber: &str, address: &SessionAddress) -> Outcome {
-    let mut outcome = Outcome::for_subscriber(subscriber);
+    let mut outcome = Outcome::for_subscriber(subscriber, address);
     outcome.probed = true;
     if let Err(error) = sessions.probe(address) {
         outcome.detach = error.drop_address();
@@ -1599,6 +1606,33 @@ mod tests {
 
         deliver(&FakeSessions::default(), &mut watches);
         assert_eq!(watches.subscribers["s"].seen_at, now());
+    }
+
+    #[test]
+    fn a_stale_probe_does_not_detach_the_session_that_resumed_meanwhile() {
+        // A tick probes a snapshot read outside the lock. If the session
+        // crashed and `claude --resume` attached a new socket in between,
+        // the old socket's silence says nothing about the new one.
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/old"), now());
+        let snapshot = watches.clone();
+        let sessions = FakeSessions::default();
+        sessions.set("/tmp/old", Reaction::Gone);
+        let outcomes = round(&sessions, &snapshot, &clock());
+
+        watches.attach("s", address("/tmp/new"), now());
+        for outcome in &outcomes {
+            outcome.apply(&mut watches, now());
+        }
+
+        assert_eq!(
+            watches
+                .attached()
+                .first()
+                .map(|(_, a, _)| a.path().to_path_buf()),
+            Some(PathBuf::from("/tmp/new"))
+        );
+        assert!(!watches.paused(&watches.watches["github.com/dpep/inkling#3"]));
     }
 
     #[test]
