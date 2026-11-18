@@ -12,14 +12,16 @@
 //! The channel after the message is read in the same call. In a DM every
 //! later message is a reply, threaded or not: there the next message is the
 //! answer. Elsewhere a later message is a reply when it @mentions the reader.
+//! Either way a reply counts for one watched message: the latest before it.
 
 use crate::adapters::slack_claude::{ActivityError, Runner, SlackClaude};
 use crate::domain::model::Reference;
-use crate::domain::slack::{is_dm, later};
+use crate::domain::slack::{is_dm, owner};
 use crate::ports::{
     ChannelStatus, MessageLookup, MessageProvider, MessageStatus, ProviderError, RefError,
 };
 use std::cell::{Cell, OnceCell};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub struct SlackThreads<R: Runner> {
@@ -69,7 +71,11 @@ impl<R: Runner> SlackThreads<R> {
         }
     }
 
-    fn read_one(&self, reference: &Reference) -> Result<MessageStatus, RefError> {
+    fn read_one(
+        &self,
+        reference: &Reference,
+        watched: &[Reference],
+    ) -> Result<MessageStatus, RefError> {
         let Reference::SlackMessage {
             channel,
             ts,
@@ -93,21 +99,26 @@ impl<R: Runner> SlackThreads<R> {
         }
         let dm = is_dm(channel);
         let me = if dm { None } else { self.me() };
+        // A thread reply also sent to the channel is in both: it is a thread's.
+        let in_thread: HashSet<String> = read.thread.iter().map(|e| e.ts.clone()).collect();
         let answers = read
             .channel
             .into_iter()
             .flatten()
-            .filter(|entry| dm || me.as_ref().is_some_and(|me| entry.mentions.contains(me)));
-        // A thread reply also sent to the channel is in both, keyed once by ts.
-        for entry in read.thread.into_iter().chain(answers) {
+            .filter(|entry| !in_thread.contains(&entry.ts))
+            .filter(|entry| dm || me.as_ref().is_some_and(|me| entry.mentions.contains(me)))
+            .map(|entry| (entry, None));
+        let thread = read.thread.into_iter().map(|entry| (entry, Some(root)));
+        let watched = || watched.iter().chain(std::iter::once(reference));
+        for (entry, thread) in thread.chain(answers) {
             if !entry.user_id.is_empty() && !entry.user_name.is_empty() {
                 status
                     .names
                     .insert(entry.user_id.clone(), entry.user_name.clone());
             }
-            if later(&entry.ts, ts) {
-                // A reply's replies are the ones after it: a thread is one
-                // conversation, and what came before was already there.
+            // Only the ones after it (what came before was already there),
+            // and not one a later watched message heard instead.
+            if owner(channel, &entry.ts, thread, watched()) == Some(ts.as_str()) {
                 status.replies.insert(entry.ts, entry.user_id);
             }
         }
@@ -118,10 +129,14 @@ impl<R: Runner> SlackThreads<R> {
 impl<R: Runner> MessageProvider for SlackThreads<R> {
     /// One call per message: the thread tool reads one thread, and a channel
     /// read lists top-level messages only.
-    fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
+    fn read(
+        &self,
+        messages: &[Reference],
+        watched: &[Reference],
+    ) -> Result<Vec<MessageLookup>, ProviderError> {
         Ok(messages
             .iter()
-            .map(|reference| (reference.clone(), self.read_one(reference)))
+            .map(|reference| (reference.clone(), self.read_one(reference, watched)))
             .collect())
     }
 
@@ -202,7 +217,7 @@ mod tests {
         // message in the DM rather than a thread reply.
         let (slack, prompts) = threads(&[REAL_DM_ACTIVITY]);
         let watched = message("D1MG8KWNR", "1794976101.418449", None);
-        let status = slack.read(&[watched]).unwrap()[0].1.clone().unwrap();
+        let status = slack.read(&[watched], &[]).unwrap()[0].1.clone().unwrap();
 
         let prompt = &prompts.borrow()[0];
         assert!(prompt.contains("slack_read_channel"), "{prompt}");
@@ -226,7 +241,7 @@ mod tests {
         // An empty list would read as a quiet DM; a missing one is a model
         // that made one call of the two.
         let (slack, prompts) = threads(&[REAL_THREAD, REAL_DM_ACTIVITY]);
-        let read = slack.read(&[message("D1MG8KWNR", "1794976101.418449", None)]);
+        let read = slack.read(&[message("D1MG8KWNR", "1794976101.418449", None)], &[]);
         assert_eq!(read.unwrap()[0].1.clone().unwrap().replies.len(), 1);
         assert_eq!(prompts.borrow().len(), 2);
     }
@@ -245,7 +260,7 @@ mod tests {
     fn in_a_channel_a_later_message_is_a_reply_only_when_it_mentions_me() {
         let (slack, prompts) = threads(&[CHANNEL]);
         let status = slack
-            .read(&[message("C0123ABCD", "1786596000.123456", None)])
+            .read(&[message("C0123ABCD", "1786596000.123456", None)], &[])
             .unwrap()[0]
             .1
             .clone()
@@ -268,7 +283,7 @@ mod tests {
     fn a_reply_is_read_from_its_root_and_counts_only_what_came_after_it() {
         let (slack, prompts) = threads(&[THREAD]);
         let reply = message("C0123ABCD", "1786596050.245879", Some("1786596000.123456"));
-        let status = slack.read(&[reply]).unwrap()[0].1.clone().unwrap();
+        let status = slack.read(&[reply], &[]).unwrap()[0].1.clone().unwrap();
 
         assert!(prompts.borrow()[0].contains(r#"message_ts: "1786596000.123456""#));
         assert!(
@@ -282,11 +297,77 @@ mod tests {
         );
     }
 
+    /// Invented, in the shape of the real reads: a DM thread with replies
+    /// in it, then top-level messages after it.
+    const DM: &str = r#"{"messages":[
+        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"dpepper","reactions":{}},
+        {"ts":"1786596050.245879","user_id":"U00000001","user_name":"alice","reactions":{}},
+        {"ts":"1786596060.000001","user_id":"U00000002","user_name":"bob","reactions":{}}
+    ],"channel":[
+        {"ts":"1786596100.000001","user_id":"U00000009","user_name":"dpepper","mentions":[]},
+        {"ts":"1786596200.000001","user_id":"U00000001","user_name":"alice","mentions":[]}
+    ]}"#;
+
+    fn replies(raw: &str, of: &Reference, watched: &[Reference]) -> Vec<String> {
+        let (slack, _) = threads(&[raw]);
+        let status = slack.read(std::slice::from_ref(of), watched).unwrap()[0]
+            .1
+            .clone()
+            .unwrap();
+        status.replies.into_keys().collect()
+    }
+
+    #[test]
+    fn a_dm_answer_is_news_for_the_latest_watched_message_only() {
+        // Seen live: one answer pushed once per earlier watched message.
+        let first = message("D0000000A", "1786596000.123456", None);
+        let second = message("D0000000A", "1786596100.000001", None);
+        let watched = [first.clone(), second.clone()];
+        // The second is itself the next message after the first.
+        assert_eq!(
+            replies(DM, &first, &watched),
+            [
+                "1786596050.245879",
+                "1786596060.000001",
+                "1786596100.000001"
+            ],
+        );
+        let after = r#"{"messages":[
+            {"ts":"1786596100.000001","user_id":"U00000009","user_name":"dpepper","reactions":{}}
+        ],"channel":[
+            {"ts":"1786596200.000001","user_id":"U00000001","user_name":"alice","mentions":[]}
+        ]}"#;
+        assert_eq!(replies(after, &second, &watched), ["1786596200.000001"]);
+    }
+
+    #[test]
+    fn a_thread_reply_is_news_for_the_latest_watched_message_in_the_thread() {
+        let root = message("C0123ABCD", "1786596000.123456", None);
+        let reply = message("C0123ABCD", "1786596050.245879", Some("1786596000.123456"));
+        let watched = [root.clone(), reply.clone()];
+        assert_eq!(replies(THREAD, &root, &watched), ["1786596050.245879"]);
+        assert_eq!(replies(THREAD, &reply, &watched), ["1786596060.000001"]);
+    }
+
+    #[test]
+    fn a_message_watched_alone_hears_every_reply() {
+        // Including when the poller didn't list it among the watched.
+        let root = message("D0000000A", "1786596000.123456", None);
+        let all = [
+            "1786596050.245879",
+            "1786596060.000001",
+            "1786596100.000001",
+            "1786596200.000001",
+        ];
+        assert_eq!(replies(DM, &root, std::slice::from_ref(&root)), all);
+        assert_eq!(replies(DM, &root, &[]), all);
+    }
+
     #[test]
     fn a_thread_is_read_to_the_tools_maximum() {
         // Oldest first, so a smaller page never reaches the newest replies.
         let (slack, prompts) = threads(&[THREAD]);
-        let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         let prompt = &prompts.borrow()[0];
         let thread = &prompt[..prompt.find("Then call").unwrap()];
         assert!(thread.contains("limit: 1000\n"), "{thread}");
@@ -295,7 +376,7 @@ mod tests {
     #[test]
     fn the_prompt_never_asks_for_what_a_message_says() {
         let (slack, prompts) = threads(&[THREAD]);
-        let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         let prompt = &prompts.borrow()[0];
         assert!(prompt.contains("Do not include message text"), "{prompt}");
         assert!(!prompt.contains("\"text\""), "{prompt}");
@@ -306,19 +387,19 @@ mod tests {
         // A deleted reply's thread still reads, with no error code to match.
         let dropped = r#"{"messages":[{"ts":"1786596060.000001","user_id":"U00000002","reactions":{}}],"channel":[]}"#;
         let (slack, prompts) = threads(&[dropped, THREAD]);
-        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
         assert_eq!(prompts.borrow().len(), 1);
 
         let (slack, _) = threads(&[r#"{"messages":[],"channel":[]}"#]);
-        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
     }
 
     #[test]
     fn a_thread_slack_says_is_gone_is_not_found_and_not_retried() {
         let (slack, prompts) = threads(&["execution_failed: thread_not_found", THREAD]);
-        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
         assert_eq!(prompts.borrow().len(), 1);
     }
@@ -329,7 +410,7 @@ mod tests {
         // watch, now that gone finishes it.
         let named = THREAD.replace("\"bob\"", "\"message_not_found\"");
         let (slack, _) = threads(&[&named]);
-        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         assert!(read.unwrap()[0].1.is_ok());
 
         let channel = REAL_CHANNEL_READ.replace("\"dpepper\"", "\"channel_not_found\"");

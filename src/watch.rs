@@ -403,7 +403,14 @@ impl Poller<'_> {
             .cloned()
             .collect();
         if let Some(slack) = self.slack.filter(|_| !messages.is_empty()) {
-            match slack.read(&messages) {
+            let watched: Vec<Reference> = self
+                .store
+                .read()
+                .active(self.clock.now())
+                .into_iter()
+                .filter(|r| matches!(r, Reference::SlackMessage { .. }))
+                .collect();
+            match slack.read(&messages, &watched) {
                 Ok(lookups) => {
                     for (reference, status) in lookups {
                         match status {
@@ -580,6 +587,8 @@ mod tests {
         /// A channel's messages, ts -> author, and each `oldest` asked for.
         posts: RefCell<std::collections::BTreeMap<String, String>>,
         asked: RefCell<Vec<Option<String>>>,
+        /// What the last read was told is watched.
+        watched: RefCell<Vec<Reference>>,
     }
 
     impl ScriptedMessages {
@@ -599,7 +608,12 @@ mod tests {
     }
 
     impl MessageProvider for ScriptedMessages {
-        fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
+        fn read(
+            &self,
+            messages: &[Reference],
+            watched: &[Reference],
+        ) -> Result<Vec<MessageLookup>, ProviderError> {
+            self.watched.replace(watched.to_vec());
             self.calls.set(self.calls.get() + messages.len());
             let statuses = self.statuses.borrow();
             Ok(messages
@@ -1144,14 +1158,48 @@ mod tests {
     }
 
     impl MessageProvider for Spy<'_> {
-        fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
+        fn read(
+            &self,
+            messages: &[Reference],
+            watched: &[Reference],
+        ) -> Result<Vec<MessageLookup>, ProviderError> {
             (self.on_read)();
-            self.inner.read(messages)
+            self.inner.read(messages, watched)
         }
         fn channel(&self, channel: &str, oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
             (self.on_read)();
             self.inner.channel(channel, oldest)
         }
+    }
+
+    #[test]
+    fn a_slack_read_is_told_every_live_watched_message() {
+        // Not just the due ones: a reply belongs to the latest watched
+        // message before it, whether or not that one is read this time.
+        let h = Harness::new("slack-watched");
+        let later = Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596090.000000".into(),
+            thread: None,
+        };
+        let channel = Reference::SlackChannel {
+            channel: "C0123ABCD".into(),
+            name: None,
+        };
+        h.slack.replied(&slack(), &[]);
+        h.watch(&slack());
+        h.watch(&later);
+        h.watch(&channel);
+        h.watch(&pr(3));
+        h.github.set(&pr(3), State::Open);
+        h.poller()
+            .poll_these(std::slice::from_ref(&slack()), "test")
+            .unwrap();
+        let mut told = h.slack.watched.borrow().clone();
+        told.sort();
+        let mut want = vec![slack(), later];
+        want.sort();
+        assert_eq!(told, want);
     }
 
     #[test]

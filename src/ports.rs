@@ -227,7 +227,13 @@ pub type MessageLookup = (Reference, Result<MessageStatus, RefError>);
 /// same reason those two are separate: nothing in its answer is shaped like
 /// theirs.
 pub trait MessageProvider {
-    fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError>;
+    /// `watched` is every live watched message, which decides the one a reply
+    /// belongs to (`domain::slack::owner`); a message read is always one.
+    fn read(
+        &self,
+        messages: &[Reference],
+        watched: &[Reference],
+    ) -> Result<Vec<MessageLookup>, ProviderError>;
 
     /// A channel's top-level messages after `oldest` (exclusive), or with
     /// `None` just its newest, for a baseline.
