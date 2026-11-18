@@ -46,7 +46,7 @@
   conversation: any in a DM, one that @mentions you in a channel. A reply or reaction the session
   posted itself stays in `events` without a push — judged by what the hook saw it post, not by
   author, since the Slack connector posts as you and your own reply from your phone must still
-  wake it. A removed reaction or deleted reply isn't pushed either. Reads go
+  wake it. A removed reaction isn't pushed either. Reads go
   through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read
   at most every 5 minutes, and only by the resident server, `watch` and `events`. **To have
   posting a message watch it, add the Slack send and react tools to the `PostToolUse` matcher:**

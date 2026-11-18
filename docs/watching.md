@@ -725,11 +725,8 @@ slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark: (slack_read_th
 The event keeps both counts (`from: "2"`, `to: "4"`, in `--json` too); the
 line says the difference, since every line is news. What one push carries for
 a message's emoji is one line, `3 reactions :dart: :+1:`, each emoji once
-however many readings it grew in. A shrink — a deleted reply, a removed
-reaction — isn't more of anything, and reads `reactions 1 → 0 :eyes:`. A
-reply deleted while another is posted, in one reading, leaves the count where
-it was but names the new author; that reads `at least 1 reply from @alice`,
-since each author named wrote at least one. One helper, `push::tally`, words
+however many readings it grew in. A removed reaction isn't more of anything,
+and reads `reactions 1 → 0 :eyes:`; replies never shrink (below). One helper, `push::tally`, words
 every axis that accumulates, so the next one reads the same — in the push, in
 `inkling events`, and in the `inkling watch` listing (`1 reply, 2 reactions
 :dart:`).
@@ -872,8 +869,12 @@ on record as having done does:
   person's. Needs the react tool in the `PostToolUse` matcher. *Unverified:*
   Slack canonicalizes some names (`thumbsup` reads back as `+1`), and such a
   reaction isn't matched, so it pushes, as before.
-- **A shrink isn't worth a turn.** A removed reaction or a deleted reply is
-  in `events` and never pushed: there is nothing to answer.
+- **A shrink isn't worth a turn.** A removed reaction is in `events` and
+  never pushed: there is nothing to answer. Replies never shrink: a reply once
+  seen stays counted, as a comment does, because a read that left one out (a
+  dropped row, a DM page sliding past 100) would otherwise re-announce it when
+  it turned up again. A deleted reply is missed; a reaction that flaps (a
+  dropped emoji, then back) still pushes its return, unfixed.
 
 This departs from "withholding a push from the session that caused the
 transition was considered and rejected" (above) for Slack only. Two of its

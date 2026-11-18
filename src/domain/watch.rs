@@ -747,7 +747,7 @@ fn conversation(
         .iter()
         .filter(|(ts, _)| !were.contains_key(*ts))
         .collect();
-    if !new.is_empty() || were.len() != are.len() {
+    if !new.is_empty() {
         let authors: BTreeSet<&String> = new.values().copied().collect();
         let names: Vec<String> = authors.iter().map(|id| by.named(id)).collect();
         moved.push(Transition {
@@ -866,6 +866,20 @@ fn carried_over(before: Option<&Standing>, after: &Standing) -> Standing {
             state: *state,
             checks: Some(*had),
             comments: comments.clone(),
+        },
+        // A reply once seen stays counted, like a comment: a read that left one
+        // out — a dropped row, a sliding page — would otherwise announce it
+        // again when it turned up.
+        (
+            Some(Standing::Message { replies: were, .. }),
+            Standing::Message { reactions, replies },
+        ) => Standing::Message {
+            reactions: reactions.clone(),
+            replies: were
+                .iter()
+                .chain(replies)
+                .map(|(ts, who)| (ts.clone(), who.clone()))
+                .collect(),
         },
         _ => after.clone(),
     }
@@ -1432,6 +1446,20 @@ mod tests {
                 added: 1
             }
         );
+    }
+
+    #[test]
+    fn a_reply_a_read_left_out_is_not_news_when_it_turns_up_again() {
+        // A model dropping a row, or a DM's page sliding, must not announce
+        // an old reply a second time.
+        let both = message(&[], &[("1.000001", "U1"), ("1.000002", "U2")]);
+        let dropped = reading(
+            Some(&both),
+            &seen_message(message(&[], &[("1.000001", "U1")])),
+        );
+        assert!(dropped.moved.is_empty(), "{:?}", dropped.moved);
+        let back = seen_message(message(&[], &[("1.000001", "U1"), ("1.000002", "U2")]));
+        assert!(changed(Some(&dropped.standing), &back).is_empty());
     }
 
     #[test]

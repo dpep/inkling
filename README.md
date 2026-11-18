@@ -182,8 +182,8 @@ What the session posted or reacted with itself is in `events` but isn't
 pushed. That is judged by what the `post-tool` hook saw the session do, not by
 author: the Slack connector posts as you, so your reply from your phone has
 the same author as the agent's and is pushed, as it should be. A reply another
-session posted is news to this one. A removed reaction or a deleted reply is in
-`events` but isn't pushed either.
+session posted is news to this one. A removed reaction is in `events` but
+isn't pushed; a deleted reply stays counted.
 
 Each reading is a `claude -p` call through Claude Code's Slack connector:
 about 2¢, and anywhere from a few seconds to a minute. So a Slack message is
