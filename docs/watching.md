@@ -411,9 +411,13 @@ baseline, `departed`, `tried_at`, `own`).
 - **Version 3 adds `misses`** (see "A conversation never finishes") and
   `unsubscribed`; a version 2 file reads as having missed nothing and nobody
   having asked to leave.
+- **Version 4 adds each reader's `told` set** of Slack replies. A version 3
+  file reads with every set empty, so a reply told on one watch just before
+  the upgrade can be told once more by another of that reader's watches
+  that had yet to read it.
 - **Builds from before this rule still quarantine.** They parse everything
   before looking at the version. Nothing this build does can reach them;
-  version 2 or 3 only parses for them if it holds nothing they lack.
+  version 2 or later only parses for them if it holds nothing they lack.
 
 ## How often a watch is read
 
@@ -892,37 +896,26 @@ was found.
   `thread_ts`; the thread is read from that root and only replies after the
   watched message count. A thread is one conversation, and what came before
   was already there when you asked.
-- **A reply counts for one watched message: the latest before it.** Added
-  2026-11-18, after one DM answer pushed once per watched message earlier in
-  the DM, and a thread reply pushed for both the root and a watched reply in
-  the thread. A reply read from a thread belongs to the latest watched message
-  in that thread (the root, or a watched reply) posted before it; a later
-  message in the channel, to the latest watched message anywhere in the
-  channel (`domain::slack::owner`). Only live message watches count, due or
-  not — a channel watch is its own thing.
-  - **Ownership decides who is told, not what is kept.** Every watch keeps
-    every reply that answers it, so a watch coming, going, pausing or
-    expiring loses or repeats nothing. When a reading brings a reply new to
-    a watch, `Watches::record` tells it to each reader whose latest watch
-    for it is this one, counting only *that reader's* watches: another
-    session's later message never takes a reply from you. The read says
-    which replies came from the thread (`MessageStatus::threaded`), since
-    that decides which watches a reply can belong to. Changed 2026-11-18
-    from deciding ownership in the read, which stored a reply only on its
-    owner: a later watch from another session silenced yours, and when a
-    reply watch ended its replies were pushed again on the root.
-  - **A watch counts once it has been read.** A never-read watch's first
-    reading is a baseline, so it takes nothing from older watches until
-    then. That baseline still tells a reader a reply one of their other
-    watches answers but hasn't read yet: it arrived since they last looked,
-    typically the answer to a follow-up you sent a minute ago, and would
-    otherwise reach nobody.
+- **A reader is told each reply once, on whichever watch reads it first.**
+  Every watch keeps every reply that answers it. Each reader has a told set
+  of Slack replies (channel and ts, on its subscriber record): when a reading
+  brings replies new to a watch, each owner is told the ones not already in
+  their set, and they are added. Another watch holding the same reply later
+  tells nothing. A first reading tells nothing and adds nothing, so a reply
+  a new watch's baseline swallows is still told by the older watch that
+  reads it next. A post the `post-tool` hook saw the session make goes
+  straight into its told set, so it is never news to that session on any
+  watch, including one made later. A reader's told set for a channel is
+  dropped once no message watch reads that channel: any watch made after
+  that holds every older reply in its silent first reading. Changed
+  2026-11-18, twice: first from one DM answer pushed once per watched message
+  before it, then from choosing an owning watch per reply (the latest one
+  before it), which lost the reply when that watch ended before reading it.
   - **Each step counts every reply.** A replies event goes `3 → 4` when
     the message has four replies and one is news here, even if the other
-    three were told on a later watch.
-  One gap: a thread reply also sent to the channel is a thread's to the
-  message that read its thread, but the channel read doesn't say it was
-  threaded, so a later watched top-level message hears it too.
+    three were told on another watch.
+  A thread reply also sent to the channel is one ts whichever read finds it,
+  so it is told once too.
 - **The reference is `slack:<channel>/<ts>`**, which is what Slack's own tools
   take to read the message — the agent's next step. The thread root is how to
   read it, not which message it is, so it isn't in the name. Always given in

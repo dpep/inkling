@@ -1108,8 +1108,8 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_the_session_posted_waits_in_the_feed() {
-        // Recorded, so a prompt still shows it, but not worth a turn.
+    fn a_reply_the_session_posted_is_not_news_to_it() {
+        // Its own post counts as told already, on every watch.
         let mut watches = talking();
         watches.receipt("s", &sent("1.000001"), now());
         watches.record(
@@ -1119,7 +1119,7 @@ mod tests {
         let sessions = FakeSessions::default();
         deliver(&sessions, &mut watches);
         assert!(sessions.texts().is_empty());
-        assert_eq!(watches.take("s", now()).len(), 1);
+        assert!(watches.take("s", now()).is_empty());
 
         // Anything it didn't post in the same reading makes it news.
         watches.record(

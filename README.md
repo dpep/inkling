@@ -178,8 +178,9 @@ message is the answer, and one that @mentions you in a channel. Never what
 anybody wrote: that is somebody else's prose, and to read it you use Slack.
 Reactions are counts, so they can't say who reacted.
 
-What the session posted or reacted with itself is in `events` but isn't
-pushed. That is judged by what the `post-tool` hook saw the session do, not by
+A reply the session posted itself is not news to it on any watch; a
+reaction it added, or a message it posted in a watched channel, is in
+`events` but isn't pushed. That is judged by what the `post-tool` hook saw the session do, not by
 author: the Slack connector posts as you, so your reply from your phone has
 the same author as the agent's and is pushed, as it should be. A reply another
 session posted is news to this one. A removed reaction is in `events` but
@@ -333,9 +334,8 @@ nobody asked for.
   doesn't count.
 - `curl … chat.postMessage`: the `channel` and `ts` of the Web API's JSON reply,
   when it says `"ok": true`. The `slack` CLI isn't recognized.
-- Either way, the post is also recorded on the session's other watches of that
-  conversation, so a reply it posts into a thread it watches isn't pushed back
-  to it.
+- Either way, the post is also recorded as the session's own, so a reply it
+  posts into a conversation it watches isn't news to it.
 - The Slack react tool (`mcp__claude_ai_Slack__slack_add_reaction`): watches
   nothing, but records the reaction, so the next reading of that message
   doesn't push the session its own emoji.

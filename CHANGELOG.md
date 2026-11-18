@@ -109,8 +109,8 @@
 - **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
   `2 replies from @alice and @bob` and `1 reaction :white_check_mark:` — who and how many,
   never what anybody wrote. A reply is a message in its thread, or a later one in the same
-  conversation: any in a DM, one that @mentions you in a channel. A reply or reaction the session
-  posted itself stays in `events` without a push — judged by what the hook saw it post, not by
+  conversation: any in a DM, one that @mentions you in a channel. A reply the session posted itself
+  isn't news to it, and a reaction it added stays in `events` without a push — judged by what the hook saw it post, not by
   author, since the Slack connector posts as you and your own reply from your phone must still
   wake it. A removed reaction isn't pushed either. Reads go
   through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read

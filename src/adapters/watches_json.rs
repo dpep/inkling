@@ -19,7 +19,6 @@ use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
 use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
-use crate::domain::slack::owner;
 use crate::domain::watch::{
     Axis, Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading, replied,
 };
@@ -36,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// an older build refuses a newer file rather than parse what it can and save
 /// back less (docs/watching.md, "An older build meets a newer store").
 /// `tests::stored_shape` stops compiling when the shape moves.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The reader a person at a terminal is. Every watch has an owner and every
 /// read names one, so there is one rule rather than an owned path and an
@@ -278,6 +277,13 @@ pub struct Subscriber {
     /// departure: the session is still pulling until its `SessionEnd`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsubscribed: bool,
+    /// Slack replies this reader has been told, or posted itself: channel ->
+    /// ts. A reply is told on whichever of the reader's watches reads it
+    /// first; any other watch holding it stays quiet. Kept while any watch
+    /// reads the channel: a watch started after that holds every older reply
+    /// in its silent first reading.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub told: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Watches {
@@ -381,8 +387,13 @@ impl Watches {
 
     /// Note what `owner` itself put into Slack, on each of its watches it
     /// could turn up in: a post on any watch of that conversation, a reaction
-    /// on the watched message it was added to.
+    /// on the watched message it was added to. A post also counts as told, so
+    /// no watch of the reader's, even a later one, tells it as a reply.
     pub fn receipt(&mut self, owner: &str, receipt: &Receipt, at: DateTime<Utc>) {
+        if let Receipt::Posted { channel, ts } = receipt {
+            let told = &mut self.meet(owner, at).told;
+            told.entry(channel.clone()).or_default().insert(ts.clone());
+        }
         for watch in self.watches.values_mut() {
             if !watch.owners.contains(owner) {
                 continue;
@@ -617,10 +628,6 @@ impl Watches {
         let mut fresh = Vec::new();
         for (reference, sighting) in sightings {
             let key = reference.key();
-            let heard = self
-                .watches
-                .get(&key)
-                .and_then(|watch| self.heard(watch, sighting, observed_at));
             let Some(watch) = self.watches.get_mut(&key) else {
                 // Expired while the poll was in flight.
                 continue;
@@ -644,17 +651,23 @@ impl Watches {
             let audience = watch.owners.clone();
             let read = reading(watch.seen.as_ref().map(|s| &s.standing), sighting);
             let stirred = !read.moved.is_empty();
-            // A Slack reply is told to each reader on one watch, not all.
-            let moved = match (heard, &read.standing) {
-                (Some(heard), Standing::Message { replies, .. }) => {
-                    let mut by_heard: BTreeMap<BTreeSet<String>, BTreeSet<String>> =
-                        BTreeMap::new();
-                    for (reader, new) in heard {
-                        by_heard.entry(new).or_default().insert(reader);
-                    }
-                    let replied = by_heard.into_iter().filter_map(|(new, readers)| {
-                        replied(replies, &new, &sighting.by).map(|moved| (moved, readers))
-                    });
+            // A first reading tells nothing and marks nothing told, so a reply
+            // it swallows is still told by whichever watch reads it next.
+            let moved = match (&watch.reference, &read.standing, &watch.seen) {
+                (
+                    Reference::SlackMessage { channel, .. },
+                    Standing::Message { replies, .. },
+                    Some(Seen {
+                        standing: Standing::Message { replies: held, .. },
+                        ..
+                    }),
+                ) => {
+                    let new = replies.keys().filter(|ts| !held.contains_key(*ts));
+                    let replied = untold(&mut self.subscribers, &audience, channel, new)
+                        .into_iter()
+                        .filter_map(|(new, readers)| {
+                            replied(replies, &new, &sighting.by).map(|moved| (moved, readers))
+                        });
                     let rest = read.moved.into_iter().filter(|m| m.axis != Axis::Replies);
                     replied
                         .chain(rest.map(|moved| (moved, audience.clone())))
@@ -723,82 +736,6 @@ impl Watches {
         }
         self.events.extend(fresh.iter().cloned());
         fresh
-    }
-
-    /// For a Slack message, the replies new to it that each of its readers is
-    /// told on it.
-    ///
-    /// Every watch keeps every reply that answers it, so one coming or going
-    /// loses or repeats nothing. A reader is told each reply once, on the
-    /// latest of *their own* watched messages it answers, among those already
-    /// read once — another session's watch never takes a reply from them. A
-    /// first reading tells only what one of the reader's other watches has
-    /// yet to see: it arrived since they last looked, and the baseline would
-    /// swallow it. Anything else was there when they asked.
-    fn heard(
-        &self,
-        watch: &Watch,
-        sighting: &Sighting,
-        now: DateTime<Utc>,
-    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
-        let (
-            Reference::SlackMessage {
-                channel,
-                ts,
-                thread,
-            },
-            Standing::Message { replies, .. },
-        ) = (&watch.reference, &sighting.standing)
-        else {
-            return None;
-        };
-        let held = |w: &Watch, reply: &str| {
-            matches!(&w.seen, Some(Seen { standing: Standing::Message { replies, .. }, .. })
-                if replies.contains_key(reply))
-        };
-        let root = thread.as_deref().unwrap_or(ts);
-        let new: Vec<&String> = replies.keys().filter(|r| !held(watch, r)).collect();
-        let heard = |reader: &String| {
-            let theirs: Vec<&Watch> = self
-                .watches
-                .values()
-                .filter(|w| {
-                    matches!(w.reference, Reference::SlackMessage { .. })
-                        && w.reference != watch.reference
-                        && w.owners.contains(reader)
-                        && w.seen.is_some()
-                        && w.deadline > now
-                        && !self.paused(w)
-                })
-                .collect();
-            new.iter()
-                .filter(|reply| {
-                    let context = sighting.by.threaded.contains(**reply).then_some(root);
-                    let answers =
-                        |w: &Watch| owner(channel, reply, context, [&w.reference]).is_some();
-                    let candidates = theirs.iter().map(|w| &w.reference);
-                    let latest = owner(
-                        channel,
-                        reply,
-                        context,
-                        candidates.chain([&watch.reference]),
-                    );
-                    // The read keeps only what answers this message, so a reply
-                    // no watch claims is still this one's.
-                    latest.is_none_or(|latest| latest == ts)
-                        && (watch.seen.is_some()
-                            || theirs.iter().any(|w| answers(w) && !held(w, reply)))
-                })
-                .map(|reply| (*reply).clone())
-                .collect()
-        };
-        Some(
-            watch
-                .owners
-                .iter()
-                .map(|reader| (reader.clone(), heard(reader)))
-                .collect(),
-        )
     }
 
     /// Count a reading that found each of these missing, and finish the
@@ -902,6 +839,7 @@ impl Watches {
                 pushes: Vec::new(),
                 departed: false,
                 unsubscribed: false,
+                told: BTreeMap::new(),
             });
         entry.seen_at = now;
         entry
@@ -1042,6 +980,19 @@ impl Watches {
             live
         });
         self.events.retain(|event| now - event.at < retention);
+        let read: BTreeSet<&str> = self
+            .watches
+            .values()
+            .filter_map(|watch| match &watch.reference {
+                Reference::SlackMessage { channel, .. } => Some(channel.as_str()),
+                _ => None,
+            })
+            .collect();
+        for subscriber in self.subscribers.values_mut() {
+            subscriber
+                .told
+                .retain(|channel, _| read.contains(channel.as_str()));
+        }
         // Quiet is only a reason to forget a reader with nothing left to
         // hear. One that owns a watch or is owed news keeps its cursor (and a
         // departed one its departure, or that watch would quietly resume).
@@ -1057,6 +1008,32 @@ impl Watches {
             subscribers: before.2 - self.subscribers.len(),
         }
     }
+}
+
+/// The replies in `new` each reader hasn't been told, now marked told,
+/// grouped so readers told the same ones share one event.
+fn untold<'a>(
+    subscribers: &mut BTreeMap<String, Subscriber>,
+    readers: &BTreeSet<String>,
+    channel: &str,
+    new: impl Iterator<Item = &'a String>,
+) -> BTreeMap<BTreeSet<String>, BTreeSet<String>> {
+    let new: Vec<&String> = new.collect();
+    let mut by_new: BTreeMap<BTreeSet<String>, BTreeSet<String>> = BTreeMap::new();
+    for reader in readers {
+        let mut told = BTreeSet::new();
+        let told = match subscribers.get_mut(reader) {
+            Some(subscriber) => subscriber.told.entry(channel.to_string()).or_default(),
+            None => &mut told,
+        };
+        let theirs = new
+            .iter()
+            .filter(|ts| told.insert((**ts).clone()))
+            .map(|ts| (*ts).clone())
+            .collect();
+        by_new.entry(theirs).or_default().insert(reader.clone());
+    }
+    by_new
 }
 
 /// Say when a watch pauses or resumes — once, at the change that did it,
@@ -2289,7 +2266,7 @@ mod tests {
     /// pattern. (`SessionAddress` keeps its fields private; it changes rarely.)
     #[allow(dead_code)]
     fn stored_shape(file: Watches, standing: Standing, axis: Axis, reference: Reference) {
-        const _: () = assert!(VERSION == 3, "update the patterns below for this version");
+        const _: () = assert!(VERSION == 4, "update the patterns below for this version");
         let Watches {
             version: _,
             watches,
@@ -2349,6 +2326,7 @@ mod tests {
                 pushes: _,
                 departed: _,
                 unsubscribed: _,
+                told: _,
             } = subscriber;
         }
         match standing {
@@ -2808,6 +2786,27 @@ mod tests {
         assert_eq!(watch.owners, ["a".to_string(), "b".to_string()].into());
         assert_eq!(watch.deadline, forever());
         assert!(watch.receipts["b"].posted.contains("1.1"));
+    }
+
+    #[test]
+    fn what_a_reader_was_told_in_a_channel_goes_once_nothing_reads_it() {
+        let posted = Receipt::Posted {
+            channel: "C0123ABCD".into(),
+            ts: "1786596060.000000".into(),
+        };
+        let mut watches = Watches::default();
+        watches.watch(&slack(), "a", now() + TimeDelta::hours(1), now());
+        watches.watch(&slack(), "b", forever(), now());
+        watches.receipt("a", &posted, now());
+        watches.unwatch(&slack(), "a");
+
+        // Another reader's watch still reads the channel.
+        watches.collect_garbage(now(), RETENTION);
+        assert!(!watches.subscribers["a"].told.is_empty());
+
+        watches.unwatch(&slack(), "b");
+        watches.collect_garbage(now(), RETENTION);
+        assert!(watches.subscribers["a"].told.is_empty());
     }
 
     #[test]
