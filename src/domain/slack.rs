@@ -144,6 +144,33 @@ pub fn later(ts: &str, than: &str) -> bool {
     matches!((ts_key(ts), ts_key(than)), (Some(a), Some(b)) if a > b)
 }
 
+/// The ts of the watched message a reply belongs to, so one reply is news
+/// once: the latest watched message in `channel` before it, and for a reply
+/// read from a thread (`thread` is its root) the latest in that thread.
+pub fn owner<'a>(
+    channel: &str,
+    reply: &str,
+    thread: Option<&str>,
+    watched: impl IntoIterator<Item = &'a Reference>,
+) -> Option<&'a str> {
+    watched
+        .into_iter()
+        .filter_map(|watched| match watched {
+            Reference::SlackMessage {
+                channel: c,
+                ts,
+                thread: t,
+            } if c == channel
+                && later(reply, ts)
+                && thread.is_none_or(|root| ts == root || t.as_deref() == Some(root)) =>
+            {
+                Some(ts.as_str())
+            }
+            _ => None,
+        })
+        .max_by_key(|ts| ts_key(ts))
+}
+
 /// The message a `chat.postMessage` call printed it had posted.
 ///
 /// The Web API's reply is a documented contract — `{"ok": true, "channel",
@@ -334,6 +361,45 @@ fn collect(value: &Value, out: &mut Vec<String>, depth: usize) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_reply_belongs_to_the_latest_watched_message_before_it() {
+        let msg = |channel: &str, ts: &str, thread: Option<&str>| Reference::SlackMessage {
+            channel: channel.into(),
+            ts: ts.into(),
+            thread: thread.map(Into::into),
+        };
+        let watched = [
+            msg("D0000000A", "1786596100.000000", None),
+            msg("D0000000A", "1786596300.000000", None),
+            msg("D0000000A", "1786596200.000000", Some("1786596100.000000")),
+            msg("D0000000A", "1786596400.000000", Some("1786596900.000000")),
+            msg("D0000000B", "1786596500.000000", None),
+            Reference::SlackChannel {
+                channel: "D0000000A".into(),
+                name: None,
+            },
+        ];
+        let root = Some("1786596100.000000");
+        let cases = [
+            // In the channel: the latest before it, whichever thread it is in.
+            ("1786596150.000000", None, Some("1786596100.000000")),
+            ("1786596350.000000", None, Some("1786596300.000000")),
+            ("1786596450.000000", None, Some("1786596400.000000")),
+            ("1786596050.000000", None, None),
+            // In a thread: only the root and the replies watched in it.
+            ("1786596150.000000", root, Some("1786596100.000000")),
+            ("1786596250.000000", root, Some("1786596200.000000")),
+            ("1786596950.000000", root, Some("1786596200.000000")),
+        ];
+        for (reply, thread, want) in cases {
+            assert_eq!(
+                owner("D0000000A", reply, thread, &watched),
+                want,
+                "{reply} in {thread:?}"
+            );
+        }
+    }
 
     fn message(channel: &str, ts: &str, thread: Option<&str>) -> Reference {
         Reference::SlackMessage {
