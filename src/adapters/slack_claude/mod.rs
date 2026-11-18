@@ -501,8 +501,10 @@ impl<R: Runner> SlackClaude<R> {
     /// Both reads go in one `claude -p`: a second tool call costs a turn, not
     /// another session.
     ///
-    /// `wanted` is the message being watched. A reply that leaves it out is a
-    /// model that dropped a row, not a deleted message, so it is retried.
+    /// `wanted` is the message being watched. A read that parsed but leaves
+    /// it out is gone: a deleted reply's thread still reads, with no error
+    /// code. A model that merely dropped the row looks the same, so the
+    /// caller must not end a watch on one such reading.
     pub fn activity(
         &self,
         channel_id: &str,
@@ -552,12 +554,12 @@ impl<R: Runner> SlackClaude<R> {
             &prompt,
             &[thread_tool, channel_tool],
             |raw| match parse_activity(raw) {
-                Ok(read) if !read.thread.iter().any(|e| e.ts == wanted) => {
-                    Err(Retry::Again(format!("the read left out {wanted}")))
-                }
                 Ok(read) if read.channel.is_none() => {
                     Err(Retry::Again("the read left out the channel".into()))
                 }
+                Ok(read) if !read.thread.iter().any(|e| e.ts == wanted) => Err(Retry::Fatal(
+                    format!("{GONE_MARK}: the read left out {wanted}"),
+                )),
                 Ok(read) => Ok(read),
                 Err(error) => Err(unparsed(raw, error)),
             },
