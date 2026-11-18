@@ -645,6 +645,13 @@ session posts. So a closed session kept paying for news nobody could hear.
   A missing address alone can't say, because a session without the hooks
   never had one. So `Subscriber::departed` is set when `detach` removes a real
   address and cleared by `attach` or by the reader registering a watch.
+- **A hook from an ended session attaches it again.** Only a live session
+  fires hooks, and the probe can be wrong: macOS refuses a connection to a
+  listener whose backlog is full exactly as it does to a dead one, so a live
+  session can read as ended. Its next prompt or tool call carries the socket,
+  and `prompt` and `post-tool` attach it again as `SessionStart` would. A
+  stale probe can't do it any more either: a tick detaches only the address it
+  probed, not one a resumed session attached meanwhile (both 2026-11-18).
 - **`cli` and readers that never attached are exempt.** Pausing is only safe
   when we *saw* the reader leave. The terminal has no session to end, and a
   session without the hooks gives no sign either way. Pausing their watches

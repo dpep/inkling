@@ -507,6 +507,11 @@ impl Watches {
         !watch.owners.is_empty() && watch.owners.iter().all(|owner| self.departed(owner))
     }
 
+    /// Whether the store has this reader as a session that ended.
+    pub fn ended(&self, subscriber: &str) -> bool {
+        self.departed(subscriber)
+    }
+
     fn departed(&self, owner: &str) -> bool {
         owner != TERMINAL
             && self
@@ -2350,6 +2355,18 @@ mod tests {
         watches.unwatch(&pr(3), "s-1");
         watches.collect_garbage(week, RETENTION);
         assert!(!watches.knows("s-1"));
+    }
+
+    #[test]
+    fn a_reader_has_ended_only_once_it_was_seen_to_leave() {
+        // What a hook asks before attaching a session again.
+        let mut watches = watching(State::Open);
+        assert!(!watches.ended("s-1"), "never attached");
+        ended(&mut watches, "s-1");
+        assert!(watches.ended("s-1"));
+        watches.attach("s-1", address("/tmp/s"), now());
+        assert!(!watches.ended("s-1"));
+        assert!(!watches.ended(TERMINAL));
     }
 
     #[test]

@@ -1602,8 +1602,12 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             unsubscribe(&input.session_id, common)?;
             Ok(())
         }
-        HookEvent::PostTool => post_tool(&input, config, common),
+        HookEvent::PostTool => {
+            revive(&input.session_id, config, common);
+            post_tool(&input, config, common)
+        }
         HookEvent::Prompt => {
+            revive(&input.session_id, config, common);
             // The pull leg, and the reason push is allowed to be lossy: if a
             // message was held or refused, this is where it turns up.
             let refresh = TimeDelta::seconds(60);
@@ -1872,6 +1876,22 @@ fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String>
     );
     ensure_serving(config, common, "subscribe");
     Ok(replaced)
+}
+
+/// Attach again a session the store has as ended. Only a live session fires
+/// hooks, and a probe can be wrong: macOS refuses a connection to a listener
+/// whose backlog is full exactly as it does to a dead one.
+fn revive(id: &str, config: &Config, common: &Common) {
+    if std::env::var_os(SOCKET_ENV).is_none() || !watch_store(common).read().ended(id) {
+        return;
+    }
+    match subscribe(id, config, common) {
+        Ok(_) => tracing::info!(
+            subscriber = id,
+            "a session taken for ended fired a hook; attached again"
+        ),
+        Err(error) => tracing::warn!(subscriber = id, error, "could not attach again"),
+    }
 }
 
 /// Detach the address, and only the address. Whatever this session is still

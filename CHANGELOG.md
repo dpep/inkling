@@ -36,6 +36,10 @@
   was dropped even while it owned a watch, so a `--ttl 30d` watch lost news still inside
   retention, and a session waiting quietly lost its push address. A reader is now kept while it
   owns a watch or is owed news, and a session that answers the server's probe counts as alive.
+- **A live session wrongly taken for ended comes back by itself.** A session resumed in the moment
+  between the server's probe and its write, or one whose socket refused a connection while busy,
+  was marked ended and its watches paused until its next `SessionStart`. The server now drops only
+  the address it actually probed, and the session's next prompt or tool call attaches it again.
 - **An ended session's watches are paused until it comes back.** Once every session watching
   something has ended, Inkling stops reading it, so a session you closed stops paying for Slack
   reads (about 2¢ each). `claude --resume` makes those watches due at once, and the first reading
