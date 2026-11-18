@@ -125,6 +125,10 @@ pub const PAGE_LIMIT: usize = 20;
 /// `slack_read_channel`'s maximum page.
 pub const CHANNEL_PAGE: usize = 100;
 
+/// `slack_read_thread`'s maximum page. It lists oldest first, so a thread
+/// longer than a page loses its newest replies, the ones that are news.
+const THREAD_PAGE: usize = 1000;
+
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
         Self::with_tools(runner, ToolNames::default())
@@ -527,7 +531,7 @@ impl<R: Runner> SlackClaude<R> {
              channel_id: {channel_id:?}\n\
              message_ts: {root_ts:?}\n\
              {from}\
-             limit: 100\n\
+             limit: {THREAD_PAGE}\n\
              response_format: \"detailed\"\n\n\
              Then call {channel_tool} with these exact arguments:\n\
              channel_id: {channel_id:?}\n\

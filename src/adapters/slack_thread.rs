@@ -283,6 +283,16 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_is_read_to_the_tools_maximum() {
+        // Oldest first, so a smaller page never reaches the newest replies.
+        let (slack, prompts) = threads(&[THREAD]);
+        let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        let prompt = &prompts.borrow()[0];
+        let thread = &prompt[..prompt.find("Then call").unwrap()];
+        assert!(thread.contains("limit: 1000\n"), "{thread}");
+    }
+
+    #[test]
     fn the_prompt_never_asks_for_what_a_message_says() {
         let (slack, prompts) = threads(&[THREAD]);
         let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
