@@ -822,6 +822,15 @@ to include it, and `ThreadEntry` has no field to hold it if the model adds some
 anyway), and a push says who, how many, which emoji, and the reference. To read
 what was said, the agent uses Slack itself — a step it chooses.
 
+Having no text field isn't enough on its own: the model has read the messages, so
+any field it writes that a push renders — a display name, an emoji — is
+somewhere a message could steer prose into (a bug hunt forged a whole
+`inkling:` line through a name, 2026-11-17). So `parse::sane` keeps only what
+has Slack's shape: a ts of exactly ten and six digits, a `U`/`W`/`B` id, a
+name of letters, digits, `._- ` up to 40 characters (or none, and the id is
+said instead), an emoji of `a-z0-9_+-':` up to 64. An entry with a bad ts or id
+is dropped.
+
 **Your own replies are receipts — "own" is what this session posted.** Changed
 2026-11-17. The first rule was by author: a reply whose author was the user the
 credentials belong to was a receipt. But the Slack MCP posts *as the user*, so

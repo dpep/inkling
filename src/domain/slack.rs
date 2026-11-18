@@ -79,7 +79,8 @@ fn ts_from_permalink(segment: &str) -> Option<String> {
         return None;
     }
     let (seconds, micros) = digits.split_at(digits.len() - 6);
-    Some(format!("{seconds}.{micros}"))
+    let ts = format!("{seconds}.{micros}");
+    is_ts(&ts).then_some(ts)
 }
 
 /// `C`, `D` or `G` and uppercase alphanumerics — a conversation, not a person.
@@ -99,7 +100,7 @@ pub fn is_dm(channel: &str) -> bool {
 }
 
 /// A user id, which `slack_send_message` accepts as a channel to DM them.
-fn is_user(id: &str) -> bool {
+pub fn is_user(id: &str) -> bool {
     id.len() >= 9
         && id.starts_with(['U', 'W'])
         && id
@@ -107,8 +108,12 @@ fn is_user(id: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
+/// Exactly the form Slack writes: ten digits of seconds, six of micros. Any
+/// other spelling of the same instant would be a second watch of it.
 pub fn is_ts(ts: &str) -> bool {
-    ts_key(ts).is_some()
+    ts.split_once('.')
+        .is_some_and(|(seconds, _)| seconds.len() == 10 && !seconds.starts_with('0'))
+        && ts_key(ts).is_some()
 }
 
 /// A ts as something that orders. Compared as numbers, not strings or
@@ -116,7 +121,8 @@ pub fn is_ts(ts: &str) -> bool {
 /// ts has ten digits of seconds.
 pub fn ts_key(ts: &str) -> Option<(u64, u32)> {
     let (seconds, micros) = ts.split_once('.')?;
-    if micros.len() != 6 {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if micros.len() != 6 || !digits(seconds) || !digits(micros) {
         return None;
     }
     Some((seconds.parse().ok()?, micros.parse().ok()?))
@@ -316,6 +322,10 @@ mod tests {
             "https://acme.slack.com/archives/C0123ABCD/p123",
             "https://acme.slack.com/archives/general/p1786596050245879",
             "slack:C0123ABCD/1786596050",
+            // Another spelling of a ts would be a second watch of one message.
+            "slack:C0123ABCD/+1786596050.245879",
+            "slack:C0123ABCD/0001786596050.245879",
+            "https://acme.slack.com/archives/C0123ABCD/p99999999999999999999999",
         ] {
             assert_eq!(parse_reference(arg), None, "{arg}");
             assert!(looks_like_slack(arg), "{arg}");

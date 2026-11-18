@@ -157,7 +157,10 @@ mod tests {
             prompts: prompts.clone(),
         };
         let slack = SlackClaude::new(runner).without_delay();
-        (SlackThreads::new(slack, || Some("U9".into())), prompts)
+        (
+            SlackThreads::new(slack, || Some("U00000009".into())),
+            prompts,
+        )
     }
 
     fn message(channel: &str, ts: &str, thread: Option<&str>) -> Reference {
@@ -206,11 +209,11 @@ mod tests {
     /// Invented: this workspace has no channel message that @mentions anyone
     /// to record, so the shape is the prompt's, not a transcript's.
     const CHANNEL: &str = r#"{"messages":[
-        {"ts":"1786596000.123456","user_id":"U9","user_name":"dpepper","reactions":{}}
+        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"dpepper","reactions":{}}
     ],"channel":[
-        {"ts":"1786596100.000001","user_id":"U1","user_name":"alice","mentions":["U9"]},
-        {"ts":"1786596200.000001","user_id":"U2","user_name":"bob","mentions":[]},
-        {"ts":"1786596300.000001","user_id":"U3","user_name":"carol","mentions":["U7"]}
+        {"ts":"1786596100.000001","user_id":"U00000001","user_name":"alice","mentions":["U00000009"]},
+        {"ts":"1786596200.000001","user_id":"U00000002","user_name":"bob","mentions":[]},
+        {"ts":"1786596300.000001","user_id":"U00000003","user_name":"carol","mentions":["U00000007"]}
     ]}"#;
 
     #[test]
@@ -226,14 +229,14 @@ mod tests {
         assert!(prompts.borrow()[0].contains("slack_read_channel"));
         assert_eq!(
             status.replies,
-            BTreeMap::from([("1786596100.000001".into(), "U1".into())])
+            BTreeMap::from([("1786596100.000001".into(), "U00000001".into())])
         );
     }
 
     const THREAD: &str = r#"{"messages":[
-        {"ts":"1786596000.123456","user_id":"U9","user_name":"dpepper","reactions":{}},
-        {"ts":"1786596050.245879","user_id":"U1","user_name":"alice","reactions":{"eyes":1}},
-        {"ts":"1786596060.000001","user_id":"U2","user_name":"bob","reactions":{}}
+        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"dpepper","reactions":{}},
+        {"ts":"1786596050.245879","user_id":"U00000001","user_name":"alice","reactions":{"eyes":1}},
+        {"ts":"1786596060.000001","user_id":"U00000002","user_name":"bob","reactions":{}}
     ],"channel":[]}"#;
 
     #[test]
@@ -246,7 +249,7 @@ mod tests {
         assert_eq!(status.reactions, BTreeMap::from([("eyes".into(), 1)]));
         assert_eq!(
             status.replies,
-            BTreeMap::from([("1786596060.000001".into(), "U2".into())])
+            BTreeMap::from([("1786596060.000001".into(), "U00000002".into())])
         );
     }
 
@@ -261,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_read_that_drops_the_watched_message_is_retried() {
-        let dropped = r#"{"messages":[{"ts":"1786596060.000001","user_id":"U2","reactions":{}}],"channel":[]}"#;
+        let dropped = r#"{"messages":[{"ts":"1786596060.000001","user_id":"U00000002","reactions":{}}],"channel":[]}"#;
         let (slack, prompts) = threads(&[dropped, THREAD]);
         let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
         assert!(read.unwrap()[0].1.is_ok());
@@ -327,7 +330,9 @@ mod tests {
     #[test]
     fn a_full_page_is_more_whether_or_not_the_model_says_so() {
         let page: Vec<String> = (0..100)
-            .map(|n| format!(r#"{{"ts":"1794976{n:03}.000001","user_id":"U1","user_name":"a"}}"#))
+            .map(|n| {
+                format!(r#"{{"ts":"1794976{n:03}.000001","user_id":"U00000001","user_name":"a"}}"#)
+            })
             .collect();
         let raw = format!(r#"{{"channel":[{}],"more":false}}"#, page.join(","));
         let (slack, _) = threads(&[&raw]);
@@ -353,11 +358,11 @@ mod tests {
         };
         let slack = SlackThreads::new(SlackClaude::new(runner), move || {
             counted.set(counted.get() + 1);
-            Some("U9".into())
+            Some("U00000009".into())
         });
         assert_eq!(asked.get(), 0);
-        assert_eq!(slack.me().as_deref(), Some("U9"));
-        assert_eq!(slack.me().as_deref(), Some("U9"));
+        assert_eq!(slack.me().as_deref(), Some("U00000009"));
+        assert_eq!(slack.me().as_deref(), Some("U00000009"));
         assert_eq!(asked.get(), 1);
     }
 }
