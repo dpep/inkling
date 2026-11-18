@@ -191,6 +191,15 @@ impl<R: Runner> SlackClaude<R> {
 const GONE: [&str; 3] = ["thread_not_found", "message_not_found", "channel_not_found"];
 const GONE_MARK: &str = "gone";
 
+/// A reply that didn't parse: Slack saying the thing is gone, or a model to
+/// ask again. Only then — a good read can carry a code in a display name.
+fn unparsed(raw: &str, error: String) -> Retry {
+    match GONE.iter().any(|code| raw.contains(code)) {
+        true => Retry::Fatal(format!("{GONE_MARK}: {}", raw.trim())),
+        false => Retry::Again(error),
+    }
+}
+
 /// Why a thread couldn't be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityError {
@@ -530,11 +539,10 @@ impl<R: Runner> SlackClaude<R> {
              Do not include message text.\n\
              If a tool fails, output only its error code.",
         );
-        self.attempt(&prompt, &[thread_tool, channel_tool], |raw| {
-            if GONE.iter().any(|code| raw.contains(code)) {
-                return Err(Retry::Fatal(format!("{GONE_MARK}: {}", raw.trim())));
-            }
-            match parse_activity(raw) {
+        self.attempt(
+            &prompt,
+            &[thread_tool, channel_tool],
+            |raw| match parse_activity(raw) {
                 Ok(read) if !read.thread.iter().any(|e| e.ts == wanted) => {
                     Err(Retry::Again(format!("the read left out {wanted}")))
                 }
@@ -542,9 +550,9 @@ impl<R: Runner> SlackClaude<R> {
                     Err(Retry::Again("the read left out the channel".into()))
                 }
                 Ok(read) => Ok(read),
-                Err(error) => Err(Retry::Again(error)),
-            }
-        })
+                Err(error) => Err(unparsed(raw, error)),
+            },
+        )
         .map_err(|error| match error.starts_with(GONE_MARK) {
             true => ActivityError::Gone(error),
             false => ActivityError::Failed(error),
@@ -584,16 +592,13 @@ impl<R: Runner> SlackClaude<R> {
              If the tool fails, output only its error code.",
         );
         self.attempt(&prompt, &[tool], |raw| {
-            if GONE.iter().any(|code| raw.contains(code)) {
-                return Err(Retry::Fatal(format!("{GONE_MARK}: {}", raw.trim())));
-            }
             parse_channel_read(raw)
                 .map(|mut read| {
                     // A full page is more whether or not the model said so.
                     read.more |= read.channel.len() >= limit;
                     read
                 })
-                .map_err(Retry::Again)
+                .map_err(|error| unparsed(raw, error))
         })
         .map_err(|error| match error.starts_with(GONE_MARK) {
             true => ActivityError::Gone(error),

@@ -280,6 +280,24 @@ mod tests {
     }
 
     #[test]
+    fn an_error_code_inside_a_good_read_is_not_an_error() {
+        // A display name that happens to spell one would otherwise end the
+        // watch, now that gone finishes it.
+        let named = THREAD.replace("\"bob\"", "\"message_not_found\"");
+        let (slack, _) = threads(&[&named]);
+        let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
+        assert!(read.unwrap()[0].1.is_ok());
+
+        let channel = REAL_CHANNEL_READ.replace("\"dpepper\"", "\"channel_not_found\"");
+        let (slack, _) = threads(&[&channel]);
+        assert!(
+            slack
+                .channel("D1MG8KWNR", Some("1771013015.064589"))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn a_channel_read_is_one_read_channel_from_where_the_last_one_ended() {
         let (slack, prompts) = threads(&[REAL_CHANNEL_READ]);
         let status = slack
