@@ -314,10 +314,6 @@ pub struct Actors {
     pub merged: Option<String>,
     /// Slack user id → the name a push says, for whoever a reading met.
     pub names: BTreeMap<String, String>,
-    /// Which of a Slack message's replies were read from its thread rather
-    /// than the channel after it, which decides the watched messages a reply
-    /// can be news on (`domain::slack::owner`).
-    pub threaded: BTreeSet<String>,
     /// The GitHub `@login` the credentials belong to, spelled as a pull
     /// request's actors are. Slack has no equivalent: the Slack MCP posts as
     /// the user, so who wrote a message can't say whether the session did —

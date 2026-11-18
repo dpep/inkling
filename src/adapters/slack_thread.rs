@@ -114,9 +114,6 @@ impl<R: Runner> SlackThreads<R> {
             // A reply's replies are the ones after it: a thread is one
             // conversation, and what came before was already there.
             if later(&entry.ts, ts) {
-                if in_thread.contains(&entry.ts) {
-                    status.threaded.insert(entry.ts.clone());
-                }
                 status.replies.insert(entry.ts, entry.user_id);
             }
         }
@@ -303,9 +300,9 @@ mod tests {
     ]}"#;
 
     #[test]
-    fn every_later_message_is_kept_and_the_threaded_ones_say_so() {
+    fn every_later_message_is_kept() {
         // Who is told about which is decided when it is recorded, so the read
-        // keeps every reply, and where it came from.
+        // keeps every reply.
         let (slack, _) = threads(&[DM]);
         let root = message("D0000000A", "1786596000.123456", None);
         let status = slack.read(&[root]).unwrap()[0].1.clone().unwrap();
@@ -318,10 +315,6 @@ mod tests {
                 "1786596100.000001",
                 "1786596200.000001",
             ]
-        );
-        assert_eq!(
-            status.threaded,
-            ["1786596050.245879".into(), "1786596060.000001".into()].into()
         );
     }
 

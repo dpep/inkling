@@ -9,7 +9,7 @@ use crate::domain::wait::CheckState;
 use crate::domain::watch::{Actors, Category, Discussion, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 /// Where to look for messages.
 ///
@@ -206,9 +206,6 @@ pub struct MessageStatus {
     /// Every reply after it — in its thread, or the conversation's later
     /// messages that answer it: ts → the user id that wrote it.
     pub replies: BTreeMap<String, String>,
-    /// Which of `replies` were read from its thread; the rest are later
-    /// messages in the channel.
-    pub threaded: BTreeSet<String>,
     /// User id → name, for everyone the read met, so a push names people.
     pub names: BTreeMap<String, String>,
 }

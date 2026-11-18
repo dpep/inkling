@@ -422,7 +422,6 @@ impl Poller<'_> {
                                     head: None,
                                     by: Actors {
                                         names: status.names,
-                                        threaded: status.threaded,
                                         ..Actors::default()
                                     },
                                     discussion: None,
