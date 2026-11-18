@@ -119,12 +119,7 @@ fn parse_short_ref(arg: &str, hosts: &[String]) -> Option<Reference> {
     hosts
         .iter()
         .any(|h| h.to_lowercase() == host)
-        .then(|| Reference::GitHubPullRequest {
-            host,
-            owner: (*owner).to_string(),
-            repo: (*repo).to_string(),
-            number,
-        })
+        .then(|| Reference::pull_request(&host, owner, repo, number))
 }
 
 /// `2`, `#2`, `inkling#2`, or `dpep/inkling#2` — everything short of a host.
@@ -445,14 +440,9 @@ fn as_pull_request(iri: &iriq::Identifier, hosts: &[String]) -> Option<Reference
         return None;
     }
     match iri.path_segments.as_slice() {
-        [owner, repo, kind, number, ..] if kind.as_str() == "pull" => {
-            Some(Reference::GitHubPullRequest {
-                host,
-                owner: owner.clone(),
-                repo: repo.clone(),
-                number: number.parse().ok()?,
-            })
-        }
+        [owner, repo, kind, number, ..] if kind.as_str() == "pull" => Some(
+            Reference::pull_request(&host, owner, repo, number.parse().ok()?),
+        ),
         _ => None,
     }
 }

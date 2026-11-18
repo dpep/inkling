@@ -9,6 +9,10 @@
 - **One slow Jira issue no longer costs the others their reading.** An `acli` call that timed out
   threw away every issue read that poll; now only that issue fails. Issues are read four at a
   time rather than one after another, so a pull request read in the same poll waits less.
+- **One pull request typed in two letter cases is one watch.** `cli/cli#1` and `CLI/Cli#1` were
+  two watches, each reporting every change. Pull requests are now named in lowercase. A watch
+  made before this keeps its old spelling until it ends, so retyping it in another case can
+  still make a second one.
 <!-- /fix2-github-jira -->
 
 - **A watch on something that isn't there any more ends, once.** A Slack message that was

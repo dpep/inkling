@@ -119,12 +119,7 @@ fn pushed_pulls(pushes: &[Pushed], response: &PushResponse) -> Vec<(usize, Refer
                 if !head.is(&push.repository(), &push.branch) {
                     continue;
                 }
-                let reference = Reference::GitHubPullRequest {
-                    host: push.host.clone(),
-                    owner: owner.to_string(),
-                    repo: repo.to_string(),
-                    number: pull.number,
-                };
+                let reference = Reference::pull_request(&push.host, owner, repo, pull.number);
                 found.push((i, reference, head));
             }
         }

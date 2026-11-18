@@ -99,6 +99,17 @@ pub enum Reference {
 }
 
 impl Reference {
+    /// A pull request, lowercased: GitHub ignores case in all three, and the
+    /// key is case-sensitive, so `CLI/Cli#1` and `cli/cli#1` must spell alike.
+    pub fn pull_request(host: &str, owner: &str, repo: &str, number: u64) -> Self {
+        Reference::GitHubPullRequest {
+            host: host.to_lowercase(),
+            owner: owner.to_lowercase(),
+            repo: repo.to_lowercase(),
+            number,
+        }
+    }
+
     /// What makes two references one watch: the display form, except that a
     /// channel is its id whether or not its name is known yet.
     pub fn key(&self) -> String {

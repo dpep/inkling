@@ -1158,12 +1158,9 @@ fn complete(
 ) -> Result<inkling::domain::model::Reference, String> {
     match (owner, repo) {
         (Some(owner), Some(repo)) => match hosts.first() {
-            Some(host) => Ok(inkling::domain::model::Reference::GitHubPullRequest {
-                host: host.clone(),
-                owner,
-                repo,
-                number,
-            }),
+            Some(host) => Ok(inkling::domain::model::Reference::pull_request(
+                host, &owner, &repo, number,
+            )),
             None => Err(format!(
                 "{owner}/{repo}#{number}: no github host is configured — give the full reference"
             )),
@@ -3079,6 +3076,25 @@ mod tests {
             "github.com/dpep/inkling/pull/3",
             "github.com/dpep/inkling#3",
             "dpep/inkling#3",
+        ] {
+            for (command, resolved) in each_command(target, &[]) {
+                assert_eq!(
+                    resolved.as_deref(),
+                    Ok("github.com/dpep/inkling#3"),
+                    "{command} {target}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_pull_request_typed_in_any_case_is_one_reference() {
+        // GitHub ignores case in owner and repo; two keys would be two
+        // watches reporting every transition twice.
+        for target in [
+            "https://GitHub.com/DPep/Inkling/pull/3",
+            "github.com/dpep/INKLING#3",
+            "DPEP/inkling#3",
         ] {
             for (command, resolved) in each_command(target, &[]) {
                 assert_eq!(
