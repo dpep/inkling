@@ -10,7 +10,7 @@ use inkling::app::{Report, Run};
 use inkling::config::Config;
 use inkling::config_edit;
 use inkling::obs;
-use inkling::ports::{Clock, SystemClock};
+use inkling::ports::{Clock, StoreError, SystemClock};
 use inkling::secret::Secret;
 use std::path::PathBuf;
 
@@ -589,22 +589,29 @@ fn run(cli: &Cli) -> Result<i32, String> {
         Command::Status => {
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let now = Utc::now();
-            let watched = watch_store(&cli.common).read();
-            let live = watched
-                .watches
-                .values()
-                .filter(|w| w.deadline > now)
-                .count();
-            let paused = watched
-                .watches
-                .values()
-                .filter(|w| w.deadline > now && watched.paused(w))
-                .count();
-            println!("watching    {live}");
-            if paused > 0 {
-                println!("  paused    {paused} (every reader's session has ended)");
+            // A newer build's store reads as empty, and zeros here would send
+            // someone to watch everything again.
+            let watched = watch_store(&cli.common).read_current();
+            match &watched {
+                Ok(watched) => {
+                    let live = watched
+                        .watches
+                        .values()
+                        .filter(|w| w.deadline > now)
+                        .count();
+                    let paused = watched
+                        .watches
+                        .values()
+                        .filter(|w| w.deadline > now && watched.paused(w))
+                        .count();
+                    println!("watching    {live}");
+                    if paused > 0 {
+                        println!("  paused    {paused} (every reader's session has ended)");
+                    }
+                    println!("  events    {} in the last day", watched.events.len());
+                }
+                Err(error) => println!("watching    unknown: {}", refused_store(error)),
             }
-            println!("  events    {} in the last day", watched.events.len());
 
             println!();
             serve_out(&inkling::serve::read_status(&serve_config(
@@ -612,8 +619,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 &cli.common,
             )));
 
-            println!();
-            subscribers_out(&watched, now);
+            if let Ok(watched) = &watched {
+                println!();
+                subscribers_out(watched, now);
+            }
 
             println!();
             println!("github      {}", credentials(&config));
@@ -698,7 +707,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
             // that stood down when the last one finished.
             ensure_serving(&config, &cli.common, "watch");
 
-            watch_out(&watches.read(), &owner, clock.now(), *json)?;
+            let listed = watches.read_current().map_err(|e| refused_store(&e))?;
+            watch_out(&listed, &owner, clock.now(), *json)?;
             // The good references are watched either way; the exit code is
             // where a script learns that one of its arguments was not, or
             // couldn't be read.
@@ -1968,6 +1978,17 @@ fn tildify(path: &std::path::Path) -> String {
             }
         }
         _ => text,
+    }
+}
+
+/// Why the watch store can't be shown, in the terms that say what to do.
+fn refused_store(error: &StoreError) -> String {
+    match error {
+        StoreError::FutureVersion { found } => format!(
+            "the watch store was written by a newer build (v{found}); this is v{}",
+            inkling::adapters::watches_json::VERSION
+        ),
+        other => other.to_string(),
     }
 }
 

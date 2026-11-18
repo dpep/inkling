@@ -1018,27 +1018,34 @@ impl WatchStore {
     /// stopped noticing anything" and "nothing is being watched" looked
     /// identical, which is the one pair of states worth telling apart.
     pub fn read(&self) -> Watches {
+        self.read_current().unwrap_or_default()
+    }
+
+    /// `read`, except that a newer build's file is `FutureVersion` rather than
+    /// empty: for a caller that reports what the store holds, where empty
+    /// would tell someone to watch everything again.
+    pub fn read_current(&self) -> Result<Watches, StoreError> {
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Watches::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Watches::default()),
             Err(error) => {
                 tracing::warn!(%error, path = %self.path.display(), "cannot read the watch store");
-                return Watches::default();
+                return Ok(Watches::default());
             }
         };
         match parse(&raw) {
-            Ok(watches) => watches,
+            Ok(watches) => Ok(watches),
             Err(Unparsed::Newer(found)) => {
                 tracing::warn!(
                     found,
                     supported = VERSION,
                     "the watch store is from a newer build; reading it as empty"
                 );
-                Watches::default()
+                Err(StoreError::FutureVersion { found })
             }
             Err(Unparsed::Broken(error)) => {
                 tracing::warn!(%error, "the watch store is unreadable; reading it as empty");
-                Watches::default()
+                Ok(Watches::default())
             }
         }
     }
@@ -2264,6 +2271,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), newer, "untouched");
         assert!(!path.with_extension("corrupt-0").exists());
         assert!(store.read().watches.is_empty(), "and reads as nothing");
+        assert!(
+            matches!(store.read_current(), Err(StoreError::FutureVersion { found }) if found == VERSION + 1),
+            "except to a caller that reports what it holds"
+        );
     }
 
     #[test]

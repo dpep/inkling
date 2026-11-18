@@ -384,8 +384,10 @@ baseline, `departed`, `tried_at`, `own`).
   next hook — the installed build — starts the right server. If the launch path
   *was* replaced, `replaced` wins and hands off as usual.
 - **A downgrade is loud, not lossy.** Every write from the older build fails
-  with `the watch store is from version N` and reads see nothing, until a
-  build at least as new is installed again. Nothing is set aside.
+  with `the watch store is from version N` and the hooks see nothing, until a
+  build at least as new is installed again. Nothing is set aside. `status` and
+  the `watch` list say `written by a newer build (vN); this is vM` rather than
+  showing an empty store, which would read as "watch everything again".
 - **What makes the rule hold is a tripwire.** The bug was a missed bump, not a
   missing rule. `watches_json::tests::stored_shape` destructures every stored
   type and matches every stored enum without a wildcard, so a new field or
