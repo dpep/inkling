@@ -549,7 +549,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let id = session_id(session.as_deref())?;
             match unsubscribe(&id, &cli.common, true)? {
                 true => println!("unsubscribed {}", short(&id)),
-                false => println!("{}: not attached; nothing to unsubscribe", short(&id)),
+                false => println!("{}: not subscribed; nothing to unsubscribe", short(&id)),
             }
             Ok(0)
         }

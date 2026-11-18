@@ -893,14 +893,15 @@ impl Watches {
     }
 
     /// Mute: stop pushing because the session asked to. It keeps its address,
-    /// so it is still probed and its end still noticed. Reports whether there
-    /// was an attached session to mute.
+    /// so it is still probed and its end still noticed. A session without one
+    /// is muted too: a probe may have taken it for gone, and its next hook
+    /// attaches it again. Reports whether there was a session to mute.
     pub fn unsubscribe(&mut self, subscriber: &str) -> bool {
         let Some(entry) = self.subscribers.get_mut(subscriber) else {
             return false;
         };
-        entry.unsubscribed |= entry.address.is_some();
-        entry.address.is_some()
+        entry.unsubscribed = true;
+        true
     }
 
     /// Push to this session again.
@@ -986,18 +987,23 @@ impl Watches {
             live
         });
         self.events.retain(|event| now - event.at < retention);
-        let read: BTreeSet<&str> = self
-            .watches
-            .values()
-            .filter_map(|watch| match &watch.reference {
-                Reference::SlackMessage { channel, .. } => Some(channel.as_str()),
-                _ => None,
-            })
-            .collect();
+        // A reply only counts for a watch it comes after, so one older than
+        // every live watch in its channel can never be told again.
+        let mut oldest: BTreeMap<&str, &str> = BTreeMap::new();
+        for watch in self.watches.values() {
+            if let Reference::SlackMessage { channel, ts, .. } = &watch.reference {
+                let at = oldest.entry(channel.as_str()).or_insert(ts.as_str());
+                *at = (*at).min(ts.as_str());
+            }
+        }
         for subscriber in self.subscribers.values_mut() {
-            subscriber
-                .told
-                .retain(|channel, _| read.contains(channel.as_str()));
+            subscriber.told.retain(|channel, told| {
+                let Some(oldest) = oldest.get(channel.as_str()) else {
+                    return false;
+                };
+                told.retain(|ts| ts.as_str() >= *oldest);
+                !told.is_empty()
+            });
         }
         // Quiet is only a reason to forget a reader with nothing left to
         // hear. One that owns a watch or is owed news keeps its cursor (and a
@@ -2638,14 +2644,38 @@ mod tests {
     }
 
     #[test]
-    fn unsubscribing_an_ended_session_changes_nothing() {
-        // Found by the hunt: it un-paused the ended session's watches.
+    fn unsubscribing_a_session_taken_for_ended_mutes_it_and_leaves_it_paused() {
+        // A probe can take a live session for gone; its unsubscribe must
+        // still hold when its next hook attaches it again. An ended session's
+        // watches stay paused (a hunt found them un-paused).
         let mut watches = watching(State::Open);
         watches.attach("s-1", address("/tmp/s"), now());
         watches.detach("s-1");
-        assert!(!watches.unsubscribe("s-1"));
-        assert!(!watches.subscribers["s-1"].unsubscribed);
+        assert!(watches.unsubscribe("s-1"));
         assert!(watches.paused(&watches.watches[&pr(3).key()]));
+
+        watches.attach("s-1", address("/tmp/s"), now());
+        assert!(watches.subscribers["s-1"].unsubscribed);
+    }
+
+    #[test]
+    fn a_reply_older_than_every_live_watch_in_its_channel_is_forgotten() {
+        // Own posts went into the told set and stayed while any watch read
+        // the channel. A reply only counts for a watch it comes after.
+        let mut watches = Watches::default();
+        watches.watch(&slack(), "a", forever(), now());
+        for ts in ["1786596000.000000", "1786596060.000000"] {
+            let posted = Receipt::Posted {
+                channel: "C0123ABCD".into(),
+                ts: ts.into(),
+            };
+            watches.receipt("a", &posted, now());
+        }
+        watches.collect_garbage(now(), RETENTION);
+        assert_eq!(
+            watches.subscribers["a"].told["C0123ABCD"],
+            BTreeSet::from(["1786596060.000000".to_string()])
+        );
     }
 
     #[test]
