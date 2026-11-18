@@ -6,6 +6,11 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- After the DM rule landed, the user's earlier top-level DM message arrived at the next prompt as
+  `slack:D1MG8KWNR/1794976101.418449 | replies 0 → 1 by @dpepper`: not pushed (own), shown by the
+  prompt hook. Right on both counts: "own" on Slack means the user's identity, which covers a
+  reply typed on their phone that the session can't otherwise know about. A receipt for the
+  agent's own post would read the same; cheap enough at a prompt to leave as is.
 - Pausing an ended session's watches, live against scratch paths with a fake socket: `unsubscribe`
   logged `watch paused` once; a server started with only that watch did no reads and stood down
   idle after 30s (`idle_after = "20s"`), though the schedule had it due; `subscribe` logged
