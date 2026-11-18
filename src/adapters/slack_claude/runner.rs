@@ -180,6 +180,10 @@ impl Runner for ClaudeRunner {
 pub fn extract_result(stdout: &str) -> Result<String, RunnerError> {
     let envelope: serde_json::Value =
         serde_json::from_str(stdout).map_err(|e| RunnerError::Envelope(e.to_string()))?;
+    // Every call is paid, a failed one too; `inkling status` sums this field.
+    if let Some(cost) = cost(&envelope) {
+        tracing::info!(total_cost_usd = cost, "bridge call");
+    }
 
     if envelope.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
         return Err(RunnerError::Envelope(
@@ -195,6 +199,13 @@ pub fn extract_result(stdout: &str) -> Result<String, RunnerError> {
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .ok_or_else(|| RunnerError::Envelope("envelope had no result field".into()))
+}
+
+/// What the call cost, in dollars, to a hundredth of a cent: the
+/// envelope reports more digits than a bill would.
+fn cost(envelope: &serde_json::Value) -> Option<f64> {
+    let usd = envelope.get("total_cost_usd")?.as_f64()?;
+    Some((usd * 10_000.0).round() / 10_000.0)
 }
 
 #[cfg(test)]
@@ -271,6 +282,13 @@ mod tests {
         let stdout =
             r#"{"type":"result","subtype":"success","total_cost_usd":0.08,"result":"hello"}"#;
         assert_eq!(extract_result(stdout).unwrap(), "hello");
+    }
+
+    #[test]
+    fn what_a_call_cost_is_read_to_four_places() {
+        let envelope = serde_json::json!({"total_cost_usd": 0.021_349_87, "result": "x"});
+        assert_eq!(cost(&envelope), Some(0.0213));
+        assert_eq!(cost(&serde_json::json!({"result": "x"})), None);
     }
 
     #[test]
