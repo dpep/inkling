@@ -124,6 +124,15 @@ pub enum Axis {
 }
 
 impl Axis {
+    /// The axis a reference's own standing moves on, which is where its end
+    /// (`watched → gone`) is said too.
+    pub fn of(reference: &Reference) -> Axis {
+        match reference {
+            Reference::JiraIssue { .. } => Axis::Status,
+            _ => Axis::State,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Axis::State => "state",
@@ -973,6 +982,17 @@ impl std::str::FromStr for Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_jira_issue_stands_on_its_status_and_the_rest_on_their_state() {
+        let jira = Reference::JiraIssue { key: "AI-7".into() };
+        assert_eq!(Axis::of(&jira), Axis::Status);
+        let channel = Reference::SlackChannel {
+            channel: "C1".into(),
+            name: None,
+        };
+        assert_eq!(Axis::of(&channel), Axis::State);
+    }
 
     #[test]
     fn a_state_change_says_who_caused_it() {
