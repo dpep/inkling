@@ -1396,6 +1396,7 @@ and cursor move writes its own. Read them with `inkling logs -g polled` or
 
 ```
 polled watches why="serve" watched=5 github=4 jira=1 slack=0 read=5 events=1 failures=0 elapsed_ms=412
+polled watches why="serve-slack" watched=1 github=0 jira=0 slack=1 read=1 events=0 failures=0 elapsed_ms=21480
 transition reference="github.com/dpep/inkling#3" axis="checks" from="pending" to="failure" seq=7 audience=1
 watch registered reference="github.com/dpep/inkling#3" owner="abc-123" deadline="2026-09-21T20:44:00Z"
 subscribed subscriber="abc-123" socket="/tmp/cc-socks/9317.sock" reattached=false
