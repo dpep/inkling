@@ -5,6 +5,7 @@
 //! at 2am is worth more than query support. The `Store` trait is the seam if
 //! that stops being true.
 
+use crate::adapters::lock::FileLock;
 use crate::domain::model::{MessageId, ReactionName};
 use crate::domain::model::{Reference, State};
 use crate::ports::StoreError;
@@ -133,6 +134,21 @@ impl JsonStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Change a cached value under the run lock: load, change, save. Nothing
+    /// slow belongs inside `change` — do the lookup first, then this.
+    ///
+    /// Doesn't wait for a run, which holds the lock for minutes: a cache that
+    /// can't be written costs a lookup next time, nothing more.
+    pub fn update<T>(&self, change: impl FnOnce(&mut Snapshot) -> T) -> Result<T, StoreError> {
+        let _lock = FileLock::try_acquire(&FileLock::path_for(&self.path))
+            .map_err(|e| StoreError::Write(e.to_string()))?
+            .ok_or(StoreError::Busy { waited_ms: 0 })?;
+        let mut snapshot = self.load()?;
+        let outcome = change(&mut snapshot);
+        self.save(&snapshot)?;
+        Ok(outcome)
     }
 
     /// Move a file we can't read out of the way rather than overwriting it —
@@ -313,6 +329,54 @@ mod tests {
         let store = JsonStore::new(dir.file());
         store.save(&Snapshot::default()).unwrap();
         assert!(!dir.file().with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn a_cache_write_keeps_what_another_writer_saved_meanwhile() {
+        // Found by the hunt: `watch slack:#new` loaded the state, spent a
+        // bridge call resolving the channel, and saved its stale copy over
+        // whatever `inkling run` had written in between — ledger included.
+        let dir = TempDir::new("merge");
+        let store = JsonStore::new(dir.file());
+        let stale = store.load().unwrap();
+        let mut ran = stale.clone();
+        ran.tracked.insert(tracked().key(), tracked());
+        store.save(&ran).unwrap();
+
+        store
+            .update(|s| s.channels.insert("general".into(), "C1".into()))
+            .unwrap();
+
+        let now = store.load().unwrap();
+        assert_eq!(now.tracked.len(), 1, "run's write survived");
+        assert_eq!(now.channels["general"], "C1");
+    }
+
+    #[test]
+    fn a_cache_write_waits_out_no_run() {
+        let dir = TempDir::new("held");
+        let store = JsonStore::new(dir.file());
+        let _run = crate::adapters::lock::FileLock::try_acquire(
+            &crate::adapters::lock::FileLock::path_for(store.path()),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            store.update(|s| s.user_id = Some("U1".into())),
+            Err(StoreError::Busy { .. })
+        ));
+    }
+
+    #[test]
+    fn a_cache_write_never_lands_on_a_file_it_could_not_read() {
+        let dir = TempDir::new("update-future");
+        std::fs::write(dir.file(), r#"{"version": 999}"#).unwrap();
+        let store = JsonStore::new(dir.file());
+        assert!(store.update(|s| s.user_id = Some("U1".into())).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.file()).unwrap(),
+            r#"{"version": 999}"#
+        );
     }
 
     #[test]

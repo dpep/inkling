@@ -913,6 +913,14 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let github = GitHubProvider::from_config(&config.github, token);
             let clock = SystemClock;
 
+            // Still needed with an explicit channel: only_my_messages filters
+            // by author regardless of how a message was found. Before the
+            // lock, which caching the answer takes for a moment.
+            let mut config = config;
+            if config.slack.user_id.is_none() {
+                config.slack.user_id = Some(resolve_identity(&slack, &store)?);
+            }
+
             // One writer at a time. The snapshot is rewritten whole, so two
             // overlapping runs would silently last-writer-win — and the
             // casualty would be the ownership ledger, which cannot be
@@ -929,7 +937,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 Err(e) => return Err(e.to_string()),
             };
 
-            let mut config = config;
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let known = known(&snapshot, &watch_store(&cli.common).read());
             let (channels, force) = classify(targets, &config.github.hosts, &known)?;
@@ -941,11 +948,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 // search, since the message is already tracked.
                 config.slack.channels.clear();
                 config.slack.personal = false;
-            }
-            // Still needed with an explicit channel: only_my_messages filters
-            // by author regardless of how a message was found.
-            if config.slack.user_id.is_none() {
-                config.slack.user_id = Some(resolve_identity(&slack, &store)?);
             }
 
             let run = Run {
@@ -1052,12 +1054,10 @@ fn resolve_identity<R: slack_claude::Runner>(
     slack: &slack_claude::SlackClaude<R>,
     store: &JsonStore,
 ) -> Result<String, String> {
-    let mut snapshot = store.load().map_err(|e| e.to_string())?;
-    if let Some(id) = &snapshot.user_id {
-        return Ok(id.clone());
+    if let Some(id) = store.load().map_err(|e| e.to_string())?.user_id {
+        return Ok(id);
     }
     let me = slack.whoami().map_err(|e| e.to_string())?;
-    snapshot.user_id = Some(me.id.clone());
 
     // whoami already carries the name, so seed it here rather than paying a
     // second profile call for the one author who appears on every message.
@@ -1066,10 +1066,15 @@ fn resolve_identity<R: slack_claude::Runner>(
     } else {
         me.name
     };
-    if !name.is_empty() {
-        snapshot.users.insert(me.id.clone(), name);
+    let cached = store.update(|snapshot| {
+        snapshot.user_id = Some(me.id.clone());
+        if !name.is_empty() {
+            snapshot.users.insert(me.id.clone(), name);
+        }
+    });
+    if let Err(error) = cached {
+        tracing::warn!(%error, "could not cache who you are in slack; asking again next time");
     }
-    store.save(&snapshot).map_err(|e| e.to_string())?;
     Ok(me.id)
 }
 
@@ -2052,7 +2057,7 @@ fn slack_channel<R: slack_claude::Runner>(
 ) -> Result<inkling::domain::model::Reference, String> {
     use inkling::domain::model::Reference;
 
-    let mut snapshot = store.load().unwrap_or_default();
+    let snapshot = store.load().unwrap_or_default();
     let Some(name) = handle.strip_prefix('#') else {
         let name = snapshot
             .channels
@@ -2070,9 +2075,8 @@ fn slack_channel<R: slack_claude::Runner>(
         .resolve_channel(&name)
         .map_err(|error| format!("#{name}: {error}"))?;
     if snapshot.channels.get(&name) != Some(&id) {
-        snapshot.channels.insert(name.clone(), id.clone());
         // Best-effort: a cache that can't be written costs a lookup next time.
-        let _ = store.save(&snapshot);
+        let _ = store.update(|s| s.channels.insert(name.clone(), id.clone()));
     }
     Ok(Reference::SlackChannel {
         channel: id,
