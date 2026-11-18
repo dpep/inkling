@@ -46,6 +46,8 @@ pub struct Polled {
     /// the prompt hot path, where an unreachable GitHub must degrade to
     /// silence rather than to a failed turn.
     pub failures: Vec<String>,
+    /// References read as not there at all (`RefError::NotFound`).
+    pub missing: Vec<Reference>,
     /// Nothing was asked because the readings were still fresh, or because
     /// somebody else was already asking.
     pub skipped: bool,
@@ -246,6 +248,7 @@ impl Poller<'_> {
                 events
             })?);
         polled.sightings.extend(read);
+        polled.missing.extend(gone);
         Ok(())
     }
 

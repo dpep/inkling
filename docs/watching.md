@@ -915,7 +915,10 @@ was found.
   and ending a watch can't be undone. Until then a miss is an ordinary failed
   read, and any successful read starts the count again.
   `inkling watch` prints why a reference it was just given couldn't be read,
-  and exits 1.
+  and exits 1. One it reads as not there at its first reading is a typo, not
+  something to wait for, so it isn't kept (`not watching …`). The count is
+  for a watch that was there once; the person who typed the reference is
+  the one to tell.
 
 **Why the 5-minute floor.** Every read is a `claude -p` call through the
 claude → Slack MCP bridge: ~2¢ ($0.021 twice, 2026-11-17), and 9s or 75s of
@@ -1296,8 +1299,8 @@ and posting to make one was off limits.
   could advance on *that* rather than on the write, and the cost above
   disappears rather than being traded.
 - **An event for a reference that stopped being readable.** A watch on a typo
-  or a deleted PR polls quietly until its TTL. `watch` reports the failure at
-  registration, which is where a typo is actually caught.
+  or a deleted PR polls quietly until its TTL. `watch` reports a typo at
+  registration and doesn't keep it, which is where a typo is actually caught.
 - **Batched Jira reads.** `acli jira workitem view` takes one key, so N
   watched issues cost N subprocesses, run four at a time so a poll waits
   about N/4 answers rather than N. Cheap at the volume a watch list runs at;

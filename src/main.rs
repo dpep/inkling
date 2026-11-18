@@ -712,6 +712,20 @@ fn run(cli: &Cli) -> Result<i32, String> {
                                 println!("could not read {line}");
                                 unreadable = true;
                             }
+                            let typos = typos(&references, &polled, &watches.read());
+                            if !typos.is_empty() {
+                                watches
+                                    .update(clock.now(), |file| {
+                                        for reference in &typos {
+                                            file.unwatch(reference, &owner);
+                                        }
+                                    })
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            for reference in &typos {
+                                tracing::info!(%reference, owner, "watch dropped; not there");
+                                println!("not watching {reference}");
+                            }
                         }
                         Err(error) => {
                             println!("could not read them just now: {error}");
@@ -2393,6 +2407,27 @@ fn unread(
     own
 }
 
+/// What was just asked for and read as not there at its first reading: a
+/// typo, most likely, with nothing to wait for. A watch read before keeps
+/// waiting out its misses, since one reading can be wrong.
+fn typos(
+    asked: &[inkling::domain::model::Reference],
+    polled: &inkling::watch::Polled,
+    watches: &inkling::adapters::watches_json::Watches,
+) -> Vec<inkling::domain::model::Reference> {
+    asked
+        .iter()
+        .filter(|reference| polled.missing.contains(reference))
+        .filter(|reference| {
+            watches
+                .watches
+                .get(&reference.key())
+                .is_some_and(|watch| watch.seen.is_none())
+        })
+        .cloned()
+        .collect()
+}
+
 fn watch_out(
     watches: &inkling::adapters::watches_json::Watches,
     owner: &str,
@@ -3437,6 +3472,31 @@ mod tests {
         assert_eq!(
             unread(&[pr(7)], &polled),
             ["github.com/dpep/inkling#7: not found or not visible"]
+        );
+    }
+
+    #[test]
+    fn a_watch_missing_at_its_first_reading_is_a_typo_not_a_wait() {
+        // Found by the hunt: a mistyped pull request was reported unreadable
+        // and kept, to end as `gone` a few polls later.
+        let now = chrono::Utc::now();
+        let mut watches = Watches::default();
+        for n in [7, 8] {
+            watches.watch(&pr(n), "cli", now + chrono::TimeDelta::hours(1), now);
+        }
+        let (_, mut open) = merged(8);
+        if let Standing::PullRequest { state, .. } = &mut open.standing {
+            *state = inkling::domain::model::State::Open;
+        }
+        watches.record(&[(pr(8), open)], now);
+        let polled = Polled {
+            missing: vec![pr(7), pr(8), pr(9)],
+            ..Polled::default()
+        };
+        assert_eq!(
+            super::typos(&[pr(7), pr(8)], &polled, &watches),
+            [pr(7)],
+            "one that has been read before waits out its misses"
         );
     }
 
