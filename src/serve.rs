@@ -129,8 +129,13 @@ impl Signals {
 
 impl Shutdown for Signals {
     fn requested(&self) -> bool {
-        SIGNALLED.load(Ordering::Relaxed)
+        signalled()
     }
+}
+
+/// Whether this process has been asked to stop since `Signals::install`.
+pub fn signalled() -> bool {
+    SIGNALLED.load(Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

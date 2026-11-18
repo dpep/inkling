@@ -310,8 +310,10 @@ with when that read began. A Slack watch is *claimed* just before its read:
 a second poller arriving during a minute-long read finds it inside the attempt
 floor instead of paying for the same reading again. That claim is why the poll
 lock is let go before the first Slack read: the lock only saves redundant
-GitHub requests. The worker checks for shutdown between reads, so a signal or
-a hand-off waits for at most the read in flight.
+GitHub requests. The worker checks for shutdown between reads, so a hand-off
+waits for at most the read in flight, retries included. After a signal it
+waits only for the `claude -p` in flight: the bridge starts no other, and that
+read counts as a failed one.
 
 The event log is bounded by age (72h) rather than by what every live
 subscriber has passed: one dead session must not be able to pin it. It was

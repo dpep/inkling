@@ -152,7 +152,7 @@ impl<R: Runner> SlackClaude<R> {
 
     /// Run a prompt and interpret the reply, retrying when the reply doesn't
     /// make sense. Transport errors are retried too, except a timeout: a hang
-    /// costs the whole timeout again. A typed refusal from Slack — a missing
+    /// costs the whole timeout again; nor is a server stopping. A typed refusal from Slack — a missing
     /// emoji, a deleted message — is not, since repeating it would just cost
     /// time.
     fn attempt<T>(
@@ -180,7 +180,9 @@ impl<R: Runner> SlackClaude<R> {
                     Err(Retry::Fatal(error)) => return Err(error),
                     Err(Retry::Again(error)) => last = error,
                 },
-                Err(error @ RunnerError::TimedOut { .. }) => return Err(error.to_string()),
+                Err(error @ (RunnerError::TimedOut { .. } | RunnerError::Stopping)) => {
+                    return Err(error.to_string());
+                }
                 Err(error) => last = error.to_string(),
             }
             if attempt + 1 < ATTEMPTS {
@@ -829,6 +831,22 @@ mod tests {
             .add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"))
             .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(*slack.runner.0.borrow(), 1);
+    }
+
+    #[test]
+    fn a_stopping_server_is_not_retried() {
+        struct Stopping(RefCell<usize>);
+        impl Runner for Stopping {
+            fn run(&self, _: &str, _: &[&str], _: usize) -> Result<String, RunnerError> {
+                *self.0.borrow_mut() += 1;
+                Err(RunnerError::Stopping)
+            }
+        }
+        let slack = SlackClaude::new(Stopping(RefCell::new(0))).without_delay();
+        slack
+            .add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"))
+            .unwrap_err();
         assert_eq!(*slack.runner.0.borrow(), 1);
     }
 
