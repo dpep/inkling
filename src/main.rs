@@ -128,9 +128,11 @@ enum Command {
     Watch {
         /// Pull requests — a URL, `owner/repo#12`, or a shorter form matching
         /// something watched — and Jira issues, as a key like `AI-123` or a
-        /// browse URL.
+        /// browse URL. Slack: a message's permalink, or a whole channel as
+        /// `#name`, its id, or its link.
         targets: Vec<String>,
-        /// Stop watching after this long, e.g. 2h, 24h, 7d.
+        /// Stop watching after this long, e.g. 2h, 24h, 7d, 30d. A standing
+        /// channel watch usually wants days.
         // Must equal watches_json::WATCH_TTL; a test holds them together.
         #[arg(long, default_value = "72h", value_parser = humantime::parse_duration)]
         ttl: std::time::Duration,
@@ -669,7 +671,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 let snapshot = store.load().map_err(|e| e.to_string())?;
                 let known = known(&snapshot, &watches.read());
                 let references;
-                (references, refused) = watch_targets(targets, &config.github.hosts, &known);
+                let bridge = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
+                let channel = |handle: &str| slack_channel(handle, &bridge, &store);
+                (references, refused) =
+                    watch_targets(targets, &config.github.hosts, &known, &channel);
                 for problem in &refused {
                     println!("{problem}");
                 }
@@ -746,7 +751,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let known = known(&snapshot, &watches.read());
-            let (references, refused) = watch_targets(targets, &config.github.hosts, &known);
+            let bridge = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
+            let channel = |handle: &str| slack_channel(handle, &bridge, &store);
+            let (references, refused) =
+                watch_targets(targets, &config.github.hosts, &known, &channel);
             for problem in &refused {
                 println!("{problem}");
             }
@@ -1275,6 +1283,12 @@ fn wait_targets(
     }
     // A Jira issue has no merge ladder to threshold against, so `--until`
     // could say nothing about one. Watching it is the answer that exists.
+    if let Some(channel) = references
+        .iter()
+        .find(|r| matches!(r, inkling::domain::model::Reference::SlackChannel { .. }))
+    {
+        return Err(format!("{channel}: wait takes pull requests, not channels"));
+    }
     if let Some(message) = references
         .iter()
         .find(|r| matches!(r, inkling::domain::model::Reference::SlackMessage { .. }))
@@ -1934,8 +1948,10 @@ fn watch_store(common: &Common) -> inkling::adapters::watches_json::WatchStore {
     )
 }
 
-/// The same targets `wait` takes, plus Jira issues. Channels are refused for
-/// the same reason: there is no such thing as watching one.
+/// The same targets `wait` takes, plus Jira issues, Slack messages and Slack
+/// channels. A channel is named explicitly — `#name`, its id, or its link —
+/// and `channel` turns that into a reference; a bare word is refused, since a
+/// typo would otherwise cost a bridge call and watch nothing.
 ///
 /// Returns what resolved and what didn't, rather than stopping at the first
 /// failure: watching is per-reference, so a typo in one argument must not
@@ -1945,11 +1961,12 @@ fn watch_targets(
     targets: &[String],
     hosts: &[String],
     known: &[inkling::domain::model::Reference],
+    channel: &dyn Fn(&str) -> Result<inkling::domain::model::Reference, String>,
 ) -> (Vec<inkling::domain::model::Reference>, Vec<String>) {
     let mut references = Vec::new();
     let mut refused = Vec::new();
     for target in targets {
-        match watch_target(target, hosts, known) {
+        match watch_target(target, hosts, known, channel) {
             Ok(reference) => references.push(reference),
             Err(problem) => refused.push(problem),
         }
@@ -1960,19 +1977,32 @@ fn watch_targets(
 /// Resolve one target to watch.
 ///
 /// Its own function rather than `classify` only because the answer is one
-/// reference and a channel is refused; the rule that completes a short
+/// reference and a channel is resolved; the rule that completes a short
 /// reference is `complete`, shared with every other command.
 fn watch_target(
     target: &str,
     hosts: &[String],
     known: &[inkling::domain::model::Reference],
+    channel: &dyn Fn(&str) -> Result<inkling::domain::model::Reference, String>,
 ) -> Result<inkling::domain::model::Reference, String> {
     use inkling::domain::detect::{Target, parse_target};
+    use inkling::domain::model::Reference;
 
+    // The form inkling prints a named channel in, which `unwatch` takes back.
+    if let Some(name) = target.trim().strip_prefix("slack:#") {
+        return channel(&format!("#{name}"));
+    }
     match parse_target(target, hosts)? {
-        Target::Channel(channel) => Err(format!(
-            "{channel}: watch takes pull requests, Jira issues and Slack messages, not channels"
+        Target::Channel(handle)
+            if handle.starts_with('#') || slack_claude::looks_like_channel_id(&handle) =>
+        {
+            channel(&handle)
+        }
+        Target::Channel(word) => Err(format!(
+            "{word}: watch takes pull requests, Jira issues, Slack messages and \
+             Slack channels — a channel is #name, its id, or its link"
         )),
+        Target::Reference(Reference::SlackChannel { channel: id, .. }) => channel(&id),
         Target::Reference(reference) => Ok(reference),
         Target::Partial {
             owner,
@@ -1980,6 +2010,47 @@ fn watch_target(
             number,
         } => complete(owner, repo, number, hosts, known),
     }
+}
+
+/// A Slack channel by `#name` or by id, named when that is known.
+///
+/// The name is display only, but it is also the watch's key, so an id takes
+/// the name the cache already has for it: `#general` and `C0E48AHSN` are then
+/// one watch. A name nobody has resolved yet costs one bridge call, kept in
+/// `state.json` with the rest of the channel cache.
+fn slack_channel<R: slack_claude::Runner>(
+    handle: &str,
+    slack: &slack_claude::SlackClaude<R>,
+    store: &JsonStore,
+) -> Result<inkling::domain::model::Reference, String> {
+    use inkling::domain::model::Reference;
+
+    let mut snapshot = store.load().unwrap_or_default();
+    let Some(name) = handle.strip_prefix('#') else {
+        let name = snapshot
+            .channels
+            .iter()
+            .find(|(_, id)| *id == handle)
+            .map(|(name, _)| name.clone());
+        return Ok(Reference::SlackChannel {
+            channel: handle.to_string(),
+            name,
+        });
+    };
+    let name = name.to_lowercase();
+    slack.seed_channels(snapshot.channels.clone());
+    let id = slack
+        .resolve_channel(&name)
+        .map_err(|error| format!("#{name}: {error}"))?;
+    if snapshot.channels.get(&name) != Some(&id) {
+        snapshot.channels.insert(name.clone(), id.clone());
+        // Best-effort: a cache that can't be written costs a lookup next time.
+        let _ = store.save(&snapshot);
+    }
+    Ok(Reference::SlackChannel {
+        channel: id,
+        name: Some(name),
+    })
 }
 
 /// Bring the watches up to date: whatever the schedule says is due, and with
@@ -2066,6 +2137,10 @@ fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
             said.extend(reactions.iter().map(|(emoji, n)| format!(":{emoji}: {n}")));
             said.join(", ")
         }
+        Some(Standing::Channel { newest, .. }) => match newest {
+            Some(ts) => format!("newest message {ts}"),
+            None => "no messages".to_string(),
+        },
     }
 }
 
@@ -2648,7 +2723,7 @@ mod tests {
         vec![
             (
                 "watch",
-                watch_target(target, &hosts(), known).map(|r| r.to_string()),
+                watch_target(target, &hosts(), known, &named).map(|r| r.to_string()),
             ),
             ("wait", wait_targets(&one, &hosts(), known).map(names)),
             (
@@ -2763,7 +2838,7 @@ mod tests {
         // Found by dogfooding: a typo in the second argument cost the watch
         // on the first one, which was the whole reason for running it.
         let targets = ["dpep/inkling#3".to_string(), "42".to_string()];
-        let (references, refused) = watch_targets(&targets, &hosts(), &[]);
+        let (references, refused) = watch_targets(&targets, &hosts(), &[], &named);
 
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].to_string(), "github.com/dpep/inkling#3");
@@ -2954,17 +3029,72 @@ mod tests {
     fn a_slack_message_can_be_watched_but_not_waited_on() {
         let permalink = "https://acme.slack.com/archives/C0123ABCD/p1786596050245879";
         assert_eq!(
-            watch_target(permalink, &hosts(), &[]),
+            watch_target(permalink, &hosts(), &[], &named),
             Ok(slack_message("C0123ABCD", "1786596050.245879"))
         );
         let error = wait_targets(&[permalink.to_string()], &hosts(), &[]).unwrap_err();
         assert!(error.contains("inkling watch"), "{error}");
     }
 
+    /// Stands in for the bridge: `#eng` is C0ENG0001, an id stays unnamed.
+    fn named(handle: &str) -> Result<inkling::domain::model::Reference, String> {
+        Ok(match handle.strip_prefix('#') {
+            Some(name) => inkling::domain::model::Reference::SlackChannel {
+                channel: "C0ENG0001".into(),
+                name: Some(name.into()),
+            },
+            None => inkling::domain::model::Reference::SlackChannel {
+                channel: handle.into(),
+                name: None,
+            },
+        })
+    }
+
     #[test]
-    fn a_channel_is_refused_rather_than_watched() {
-        let error = watch_target("#eng", &hosts(), &[]).unwrap_err();
-        assert!(error.contains("not channels"), "{error}");
+    fn a_channel_named_explicitly_is_watched_but_not_waited_on() {
+        for (target, watched) in [
+            ("#eng", "slack:#eng"),
+            ("slack:#eng", "slack:#eng"),
+            ("C0123ABCD", "slack:C0123ABCD"),
+            (
+                "https://acme.slack.com/archives/C0123ABCD",
+                "slack:C0123ABCD",
+            ),
+        ] {
+            assert_eq!(
+                watch_target(target, &hosts(), &[], &named).map(|r| r.to_string()),
+                Ok(watched.to_string()),
+                "{target}"
+            );
+        }
+        let error = watch_target("eng", &hosts(), &[], &named).unwrap_err();
+        assert!(error.contains("#name"), "a bare word is a typo: {error}");
+        for target in ["#eng", "https://acme.slack.com/archives/C0123ABCD"] {
+            let error = wait_targets(&[target.to_string()], &hosts(), &[]).unwrap_err();
+            assert!(error.contains("not channels"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_channel_cached_by_name_is_one_watch_however_it_is_named() {
+        let dir = std::env::temp_dir().join(format!("inkling-channel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        use inkling::adapters::store_json::Store;
+        let store = super::JsonStore::new(dir.join("state.json"));
+        let mut snapshot = store.load().unwrap_or_default();
+        snapshot
+            .channels
+            .insert("general".into(), "C0E48AHSN".into());
+        store.save(&snapshot).unwrap();
+        // Never run: both forms are answered from the cache.
+        let slack =
+            super::slack_claude::SlackClaude::new(super::slack_claude::ClaudeRunner::default());
+
+        let by_name = super::slack_channel("#General", &slack, &store).unwrap();
+        let by_id = super::slack_channel("C0E48AHSN", &slack, &store).unwrap();
+        assert_eq!(by_name, by_id);
+        assert_eq!(by_id.to_string(), "slack:#general");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

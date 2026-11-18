@@ -48,6 +48,9 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
     if let Some(reference) = crate::domain::slack::parse_reference(trimmed) {
         return Ok(Target::Reference(reference));
     }
+    if let Some(reference) = crate::domain::slack::parse_channel(trimmed) {
+        return Ok(Target::Reference(reference));
+    }
 
     if let Some(partial) = parse_partial(trimmed) {
         return Ok(partial);
@@ -62,7 +65,8 @@ pub fn parse_target(arg: &str, hosts: &[String]) -> Result<Target, String> {
     if crate::domain::slack::looks_like_slack(trimmed) {
         return Err(format!(
             "{trimmed}: looks like a Slack message but isn't one — expected a \
-             permalink, https://<workspace>.slack.com/archives/<channel>/p<digits>"
+             permalink, https://<workspace>.slack.com/archives/<channel>/p<digits>, \
+             or a channel's link, https://<workspace>.slack.com/archives/<channel>"
         ));
     }
     if looks_like_a_jira_issue(trimmed) {
@@ -518,8 +522,19 @@ mod tests {
             "{target:?}"
         );
         let error =
-            parse_target("https://acme.slack.com/archives/C0123ABCD", &hosts()).unwrap_err();
+            parse_target("https://acme.slack.com/archives/C0123ABCD/p123", &hosts()).unwrap_err();
         assert!(error.contains("Slack message"), "{error}");
+    }
+
+    #[test]
+    fn a_slack_channel_link_is_a_whole_channel() {
+        assert_eq!(
+            parse_target("https://acme.slack.com/archives/C0123ABCD", &hosts()),
+            Ok(Target::Reference(Reference::SlackChannel {
+                channel: "C0123ABCD".into(),
+                name: None,
+            }))
+        );
     }
 
     #[test]

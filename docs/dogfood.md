@@ -24,6 +24,18 @@ fixed, say where and leave the line.
   use a uniquely named dir per experiment.
 - A rebuild during a live experiment replaces the scratch server (`reason="replaced"`), which
   muddies "did it stand down because it was idle". Start it by hand after building.
+- Channel watching: #general and #random in dpepper.slack.com have no messages at all — not
+  even join messages — so a live channel watch can only baseline "no messages". The only
+  conversation with history is the self-DM, which is what the real fixtures come from. No live
+  transition was seen: nobody else posts here, and the brief forbids posting. Expected a channel
+  with traffic.
+- Good: `slack_read_channel` says "There are more messages available" in a
+  `pagination_info` field, and haiku carried it through as `"more": true` on the first try. So
+  "at least N" rests on the tool's word, with a full page as the backstop.
+- A channel read through the bridge measured 0.2–0.6¢ and 5–10s wall (4 calls, warm cache) —
+  cheaper than the ~2¢ the message reads were quoted at, which were cold.
+- `inkling watch '#general' --ttl 30d` lists the watch as `29d` the moment it is made: the
+  remaining time is truncated, not rounded. Cosmetic; expected `30d`.
 
 - Replies outside the thread: the user answered a watched DM message with a plain DM message,
   and the thread read saw nothing. Now the channel after the message is read in the same

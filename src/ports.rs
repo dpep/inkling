@@ -191,6 +191,17 @@ pub struct MessageStatus {
     pub names: BTreeMap<String, String>,
 }
 
+/// What one read of a Slack channel found after the place it started from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelStatus {
+    /// Top-level messages read: ts → the user id that wrote it.
+    pub arrived: BTreeMap<String, String>,
+    /// The read hit its page limit, so there were more than `arrived` holds.
+    pub more: bool,
+    /// User id → name, for everyone the read met.
+    pub names: BTreeMap<String, String>,
+}
+
 /// One message's outcome, in-band like `Lookup`.
 pub type MessageLookup = (Reference, Result<MessageStatus, RefError>);
 
@@ -203,6 +214,12 @@ pub trait MessageProvider {
     /// The Slack user the credentials belong to, so what the reader did
     /// themself can be told apart. `None` when it can't be found out.
     fn me(&self) -> Option<String>;
+
+    /// A channel's top-level messages after `oldest` (exclusive), or with
+    /// `None` just its newest, for a baseline.
+    fn channel(&self, _channel: &str, _oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
+        Err(RefError::Other("channels are not read here".into()))
+    }
 }
 
 /// Where a wait gets its readings.

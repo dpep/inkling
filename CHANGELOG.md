@@ -16,6 +16,12 @@
   An approval that moves the state is said once, as the state change. Nothing to do: a watch
   registered before this counts its comments at the next reading and reports only what comes after.
 
+- **New: watch a whole Slack channel.** `inkling watch '#incidents' --ttl 7d` (or the channel's
+  id, or its link) reports each round of new top-level messages as `3 messages from @john and
+  @jane` — who and how many, never what. Explicit only: the `post-tool` hook never watches a
+  channel. Thread replies don't count; a round only you posted in isn't pushed; more than a page
+  (100) since the last read says `at least 100`. One `claude -p` per read (about 0.2–2¢), at most
+  every 5 minutes. A channel never finishes, so give it a longer `--ttl` than the 72h default.
 - **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
   `2 replies from @alice and @bob` and `1 reaction :white_check_mark:` — who and how many,
   never what anybody wrote. A reply is a message in its thread, or a later one in the same

@@ -791,8 +791,8 @@ retried every tick. Two things follow:
   reply, so a whole-channel watch could reuse the channel half unfiltered.
 - **A channel read is one page: the newest 100.** A conversation busier than
   that since the watched message drops its earliest messages from the read,
-  and the replies count can fall. Fine for a DM or a mention; it is the first
-  thing a whole-channel watch would have to fix.
+  and the replies count can fall. Fine for a DM or a mention; a channel watch
+  reports it as "at least" instead (Slack channels, below).
 - **How a mention is printed is unseen.** The prompt asks for ids "written
   `<@U…>`"; no message in this workspace mentions anyone, so whether the read
   tool prints the id or a display name is untested. If it prints a name, the
@@ -942,6 +942,76 @@ couldn't find.
 **Out of scope.** Comments after a pull request merges or closes: the watch ends
 at its last event, as before.
 
+## Slack channels
+
+Built 2026-11-17, at the user's request: *tell me when anything new is posted
+in #incidents.* The earlier objection — a channel is a stream, and any filter
+is a guess — is answered by not filtering: every new top-level message is the
+news, and the person who asked for it decides it is worth hearing. That is
+also why it is explicit only: `inkling watch '#incidents'`, `inkling watch
+C0123ABCD` (a `D` id watches a DM the same way), or the channel's link
+(`https://<ws>.slack.com/archives/C0123ABCD`). The `post-tool` hook never
+follows a channel, and `wait` refuses one: there is no condition to meet.
+
+```
+slack:#incidents  messages  3 messages from @john and @jane
+```
+
+and pushed as `slack:#incidents | 3 messages from @john and @jane`.
+
+- **An accumulating axis like the others.** `messages` is said through the
+  same `push::tally` as comments and replies: how many and from whom, never a
+  running total, which for a channel is noise. Underneath, `from`/`to` are
+  the count of messages since the watch began, as for comments — `--json`
+  carries them, the line never says them. An earlier draft stored the newest
+  ts either side instead (the range `slack_read_channel` would take to read
+  them); it was dropped because `tally` reads growth from `from`/`to`, and
+  one rendering for every accumulating axis is worth more than the range,
+  which a read from the reported time recovers.
+- **Names, then a count.** Up to three authors are named (`@a, @b and @c`);
+  more becomes `12 messages from 7 people`. Names come with the read.
+- **The standing is the count, the newest ts seen, and what the last read
+  found** (`arrived`, ts → author) with whether it hit the page (`more`).
+  `newest` is where the next read starts; `arrived` is what names who posted
+  without a second read.
+- **The handle is resolved once.** `#name` goes through the bridge's
+  `search_channels` lookup and is cached in `state.json` with the rest of the
+  channel cache, so `#general` and `C0E48AHSN` are one watch named
+  `slack:#general`. An id the cache doesn't know is named by its id. The name
+  is display and key only; the id is what is read.
+- **Threaded replies don't count.** `read_channel` lists top-level messages
+  only, and a thread reply is that thread's news — watch the message for it. A
+  reply also sent to the channel (`reply_broadcast`) is top-level and does
+  count. Not seen live: this workspace has no threads to look at.
+- **Your own posts are receipts.** A round whose new messages are all yours is
+  recorded with `own` and not pushed, as for replies.
+- **It never finishes.** It lives until its `--ttl`. The default 72h suits a
+  message; a standing channel watch usually wants `--ttl 7d` or `--ttl 30d`
+  (any humantime duration is accepted). There is no "forever": an expiry is
+  the only cleanup there is, and a watch nobody remembers would cost money
+  until someone noticed. Re-watching extends it.
+
+**Cost.** One `claude -p` per read, `read_channel` only, `oldest` = the newest
+ts seen, limit 100 (the tool's maximum). A baseline asks for `limit: 1`: it
+only needs the newest ts. Measured 2026-11-17, four reads warm: 0.2–0.6¢ and
+5–10s wall; a cold cache costs more (~2¢ for the message reads). The 5-minute
+`SLACK_READ_FLOOR` applies, so a busy channel costs up to 288 reads a day —
+roughly $0.60–6 — and a quiet one is read on the usual schedule, hourly once it
+has sat still for a day. Resolving a `#name` the first time is one more call.
+
+**More than a page.** The tool returns newest first, so a stretch busier than
+100 messages loses its earliest ones from the read. The tool says so ("There
+are more messages available", in `pagination_info`), the bridge reports it as
+`more`, and a full page counts as `more` whether or not the model said so.
+The transition then says `at least 100 messages from …` rather than a number
+it can't stand behind. Paging back with the cursor would be exact and cost a
+call per page; nobody has needed it.
+
+**Fixtures.** Recorded from the bridge on the self-DM (a read with `oldest`,
+and a baseline that said `more`) and on #general, which has no messages at
+all. No transition has been seen live — nobody else posts in this workspace,
+and posting to make one was off limits.
+
 ## Not built, and what would change that
 
 - **Muting a bot's comments.** Every bot pushes, labelled `(bot)`. A bot that
@@ -949,12 +1019,6 @@ at its last event, as before.
   pushes on every push, since a new comment is new. `github.ignore_checks` is
   the precedent if one earns it: a list of logins whose comments are counted
   and never told. What would change this: a dogfood line naming the bot.
-- **Watching a Slack channel.** A channel is a stream, not a thing that moves
-  between standings: "tell me about #eng" needs a filter — from whom, about
-  what — before any of it is news, and every candidate filter is a guess. One
-  message is the unit that has an answer. What would change this: a dogfood
-  line about wanting to hear of a thread nobody in the session started.
-  The channel half of a message's read is the piece it would start from.
 - **Who reacted.** Needs the Web API (`reactions.get`) — see the Slack app in
   docs/deferred.md.
 

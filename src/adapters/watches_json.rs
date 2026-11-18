@@ -77,7 +77,7 @@ pub const SLACK_READ_FLOOR: TimeDelta = TimeDelta::minutes(5);
 /// The least time between attempts to read this kind of reference.
 fn attempt_floor(reference: &Reference) -> TimeDelta {
     match reference {
-        Reference::SlackMessage { .. } => SLACK_READ_FLOOR,
+        Reference::SlackMessage { .. } | Reference::SlackChannel { .. } => SLACK_READ_FLOOR,
         _ => TimeDelta::zero(),
     }
 }

@@ -4,7 +4,8 @@ Keep an eye on things.
 
 Inkling tells a Claude Code session when something it cares about changes. A pull
 request's checks go red or green, somebody comments on it, it gets approved, it merges; a Jira issue
-moves column; somebody replies to a Slack message you posted. The news lands in the session as one line, mid-turn, without
+moves column; somebody replies to a Slack message you posted, or posts in a
+channel you're watching. The news lands in the session as one line, mid-turn, without
 anyone asking:
 
 ```
@@ -98,6 +99,7 @@ later what changed.
 ```sh
 inkling watch you/repo#42 AI-123    # a pull request and a Jira issue
 inkling watch https://acme.slack.com/archives/C0123ABCD/p1786596050245879
+inkling watch '#incidents' --ttl 7d  # a whole Slack channel
 inkling watch you/repo#42 --ttl 2h  # default is 72h
 inkling watch                       # what's being watched
 inkling unwatch 42                  # short forms work once it is watched; or --all
@@ -105,7 +107,8 @@ inkling events                      # what's moved, and nothing when nothing has
 ```
 
 One line per transition: from what, to what, and who caused it or which check
-went red. What only accumulates — comments, replies, reactions — says how many
+went red. What only accumulates — comments, replies, reactions, a channel's
+messages — says how many
 and from whom instead:
 
 ```
@@ -115,6 +118,7 @@ github.com/dpep/inkling#3  state     open → merged      by @dpep
 AI-123                     status    To Do → In Progress
 slack:C0123ABCD/1786596050.245879  replies    2 replies from @alice and @bob
 slack:C0123ABCD/1786596050.245879  reactions  1 reaction :white_check_mark:
+slack:#incidents                   messages   3 messages from @john and @jane
 ```
 
 Up to three people are named; past that, `12 comments from 7 people`.
@@ -174,6 +178,30 @@ about 2¢, and anywhere from a few seconds to a minute. So a Slack message is
 read at most every 5 minutes, whatever else the schedule says, and only by the
 resident server and by `watch` and `events` themselves — never by the prompt
 hook, which can't wait that long. `wait` doesn't take one.
+
+### Slack channels
+
+A whole channel is watched for any new top-level message. Only when you ask
+for it, by name: `'#incidents'` (quoted, or the shell eats it), its id
+(`C0123ABCD`; a `D` id watches a DM), or its link,
+`https://<workspace>.slack.com/archives/C0123ABCD`. The `post-tool` hook never
+watches a channel, and `wait` doesn't take one. A `#name` costs one lookup the
+first time and is remembered; the watch is then `slack:#incidents`, which
+`unwatch` takes back.
+
+The news is who posted and how many — `slack:#incidents | 3 messages from
+@john and @jane`, or `12 messages from 7 people` — never what they wrote. A
+round where only you posted is in `events` but isn't pushed. Replies inside a
+thread don't count: watch that message for them. A stretch busier than one
+page (100 messages) says `at least 100`.
+
+A channel never finishes, so a standing watch wants a longer `--ttl` than the
+72h default: `--ttl 7d`, `--ttl 30d`. There is no forever; watching again
+extends it.
+
+Cost: one `claude -p` per read, about 0.2–2¢, at most every 5 minutes — up
+to a few dollars a day for a channel that never stops moving, and much less
+for a quiet one, which is read hourly once it has sat still for a day.
 
 ### Everyone in their own lane
 

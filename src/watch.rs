@@ -13,8 +13,9 @@
 //! is not long-lived, so there is nothing to take over from.
 
 use crate::adapters::lock::FileLock;
-use crate::adapters::watches_json::WatchStore;
+use crate::adapters::watches_json::{Seen, Watch, WatchStore};
 use crate::domain::model::Reference;
+use crate::domain::slack::ts_key;
 use crate::domain::watch::{Actors, Event, Sighting, Standing};
 use crate::ports::{Clock, IssueProvider, MessageProvider, StatusProvider, StoreError};
 use chrono::TimeDelta;
@@ -59,6 +60,14 @@ pub struct Polled {
 /// does that four times a minute. `polled watches` carries the count.
 const NAMED_FAILURES: usize = 5;
 
+/// Read through the bridge: slow and paid for, so only some callers do.
+fn is_slack(reference: &Reference) -> bool {
+    matches!(
+        reference,
+        Reference::SlackMessage { .. } | Reference::SlackChannel { .. }
+    )
+}
+
 fn name(so_far: &[String], reference: &Reference, error: &impl std::fmt::Display) {
     match so_far.len() < NAMED_FAILURES {
         true => tracing::warn!(%reference, %error, "could not read watch"),
@@ -83,7 +92,7 @@ impl Poller<'_> {
             .read()
             .due_now(observed_at, floor)
             .into_iter()
-            .filter(|r| self.slack.is_some() || !matches!(r, Reference::SlackMessage { .. }))
+            .filter(|r| self.slack.is_some() || !is_slack(r))
             .collect();
         if references.is_empty() {
             tracing::debug!(why, "nothing is due");
@@ -95,7 +104,7 @@ impl Poller<'_> {
 
         let count = |is: fn(&Reference) -> bool| references.iter().filter(|r| is(r)).count();
         let pulls = count(|r| matches!(r, Reference::GitHubPullRequest { .. }));
-        let messages = count(|r| matches!(r, Reference::SlackMessage { .. }));
+        let messages = count(is_slack);
         let mut failures = Vec::new();
         let sightings = self.sightings(&references, &mut failures);
         let elapsed = (self.clock.now() - observed_at).num_milliseconds();
@@ -294,7 +303,81 @@ impl Poller<'_> {
             }
         }
 
+        if let Some(slack) = self.slack {
+            self.channels(slack, references, &mut seen, failures);
+        }
         seen
+    }
+
+    /// Each channel from the newest message its last reading saw. No reading
+    /// yet is a baseline, which needs only the newest; a channel that was
+    /// empty reads from the beginning.
+    fn channels(
+        &self,
+        slack: &dyn MessageProvider,
+        references: &[Reference],
+        seen: &mut Vec<(Reference, Sighting)>,
+        failures: &mut Vec<String>,
+    ) {
+        let watches = self.store.read();
+        for reference in references {
+            let Reference::SlackChannel { channel, .. } = reference else {
+                continue;
+            };
+            let before = match watches.watches.get(&reference.to_string()) {
+                Some(Watch {
+                    seen:
+                        Some(Seen {
+                            standing: Standing::Channel { newest, .. },
+                            ..
+                        }),
+                    ..
+                }) => Some(newest.clone()),
+                _ => None,
+            };
+            let oldest = before
+                .as_ref()
+                .map(|newest| newest.as_deref().unwrap_or("0"));
+            match slack.channel(channel, oldest) {
+                Ok(status) => {
+                    let newest = status
+                        .arrived
+                        .keys()
+                        .max_by_key(|ts| ts_key(ts))
+                        .cloned()
+                        .or_else(|| before.clone().flatten());
+                    let baseline = oldest.is_none();
+                    seen.push((
+                        reference.clone(),
+                        Sighting {
+                            discussion: None,
+                            standing: Standing::Channel {
+                                count: 0,
+                                newest,
+                                arrived: if baseline {
+                                    Default::default()
+                                } else {
+                                    status.arrived
+                                },
+                                more: status.more && !baseline,
+                            },
+                            title: String::new(),
+                            failing: None,
+                            head: None,
+                            by: Actors {
+                                names: status.names,
+                                me: slack.me(),
+                                ..Actors::default()
+                            },
+                        },
+                    ));
+                }
+                Err(error) => {
+                    name(failures, reference, &error);
+                    failures.push(format!("{reference}: {error}"));
+                }
+            }
+        }
     }
 }
 
@@ -306,7 +389,8 @@ mod tests {
     use crate::domain::wait::CheckState;
     use crate::domain::watch::{Axis, Category};
     use crate::ports::{
-        IssueLookup, IssueStatus, MessageLookup, MessageStatus, ProviderError, RefError,
+        ChannelStatus, IssueLookup, IssueStatus, MessageLookup, MessageStatus, ProviderError,
+        RefError,
     };
     use crate::testing::{FixedClock, ScriptedStatusProvider};
     use std::cell::RefCell;
@@ -355,6 +439,9 @@ mod tests {
     struct ScriptedMessages {
         statuses: RefCell<HashMap<String, MessageStatus>>,
         calls: std::cell::Cell<usize>,
+        /// A channel's messages, ts -> author, and each `oldest` asked for.
+        posts: RefCell<std::collections::BTreeMap<String, String>>,
+        asked: RefCell<Vec<Option<String>>>,
     }
 
     impl ScriptedMessages {
@@ -391,6 +478,29 @@ mod tests {
 
         fn me(&self) -> Option<String> {
             Some("U9".into())
+        }
+
+        fn channel(&self, _: &str, oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
+            self.asked.borrow_mut().push(oldest.map(Into::into));
+            let posts = self.posts.borrow();
+            let arrived = match oldest {
+                Some(oldest) => posts
+                    .iter()
+                    .filter(|(ts, _)| crate::domain::slack::later(ts, oldest) || oldest == "0")
+                    .map(|(ts, who)| (ts.clone(), who.clone()))
+                    .collect(),
+                None => posts
+                    .iter()
+                    .next_back()
+                    .map(|(ts, who)| (ts.clone(), who.clone()))
+                    .into_iter()
+                    .collect(),
+            };
+            Ok(ChannelStatus {
+                arrived,
+                names: [("U1".to_string(), "alice".to_string())].into(),
+                ..ChannelStatus::default()
+            })
         }
     }
 
@@ -532,6 +642,49 @@ mod tests {
         assert_eq!(polled.events[0].axis, Axis::Replies);
         assert_eq!(polled.events[0].detail.as_deref(), Some("@alice"));
         assert!(!polled.events[0].own);
+    }
+
+    #[test]
+    fn a_channel_is_read_from_the_newest_message_its_last_reading_saw() {
+        let h = Harness::new("channel");
+        let general = Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: Some("general".into()),
+        };
+        h.slack
+            .posts
+            .borrow_mut()
+            .insert("1786596000.000001".into(), "U9".into());
+        h.watch(&general);
+        assert!(h.poll().events.is_empty(), "baseline");
+
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        assert!(h.poll().events.is_empty(), "nothing new");
+
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        h.slack.posts.borrow_mut().extend([
+            ("1786596100.000001".to_string(), "U1".to_string()),
+            ("1786596200.000001".to_string(), "U1".to_string()),
+        ]);
+        let polled = h.poll();
+        assert_eq!(polled.events.len(), 1);
+        assert_eq!(polled.events[0].axis, Axis::Messages);
+        assert_eq!(
+            (polled.events[0].from.as_str(), polled.events[0].to.as_str()),
+            ("0", "2")
+        );
+        assert_eq!(polled.events[0].detail.as_deref(), Some("@alice"));
+        assert_eq!(
+            *h.slack.asked.borrow(),
+            [
+                None,
+                Some("1786596000.000001".into()),
+                Some("1786596000.000001".into())
+            ],
+            "a baseline asks for the newest, then each read starts where the last ended"
+        );
     }
 
     #[test]

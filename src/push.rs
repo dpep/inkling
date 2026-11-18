@@ -129,10 +129,10 @@ pub fn tallied(event: &Event) -> Option<String> {
     Some(match event.axis {
         Axis::Reactions => tally(count, REACTION, false, &[], &[detail]),
         axis => {
-            let noun = if axis == Axis::Comments {
-                COMMENT
-            } else {
-                REPLY
+            let noun = match axis {
+                Axis::Comments => COMMENT,
+                Axis::Messages => MESSAGE,
+                _ => REPLY,
             };
             // Events stored before this wording carried "by …".
             let names = detail.strip_prefix("by ").unwrap_or(detail);
@@ -145,7 +145,10 @@ pub fn tallied(event: &Event) -> Option<String> {
 /// How much an accumulating axis grew by, or `None` for any other axis and
 /// for one that didn't grow.
 fn growth(event: &Event) -> Option<u64> {
-    if !matches!(event.axis, Axis::Comments | Axis::Replies | Axis::Reactions) {
+    if !matches!(
+        event.axis,
+        Axis::Comments | Axis::Replies | Axis::Reactions | Axis::Messages
+    ) {
         return None;
     }
     let (from, to) = (
@@ -160,6 +163,7 @@ pub type Noun = (&'static str, &'static str);
 pub const COMMENT: Noun = ("comment", "comments");
 pub const REPLY: Noun = ("reply", "replies");
 pub const REACTION: Noun = ("reaction", "reactions");
+pub const MESSAGE: Noun = ("message", "messages");
 
 /// How many people a line names; past that it counts them.
 const NAMED: usize = 3;
@@ -274,7 +278,7 @@ fn worth_a_turn(event: &Event) -> bool {
     let started = match event.axis {
         Axis::Checks => event.to == CheckState::Pending.as_str(),
         Axis::State => event.from == State::Draft.as_str() && event.to == State::Open.as_str(),
-        Axis::Status | Axis::Replies | Axis::Reactions | Axis::Comments => false,
+        Axis::Status | Axis::Replies | Axis::Reactions | Axis::Comments | Axis::Messages => false,
     };
     // What the reader did themself — a reply or a comment only they wrote —
     // is a receipt.
@@ -910,6 +914,54 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert!(sessions.texts().is_empty());
         assert_eq!(watches.take("s", now()).len(), 1);
+    }
+
+    fn posted(newest: &str, arrived: &[(&str, &str)]) -> Sighting {
+        Sighting {
+            standing: Standing::Channel {
+                count: 0,
+                newest: Some(newest.into()),
+                arrived: arrived
+                    .iter()
+                    .map(|(ts, who)| (ts.to_string(), who.to_string()))
+                    .collect(),
+                more: false,
+            },
+            ..conversation(&[], &[])
+        }
+    }
+
+    #[test]
+    fn a_channel_says_who_posted_and_how_many_and_skips_the_reader_alone() {
+        let incidents = Reference::SlackChannel {
+            channel: "C0123ABCD".into(),
+            name: Some("incidents".into()),
+        };
+        let mut watches = Watches::default();
+        watches.watch(&incidents, "s", forever(), now());
+        watches.record(&[(incidents.clone(), posted("1.000001", &[]))], now());
+        watches.attach("s", address("/tmp/a"), now());
+
+        watches.record(
+            &[(incidents.clone(), posted("1.000002", &[("1.000002", "U9")]))],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert!(sessions.texts().is_empty(), "only the reader posted");
+
+        watches.record(
+            &[(
+                incidents.clone(),
+                posted("1.000004", &[("1.000003", "U1"), ("1.000004", "U9")]),
+            )],
+            now(),
+        );
+        deliver(&sessions, &mut watches);
+        assert_eq!(
+            sessions.texts(),
+            ["inkling: slack:#incidents | 2 messages from @alice and @dpepper"]
+        );
     }
 
     fn checked(watches: &mut Watches, checks: CheckState) {

@@ -68,6 +68,21 @@ pub enum Standing {
         #[serde(default)]
         replies: BTreeMap<String, String>,
     },
+    /// A Slack channel: the newest top-level message read so far, and what
+    /// the last read found after the one before it, as ts → who wrote it.
+    /// `more` is a read that hit its page limit, so `arrived` is a floor.
+    /// `count` is how many have arrived since the watch began: the running
+    /// total every accumulating axis keeps, never said as such.
+    Channel {
+        #[serde(default)]
+        count: u64,
+        #[serde(default)]
+        newest: Option<String>,
+        #[serde(default)]
+        arrived: BTreeMap<String, String>,
+        #[serde(default)]
+        more: bool,
+    },
 }
 
 impl Standing {
@@ -81,7 +96,7 @@ impl Standing {
             Standing::PullRequest { state, .. } => state.is_terminal(),
             Standing::Issue { category, .. } => *category == Category::Done,
             // A conversation never finishes; the watch's deadline ends it.
-            Standing::Message { .. } => false,
+            Standing::Message { .. } | Standing::Channel { .. } => false,
         }
     }
 }
@@ -103,6 +118,9 @@ pub enum Axis {
     Reactions,
     /// How many comments a pull request has: conversation, line, review.
     Comments,
+    /// New top-level messages in a Slack channel, from the newest ts seen
+    /// before to the newest now; the detail says how many and from whom.
+    Messages,
 }
 
 impl Axis {
@@ -114,6 +132,7 @@ impl Axis {
             Axis::Replies => "replies",
             Axis::Reactions => "reactions",
             Axis::Comments => "comments",
+            Axis::Messages => "messages",
         }
     }
 }
@@ -400,6 +419,24 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
         *comments = mark;
         moved.extend(said);
     }
+    if let (
+        Standing::Channel {
+            count,
+            arrived,
+            more,
+            ..
+        },
+        Some(Standing::Channel {
+            count: had,
+            newest: was,
+            ..
+        }),
+    ) = (&mut standing, before)
+    {
+        let (total, said) = arrivals(was.as_deref(), *had, arrived, *more, &after.by);
+        *count = total;
+        moved.extend(said);
+    }
     Reading { standing, moved }
 }
 
@@ -583,6 +620,43 @@ fn conversation(
         }
     }
     moved
+}
+
+/// What arrived in a channel since its newest message before, and the
+/// running count after it: one transition naming who posted, never what.
+fn arrivals(
+    was: Option<&str>,
+    had: u64,
+    arrived: &BTreeMap<String, String>,
+    more: bool,
+    by: &Actors,
+) -> (u64, Option<Transition>) {
+    let new: Vec<&String> = arrived
+        .iter()
+        .filter(|(ts, _)| was.is_none_or(|was| crate::domain::slack::later(ts, was)))
+        .map(|(_, who)| who)
+        .collect();
+    if new.is_empty() {
+        return (had, None);
+    }
+    let total = had + new.len() as u64;
+    let mut authors: Vec<&String> = Vec::new();
+    for who in new {
+        if !authors.contains(&who) {
+            authors.push(who);
+        }
+    }
+    let names: Vec<String> = authors.iter().map(|id| by.named(id)).collect();
+    let moved = Transition {
+        axis: Axis::Messages,
+        from: had.to_string(),
+        to: total.to_string(),
+        detail: Some(names.join(", ")),
+        job: None,
+        own: by.only_me(&authors.into_iter().collect()),
+        partial: more,
+    };
+    (total, Some(moved))
 }
 
 /// A pull request whose head commit has no check rollup keeps the rollup it
@@ -989,6 +1063,73 @@ mod tests {
             };
             assert_eq!(standing.is_finished(), finished, "{status}");
         }
+    }
+
+    fn channel(count: u64, newest: Option<&str>, arrived: &[(&str, &str)], more: bool) -> Standing {
+        Standing::Channel {
+            count,
+            newest: newest.map(Into::into),
+            arrived: arrived
+                .iter()
+                .map(|(ts, who)| (ts.to_string(), who.to_string()))
+                .collect(),
+            more,
+        }
+    }
+
+    #[test]
+    fn new_channel_messages_count_up_and_name_who_posted() {
+        let before = channel(4, Some("1.000001"), &[], false);
+        let after = seen_message(channel(
+            0,
+            Some("1.000004"),
+            &[("1.000002", "U1"), ("1.000003", "U2"), ("1.000004", "U1")],
+            false,
+        ));
+        let read = reading(Some(&before), &after);
+        assert_eq!(labels(&read.moved), [("messages", "4", "7")]);
+        assert_eq!(read.moved[0].detail.as_deref(), Some("@alice, @bob"));
+        assert!(!read.moved[0].own && !read.moved[0].partial);
+        assert!(
+            matches!(read.standing, Standing::Channel { count: 7, .. }),
+            "the running count is kept: {:?}",
+            read.standing
+        );
+        assert!(!read.standing.is_finished(), "lives until its TTL");
+    }
+
+    #[test]
+    fn a_quiet_channel_or_a_baseline_says_nothing() {
+        let before = channel(1, Some("1.000004"), &[("1.000004", "U1")], false);
+        let quiet = seen_message(channel(0, Some("1.000004"), &[], false));
+        let read = reading(Some(&before), &quiet);
+        assert!(read.moved.is_empty());
+        assert!(matches!(read.standing, Standing::Channel { count: 1, .. }));
+        let first = seen_message(channel(0, Some("1.000004"), &[("1.000004", "U1")], false));
+        assert!(changed(None, &first).is_empty());
+    }
+
+    #[test]
+    fn a_full_page_is_a_floor() {
+        let before = channel(0, None, &[], false);
+        let after = seen_message(channel(
+            0,
+            Some("1.000002"),
+            &[("1.000001", "U1"), ("1.000002", "U2")],
+            true,
+        ));
+        let moved = changed(Some(&before), &after);
+        assert_eq!(labels(&moved), [("messages", "0", "2")]);
+        assert!(moved[0].partial);
+    }
+
+    #[test]
+    fn channel_messages_only_the_reader_wrote_are_their_own() {
+        let before = channel(0, Some("1.000001"), &[], false);
+        let after = seen_message(channel(0, Some("1.000002"), &[("1.000002", "U9")], false));
+        let moved = changed(Some(&before), &after);
+        assert_eq!(moved[0].detail.as_deref(), Some("@dpepper"));
+        assert!(moved[0].own);
     }
 
     fn message(reactions: &[(&str, u32)], replies: &[(&str, &str)]) -> Standing {

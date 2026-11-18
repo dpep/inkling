@@ -12,11 +12,13 @@ mod parse;
 mod runner;
 
 pub use parse::{
-    Activity, Identity, Reaction, SearchHit, ThreadEntry, parse_activity, parse_channel_id,
-    parse_identity, parse_reactions, parse_search,
+    Activity, ChannelRead, Identity, Reaction, SearchHit, ThreadEntry, parse_activity,
+    parse_channel_id, parse_channel_read, parse_identity, parse_reactions, parse_search,
 };
 #[cfg(test)]
-pub use parse::{REAL_DM_ACTIVITY, REAL_THREAD};
+pub use parse::{
+    REAL_CHANNEL_BASELINE, REAL_CHANNEL_READ, REAL_DM_ACTIVITY, REAL_EMPTY_CHANNEL, REAL_THREAD,
+};
 pub use runner::{BRIDGE_ENV, ClaudeRunner, Runner, RunnerError, extract_result};
 
 use crate::config::SlackMcp;
@@ -119,6 +121,9 @@ const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
 /// The tool's own maximum. A full page means there is more behind it.
 pub const PAGE_LIMIT: usize = 20;
+
+/// `slack_read_channel`'s maximum page.
+pub const CHANNEL_PAGE: usize = 100;
 
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {
@@ -539,6 +544,56 @@ impl<R: Runner> SlackClaude<R> {
                 Ok(read) => Ok(read),
                 Err(error) => Err(Retry::Again(error)),
             }
+        })
+        .map_err(|error| match error.starts_with(GONE_MARK) {
+            true => ActivityError::Gone(error),
+            false => ActivityError::Failed(error),
+        })
+    }
+
+    /// Who wrote each top-level message of a channel after `oldest`
+    /// (exclusive) — never what it says. With no `oldest`, only the newest
+    /// message, which is all a baseline needs.
+    ///
+    /// One page: the tool returns newest first, so a busier stretch loses its
+    /// earliest messages and the read says `more` rather than miscounting.
+    pub fn channel_messages(
+        &self,
+        channel_id: &str,
+        oldest: Option<&str>,
+    ) -> Result<ChannelRead, ActivityError> {
+        let tool = &self.tools.read_channel;
+        let (bound, limit) = match oldest {
+            Some(ts) => (format!("oldest: {ts:?}\n"), CHANNEL_PAGE),
+            None => (String::new(), 1),
+        };
+        let prompt = format!(
+            "Call {tool} with these exact arguments:\n\
+             channel_id: {channel_id:?}\n\
+             {bound}\
+             limit: {limit}\n\
+             response_format: \"detailed\"\n\n\
+             Then output ONLY this JSON, no commentary and no code fence:\n\
+             {{\"channel\": [{{\"ts\": \"...\", \"user_id\": \"...\", \
+             \"user_name\": \"...\"}}], \"more\": false}}\n\n\
+             `channel` is every message the read returned, in order; [] for \
+             none. `ts` is the Message TS. `user_id` is the ID in parentheses \
+             after the author. `user_name` is the author's name as shown before \
+             any <email>; never include the email. `more` is true when the tool \
+             says more messages are available. Do not include message text.\n\
+             If the tool fails, output only its error code.",
+        );
+        self.attempt(&prompt, &[tool], |raw| {
+            if GONE.iter().any(|code| raw.contains(code)) {
+                return Err(Retry::Fatal(format!("{GONE_MARK}: {}", raw.trim())));
+            }
+            parse_channel_read(raw)
+                .map(|mut read| {
+                    // A full page is more whether or not the model said so.
+                    read.more |= read.channel.len() >= limit;
+                    read
+                })
+                .map_err(Retry::Again)
         })
         .map_err(|error| match error.starts_with(GONE_MARK) {
             true => ActivityError::Gone(error),

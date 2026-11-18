@@ -30,6 +30,24 @@ pub fn parse_reference(arg: &str) -> Option<Reference> {
     permalink_tail(tail)
 }
 
+/// A whole conversation, given by its link (`…/archives/C0123ABCD`) or as
+/// `slack:<id>`. A `#handle` is not here: it needs a lookup to become an id.
+pub fn parse_channel(arg: &str) -> Option<Reference> {
+    let arg = arg.trim().trim_start_matches('<').trim_end_matches('>');
+    let id = match arg.strip_prefix("slack:") {
+        Some(id) => id,
+        None => {
+            let (_, tail) = arg.split_once(ARCHIVES)?;
+            let path = tail.split(['?', '#']).next().unwrap_or_default();
+            path.trim_end_matches('/')
+        }
+    };
+    is_channel(id).then(|| Reference::SlackChannel {
+        channel: id.to_string(),
+        name: None,
+    })
+}
+
 /// Enough of a Slack shape that reading it as anything else would hide a typo.
 pub fn looks_like_slack(arg: &str) -> bool {
     arg.contains(ARCHIVES) || arg.starts_with("slack:")
@@ -64,7 +82,7 @@ fn ts_from_permalink(segment: &str) -> Option<String> {
 }
 
 /// `C`, `D` or `G` and uppercase alphanumerics — a conversation, not a person.
-fn is_channel(id: &str) -> bool {
+pub fn is_channel(id: &str) -> bool {
     id.len() >= 9
         && id.starts_with(['C', 'D', 'G'])
         && id
@@ -275,6 +293,29 @@ mod tests {
         ] {
             assert_eq!(parse_reference(arg), None, "{arg}");
             assert!(looks_like_slack(arg), "{arg}");
+        }
+    }
+
+    #[test]
+    fn a_channel_link_or_id_names_the_whole_conversation() {
+        let general = Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: None,
+        };
+        for arg in [
+            "https://dpepper.slack.com/archives/C0E48AHSN",
+            "https://dpepper.slack.com/archives/C0E48AHSN/",
+            "slack:C0E48AHSN",
+        ] {
+            assert_eq!(parse_channel(arg), Some(general.clone()), "{arg}");
+        }
+        for arg in [
+            "https://dpepper.slack.com/archives/C0E48AHSN/p1786596050245879",
+            "https://dpepper.slack.com/archives/general",
+            "slack:#general",
+            "C0E48AHSN",
+        ] {
+            assert_eq!(parse_channel(arg), None, "{arg}");
         }
     }
 

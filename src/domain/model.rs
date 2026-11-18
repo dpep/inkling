@@ -89,6 +89,13 @@ pub enum Reference {
         ts: String,
         thread: Option<String>,
     },
+    /// A whole Slack conversation, watched for new top-level messages. `name`
+    /// is display only (`#incidents`), filled in when it is known; the id is
+    /// what is read.
+    SlackChannel {
+        channel: String,
+        name: Option<String>,
+    },
 }
 
 impl fmt::Display for Reference {
@@ -105,6 +112,10 @@ impl fmt::Display for Reference {
             // an agent hands Slack's own tools to read it. The thread root is
             // how to read it, not which message it is.
             Reference::SlackMessage { channel, ts, .. } => write!(f, "slack:{channel}/{ts}"),
+            Reference::SlackChannel {
+                name: Some(name), ..
+            } => write!(f, "slack:#{name}"),
+            Reference::SlackChannel { channel, .. } => write!(f, "slack:{channel}"),
         }
     }
 }
@@ -235,5 +246,15 @@ mod tests {
             thread: Some("1786596000.123456".into()),
         };
         assert_eq!(reply.to_string(), "slack:C0123ABC/1786596050.245879");
+    }
+
+    #[test]
+    fn a_slack_channel_is_named_by_its_handle_when_known() {
+        let channel = |name: Option<&str>| Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: name.map(Into::into),
+        };
+        assert_eq!(channel(Some("general")).to_string(), "slack:#general");
+        assert_eq!(channel(None).to_string(), "slack:C0E48AHSN");
     }
 }

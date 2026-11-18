@@ -136,6 +136,36 @@ pub struct Activity {
     pub channel: Option<Vec<ThreadEntry>>,
 }
 
+/// One read of a whole channel: its top-level messages, and whether the tool
+/// said there were more than one page held.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ChannelRead {
+    /// Required: a reply without it is a model that skipped the call, which
+    /// an empty list must not stand in for.
+    pub channel: Vec<ThreadEntry>,
+    #[serde(default)]
+    pub more: bool,
+}
+
+/// Verbatim, 2026-11-17: `channel_messages`' prompt through one `claude -p`
+/// (haiku) on the self-DM with `oldest` set. Newest first, as the tool lists.
+#[cfg(test)]
+pub const REAL_CHANNEL_READ: &str = r#"{"channel": [{"ts": "1794976230.118559", "user_id": "U0E48AHQA", "user_name": "dpepper"}, {"ts": "1794976101.418449", "user_id": "U0E48AHQA", "user_name": "dpepper"}], "more": false}"#;
+
+/// Verbatim, the same day: the baseline read (no `oldest`, limit 1), where
+/// the tool said more messages were available.
+#[cfg(test)]
+pub const REAL_CHANNEL_BASELINE: &str = r#"{"channel": [{"ts": "1794976230.118559", "user_id": "U0E48AHQA", "user_name": "dpepper"}], "more": true}"#;
+
+/// Verbatim: #general, which has no messages at all.
+#[cfg(test)]
+pub const REAL_EMPTY_CHANNEL: &str = r#"{"channel": [], "more": false}"#;
+
+pub fn parse_channel_read(raw: &str) -> Result<ChannelRead, String> {
+    let json = extract_json(raw)?;
+    serde_json::from_str(&json).map_err(|e| format!("channel response: {e}"))
+}
+
 fn reaction_counts<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, u32>, D::Error> {

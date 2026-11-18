@@ -16,7 +16,9 @@
 use crate::adapters::slack_claude::{ActivityError, Runner, SlackClaude};
 use crate::domain::model::Reference;
 use crate::domain::slack::{is_dm, later};
-use crate::ports::{MessageLookup, MessageProvider, MessageStatus, ProviderError, RefError};
+use crate::ports::{
+    ChannelStatus, MessageLookup, MessageProvider, MessageStatus, ProviderError, RefError,
+};
 use std::cell::OnceCell;
 
 pub struct SlackThreads<R: Runner> {
@@ -95,12 +97,40 @@ impl<R: Runner> MessageProvider for SlackThreads<R> {
     fn me(&self) -> Option<String> {
         self.me.get_or_init(|| (self.identify)()).clone()
     }
+
+    /// One `read_channel`, no thread reads: a reply in a thread is that
+    /// thread's news, and one also sent to the channel is top-level anyway.
+    fn channel(&self, channel: &str, oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
+        let read = self
+            .slack
+            .channel_messages(channel, oldest)
+            .map_err(|error| match error {
+                ActivityError::Gone(_) => RefError::NotFound,
+                ActivityError::Failed(why) => RefError::Other(why),
+            })?;
+        let mut status = ChannelStatus {
+            more: read.more,
+            ..ChannelStatus::default()
+        };
+        for entry in read.channel {
+            if !entry.user_id.is_empty() && !entry.user_name.is_empty() {
+                status
+                    .names
+                    .insert(entry.user_id.clone(), entry.user_name.clone());
+            }
+            status.arrived.insert(entry.ts, entry.user_id);
+        }
+        Ok(status)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::slack_claude::{REAL_DM_ACTIVITY, REAL_THREAD, RunnerError};
+    use crate::adapters::slack_claude::{
+        REAL_CHANNEL_BASELINE, REAL_CHANNEL_READ, REAL_DM_ACTIVITY, REAL_EMPTY_CHANNEL,
+        REAL_THREAD, RunnerError,
+    };
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
     use std::rc::Rc;
@@ -242,6 +272,73 @@ mod tests {
         let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
         assert_eq!(read.unwrap()[0].1, Err(RefError::NotFound));
         assert_eq!(prompts.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_channel_read_is_one_read_channel_from_where_the_last_one_ended() {
+        let (slack, prompts) = threads(&[REAL_CHANNEL_READ]);
+        let status = slack
+            .channel("D1MG8KWNR", Some("1771013015.064589"))
+            .unwrap();
+
+        let prompt = &prompts.borrow()[0];
+        assert!(prompt.contains("slack_read_channel"), "{prompt}");
+        assert!(!prompt.contains("slack_read_thread"), "{prompt}");
+        assert!(
+            prompt.contains(r#"oldest: "1771013015.064589""#),
+            "{prompt}"
+        );
+        assert!(prompt.contains("limit: 100"), "{prompt}");
+        assert!(prompt.contains("Do not include message text"), "{prompt}");
+        assert_eq!(
+            status.arrived,
+            BTreeMap::from([
+                ("1794976101.418449".into(), "U0E48AHQA".into()),
+                ("1794976230.118559".into(), "U0E48AHQA".into()),
+            ])
+        );
+        assert!(!status.more);
+        assert_eq!(
+            status.names.get("U0E48AHQA").map(String::as_str),
+            Some("dpepper")
+        );
+    }
+
+    #[test]
+    fn a_channel_baseline_asks_for_the_newest_alone() {
+        let (slack, prompts) = threads(&[REAL_CHANNEL_BASELINE]);
+        let status = slack.channel("D1MG8KWNR", None).unwrap();
+        let prompt = &prompts.borrow()[0];
+        assert!(!prompt.contains("oldest"), "{prompt}");
+        assert!(prompt.contains("limit: 1\n"), "{prompt}");
+        assert_eq!(status.arrived.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_channel_is_an_answer_and_a_skipped_call_is_retried() {
+        let (slack, prompts) = threads(&[r#"{"messages": []}"#, REAL_EMPTY_CHANNEL]);
+        let status = slack.channel("C0E48AHSN", Some("0")).unwrap();
+        assert!(status.arrived.is_empty());
+        assert_eq!(prompts.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_full_page_is_more_whether_or_not_the_model_says_so() {
+        let page: Vec<String> = (0..100)
+            .map(|n| format!(r#"{{"ts":"1794976{n:03}.000001","user_id":"U1","user_name":"a"}}"#))
+            .collect();
+        let raw = format!(r#"{{"channel":[{}],"more":false}}"#, page.join(","));
+        let (slack, _) = threads(&[&raw]);
+        assert!(slack.channel("C0E48AHSN", Some("1.000000")).unwrap().more);
+    }
+
+    #[test]
+    fn a_channel_slack_says_is_gone_is_not_found() {
+        let (slack, _) = threads(&["channel_not_found"]);
+        assert_eq!(
+            slack.channel("C0E48AHSN", Some("0")),
+            Err(RefError::NotFound)
+        );
     }
 
     #[test]
