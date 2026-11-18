@@ -282,6 +282,19 @@ pub fn read_status(config: &Config) -> Status {
     }
 }
 
+impl Status {
+    /// Serving and ticking: the last tick ended within two intervals. A
+    /// server waits out a Slack read in flight before exiting, holding the
+    /// lock without ticking.
+    pub fn ticking(&self, now: DateTime<Utc>, interval: Duration) -> bool {
+        let Some(record) = self.record.as_ref().filter(|_| self.running) else {
+            return false;
+        };
+        let last = record.last_tick_at.unwrap_or(record.started_at);
+        since(last, now) <= interval.saturating_mul(2)
+    }
+}
+
 fn read_record(path: &Path) -> Option<Record> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
