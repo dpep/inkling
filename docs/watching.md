@@ -920,10 +920,12 @@ Having no text field isn't enough on its own: the model has read the messages, s
 any field it writes that a push renders — a display name, an emoji — is
 somewhere a message could steer prose into (a bug hunt forged a whole
 `inkling:` line through a name, 2026-11-17). So `parse::sane` keeps only what
-has Slack's shape: a ts of exactly ten and six digits, a `U`/`W`/`B` id, a
+has Slack's shape: a ts of exactly ten and six digits, an id of 9–20
+uppercase letters and digits (a person's, a bot's or an app's), a
 name of letters, digits, `._- ` up to 40 characters (or none, and the id is
-said instead), an emoji of `a-z0-9_+-':` up to 64. An entry with a bad ts or id
-is dropped.
+said instead), an emoji of `a-z0-9_+-':` up to 64. An entry with a bad ts is
+dropped; a bad id is blanked and the entry kept, since a dropped row reads as
+a deleted message. A reply with no id is from "someone".
 
 **Your own replies are receipts — "own" is what this session posted.** Changed
 2026-11-17. The first rule was by author: a reply whose author was the user the

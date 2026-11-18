@@ -174,14 +174,17 @@ pub fn parse_channel_read(raw: &str) -> Result<ChannelRead, String> {
 
 /// Only what has the shape Slack gives it. The model has read the messages'
 /// text, so any field it writes and a push renders — a name, an emoji — is
-/// somewhere a message could steer prose into. An entry whose ts or id isn't
-/// one is dropped; a name that isn't one falls back to the id.
+/// somewhere a message could steer prose into. An entry whose ts isn't one is
+/// dropped; any other bad field is blanked, since dropping the row would read
+/// as a deleted message.
 fn sane(entries: Vec<ThreadEntry>) -> Vec<ThreadEntry> {
     entries
         .into_iter()
         .filter(|entry| slack::is_ts(&entry.ts))
-        .filter(|entry| entry.user_id.is_empty() || is_author(&entry.user_id))
         .map(|mut entry| {
+            if !is_author(&entry.user_id) {
+                entry.user_id.clear();
+            }
             if !is_display_name(&entry.user_name) {
                 entry.user_name.clear();
             }
@@ -192,9 +195,15 @@ fn sane(entries: Vec<ThreadEntry>) -> Vec<ThreadEntry> {
         .collect()
 }
 
-/// A person, or a bot (`B…`), which posts without a user id.
+/// Any Slack id: a person (`U`/`W`), a bot or an app, or `USLACKBOT`. How the
+/// read tool prints a non-person author is unrecorded, so the shape is all
+/// that is checked.
 fn is_author(id: &str) -> bool {
-    slack::is_user(id) || (id.starts_with('B') && slack::is_user(&id.replacen('B', "U", 1)))
+    (9..=20).contains(&id.len())
+        && id.starts_with(|c: char| c.is_ascii_uppercase())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 fn is_display_name(name: &str) -> bool {
@@ -469,8 +478,9 @@ mod tests {
             {"ts":"1794976230.118560","user_id":"B0BOT00001","user_name":"deploy.bot"}
         ]}"#;
         let activity = parse_activity(raw).unwrap();
-        assert_eq!(activity.thread.len(), 1, "{:?}", activity.thread);
+        assert_eq!(activity.thread.len(), 2, "{:?}", activity.thread);
         assert_eq!(activity.thread[0].user_name, "", "falls back to the id");
+        assert_eq!(activity.thread[1].user_id, "", "kept, but by nobody");
         assert_eq!(
             activity.thread[0].reactions,
             BTreeMap::from([("+1".into(), 2), ("eyes".into(), 1)])
@@ -485,6 +495,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read.channel[0].user_name, "");
+    }
+
+    #[test]
+    fn an_author_id_of_any_slack_shape_is_kept_and_a_bad_one_never_costs_the_row() {
+        // Dropping the row made a watched app's post unreadable.
+        let raw = r#"{"messages":[
+            {"ts":"1786596000.123456","user_id":"A0123ABCD","user_name":"ci"},
+            {"ts":"1786596001.000001","user_id":"USLACKBOT"},
+            {"ts":"1786596002.000001","user_id":"B0123abcd","user_name":"bot"},
+            {"ts":"1786596003.000001","user_id":"U0123"}
+        ], "channel":[]}"#;
+        let thread = parse_activity(raw).unwrap().thread;
+        let ids: Vec<&str> = thread.iter().map(|e| e.user_id.as_str()).collect();
+        assert_eq!(ids, ["A0123ABCD", "USLACKBOT", "", ""]);
+        assert_eq!(thread[2].user_name, "bot", "a good name outlives a bad id");
     }
 
     #[test]

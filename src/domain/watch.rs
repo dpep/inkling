@@ -334,7 +334,10 @@ impl Actors {
 
     /// `@name` for a Slack user id, or the id when no reading named them.
     fn named(&self, id: &str) -> String {
-        format!("@{}", self.names.get(id).map_or(id, String::as_str))
+        match id {
+            "" => "someone".to_string(),
+            id => format!("@{}", self.names.get(id).map_or(id, String::as_str)),
+        }
     }
 }
 
@@ -1377,6 +1380,14 @@ mod tests {
         assert_eq!(labels(&moved), [("replies", "2", "4")]);
         assert_eq!(moved[0].detail.as_deref(), Some("@alice, @bob"));
         assert_eq!(moved[0].made, Made::Posted(ts(&["1.000003", "1.000004"])));
+    }
+
+    #[test]
+    fn a_reply_with_no_author_is_from_someone_not_a_bare_at() {
+        let before = message(&[], &[]);
+        let after = seen_message(message(&[], &[("1.000001", ""), ("1.000002", "U1")]));
+        let moved = changed(Some(&before), &after);
+        assert_eq!(moved[0].detail.as_deref(), Some("someone, @alice"));
     }
 
     #[test]
