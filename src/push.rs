@@ -377,6 +377,8 @@ pub struct Outcome {
     pub written: usize,
     /// Nothing was owed, so liveness was the only question asked.
     pub probed: bool,
+    /// The probe reached the session.
+    pub answered: bool,
     /// The address this round was about. The store may hold a newer one by
     /// the time this is applied, and what was learned about this one says
     /// nothing about that.
@@ -398,7 +400,7 @@ impl Outcome {
         if let Some(seq) = self.cursor {
             watches.pushed(&self.subscriber, seq, self.written, now);
         }
-        if self.probed && !self.detach {
+        if self.answered {
             watches.answered(&self.subscriber, now);
         }
         if self.detach
@@ -506,11 +508,16 @@ fn push(
 fn probe(sessions: &dyn Sessions, subscriber: &str, address: &SessionAddress) -> Outcome {
     let mut outcome = Outcome::for_subscriber(subscriber, address);
     outcome.probed = true;
-    if let Err(error) = sessions.probe(address) {
-        outcome.detach = error.drop_address();
-        match outcome.detach {
-            true => tracing::info!(subscriber, %error, "address dropped"),
-            false => tracing::debug!(subscriber, %error, "probe did not land; keeping the address"),
+    match sessions.probe(address) {
+        Ok(()) => outcome.answered = true,
+        Err(error) => {
+            outcome.detach = error.drop_address();
+            match outcome.detach {
+                true => tracing::info!(subscriber, %error, "address dropped"),
+                false => {
+                    tracing::debug!(subscriber, %error, "probe did not land; keeping the address")
+                }
+            }
         }
     }
     outcome
@@ -1619,6 +1626,21 @@ mod tests {
 
         deliver(&FakeSessions::default(), &mut watches);
         assert_eq!(watches.subscribers["s"].seen_at, now());
+    }
+
+    #[test]
+    fn a_probe_that_did_not_land_is_no_sign_of_life() {
+        // A transient failure keeps the address but heard nothing back, or a
+        // session that never answers would never be forgotten.
+        let mut watches = watching();
+        let then = now() - TimeDelta::days(3);
+        watches.attach("s", address("/tmp/a"), then);
+        let sessions = FakeSessions::default();
+        sessions.set("/tmp/a", Reaction::Busy);
+
+        deliver(&sessions, &mut watches);
+        assert_eq!(watches.subscribers["s"].seen_at, then);
+        assert_eq!(watches.attached().len(), 1);
     }
 
     #[test]
