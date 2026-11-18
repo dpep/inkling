@@ -406,14 +406,7 @@ impl Poller<'_> {
             .cloned()
             .collect();
         if let Some(slack) = self.slack.filter(|_| !messages.is_empty()) {
-            let watched: Vec<Reference> = self
-                .store
-                .read()
-                .active(self.clock.now())
-                .into_iter()
-                .filter(|r| matches!(r, Reference::SlackMessage { .. }))
-                .collect();
-            match slack.read(&messages, &watched) {
+            match slack.read(&messages) {
                 Ok(lookups) => {
                     for (reference, status) in lookups {
                         match status {
@@ -429,6 +422,7 @@ impl Poller<'_> {
                                     head: None,
                                     by: Actors {
                                         names: status.names,
+                                        threaded: status.threaded,
                                         ..Actors::default()
                                     },
                                     discussion: None,
@@ -590,8 +584,6 @@ mod tests {
         /// A channel's messages, ts -> author, and each `oldest` asked for.
         posts: RefCell<std::collections::BTreeMap<String, String>>,
         asked: RefCell<Vec<Option<String>>>,
-        /// What the last read was told is watched.
-        watched: RefCell<Vec<Reference>>,
     }
 
     impl ScriptedMessages {
@@ -611,12 +603,7 @@ mod tests {
     }
 
     impl MessageProvider for ScriptedMessages {
-        fn read(
-            &self,
-            messages: &[Reference],
-            watched: &[Reference],
-        ) -> Result<Vec<MessageLookup>, ProviderError> {
-            self.watched.replace(watched.to_vec());
+        fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
             self.calls.set(self.calls.get() + messages.len());
             let statuses = self.statuses.borrow();
             Ok(messages
@@ -1161,48 +1148,14 @@ mod tests {
     }
 
     impl MessageProvider for Spy<'_> {
-        fn read(
-            &self,
-            messages: &[Reference],
-            watched: &[Reference],
-        ) -> Result<Vec<MessageLookup>, ProviderError> {
+        fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError> {
             (self.on_read)();
-            self.inner.read(messages, watched)
+            self.inner.read(messages)
         }
         fn channel(&self, channel: &str, oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
             (self.on_read)();
             self.inner.channel(channel, oldest)
         }
-    }
-
-    #[test]
-    fn a_slack_read_is_told_every_live_watched_message() {
-        // Not just the due ones: a reply belongs to the latest watched
-        // message before it, whether or not that one is read this time.
-        let h = Harness::new("slack-watched");
-        let later = Reference::SlackMessage {
-            channel: "C0123ABCD".into(),
-            ts: "1786596090.000000".into(),
-            thread: None,
-        };
-        let channel = Reference::SlackChannel {
-            channel: "C0123ABCD".into(),
-            name: None,
-        };
-        h.slack.replied(&slack(), &[]);
-        h.watch(&slack());
-        h.watch(&later);
-        h.watch(&channel);
-        h.watch(&pr(3));
-        h.github.set(&pr(3), State::Open);
-        h.poller()
-            .poll_these(std::slice::from_ref(&slack()), "test")
-            .unwrap();
-        let mut told = h.slack.watched.borrow().clone();
-        told.sort();
-        let mut want = vec![slack(), later];
-        want.sort();
-        assert_eq!(told, want);
     }
 
     #[test]
@@ -1278,7 +1231,7 @@ mod tests {
 
     fn another_slack() -> Reference {
         Reference::SlackMessage {
-            channel: "C0123ABCD".into(),
+            channel: "C0456EFGH".into(),
             ts: "1786596060.245879".into(),
             thread: None,
         }
@@ -1465,5 +1418,308 @@ mod tests {
 
         assert_eq!(tick.tick().unwrap().pulse, Pulse::Superseded);
         assert_eq!(std::fs::read_to_string(h.store.path()).unwrap(), newer);
+    }
+
+    /// Who hears a Slack reply, through the real thread reader and store,
+    /// against a fake DM that answers each read the way the bridge does.
+    mod slack_replies {
+        use super::*;
+        use crate::adapters::session_socket::SessionAddress;
+        use crate::adapters::slack_claude::{Runner, RunnerError, SlackClaude};
+        use crate::adapters::slack_thread::SlackThreads;
+        use crate::domain::slack::later;
+        use std::rc::Rc;
+
+        const ROOT: &str = "1786596100.000000";
+
+        /// (ts, author, thread root).
+        type Post = (String, String, Option<String>);
+
+        /// The DM's messages.
+        #[derive(Clone, Default)]
+        struct Dm(Rc<RefCell<Vec<Post>>>);
+
+        fn arg<'a>(prompt: &'a str, name: &str) -> Option<&'a str> {
+            let at = prompt.find(&format!("{name}: \""))? + name.len() + 3;
+            Some(&prompt[at..at + prompt[at..].find('"')?])
+        }
+
+        impl Runner for Dm {
+            fn run(&self, prompt: &str, _: &[&str], _: usize) -> Result<String, RunnerError> {
+                let (thread, channel) = prompt.split_at(prompt.find("Then call").unwrap());
+                let root = arg(thread, "message_ts").unwrap();
+                let from = arg(thread, "oldest");
+                let after = arg(channel, "oldest").unwrap();
+                let row = |(ts, user, _): &Post| {
+                    format!(
+                        r#"{{"ts":"{ts}","user_id":"{user}","user_name":"n{user}","reactions":{{}},"mentions":[]}}"#
+                    )
+                };
+                let msgs = self.0.borrow();
+                let thread: Vec<String> = msgs
+                    .iter()
+                    .filter(|m| {
+                        m.0 == root
+                            || (m.2.as_deref() == Some(root)
+                                && from.is_none_or(|from| later(&m.0, from)))
+                    })
+                    .map(row)
+                    .collect();
+                let channel: Vec<String> = msgs
+                    .iter()
+                    .filter(|m| m.2.is_none() && later(&m.0, after))
+                    .map(row)
+                    .collect();
+                Ok(format!(
+                    r#"{{"messages":[{}],"channel":[{}]}}"#,
+                    thread.join(","),
+                    channel.join(",")
+                ))
+            }
+        }
+
+        struct World {
+            h: Harness,
+            dm: Dm,
+            slack: SlackThreads<Dm>,
+        }
+
+        fn world(name: &str) -> World {
+            let dm = Dm::default();
+            let slack = SlackThreads::new(SlackClaude::new(dm.clone()).without_delay(), || {
+                Some("U0000000Z".into())
+            });
+            World {
+                h: Harness::new(name),
+                dm,
+                slack,
+            }
+        }
+
+        fn msg(ts: &str, thread: Option<&str>) -> Reference {
+            Reference::SlackMessage {
+                channel: "D0000000A".into(),
+                ts: ts.into(),
+                thread: thread.map(Into::into),
+            }
+        }
+
+        impl World {
+            fn post(&self, ts: &str, user: &str, thread: Option<&str>) -> Reference {
+                let message = (ts.to_string(), user.to_string(), thread.map(Into::into));
+                self.dm.0.borrow_mut().push(message);
+                msg(ts, thread)
+            }
+
+            fn watch(&self, reference: &Reference, owner: &str, ttl: TimeDelta) {
+                let (now, deadline) = (self.h.clock.now(), self.h.clock.now() + ttl);
+                self.h
+                    .store
+                    .update(now, |w| w.watch(reference, owner, deadline, now))
+                    .unwrap();
+            }
+
+            fn poller(&self) -> Poller<'_> {
+                Poller {
+                    store: &self.h.store,
+                    github: &self.h.github,
+                    jira: &self.h.jira,
+                    slack: Some(&self.slack),
+                    clock: &self.h.clock,
+                }
+            }
+
+            /// Each event as `<ts> <axis> <detail> <audience>`.
+            fn said(events: &[Event]) -> Vec<String> {
+                events
+                    .iter()
+                    .map(|e| {
+                        let Reference::SlackMessage { ts, .. } = &e.reference else {
+                            return e.reference.key();
+                        };
+                        let to: Vec<&str> = e.audience.iter().map(String::as_str).collect();
+                        let detail = e.detail.clone().unwrap_or_default();
+                        format!("{ts} {} {detail} {}", e.axis.as_str(), to.join(","))
+                    })
+                    .collect()
+            }
+
+            /// Wait until every live watch is due, then read them all at once.
+            fn poll(&self) -> Vec<String> {
+                let now = self.h.clock.now();
+                let store = self.h.store.read();
+                let due = store
+                    .watches
+                    .values()
+                    .filter(|w| w.deadline > now && !store.paused(w))
+                    .map(|w| w.next_read(TimeDelta::zero()))
+                    .max();
+                if let Some(due) = due.filter(|due| *due > now) {
+                    self.h.clock.advance(due - now);
+                }
+                let polled = self.poller().poll(TimeDelta::zero(), "test").unwrap();
+                Self::said(&polled.events)
+            }
+
+            fn read(&self, these: &[Reference]) -> Vec<String> {
+                let polled = self.poller().poll_these(these, "test").unwrap();
+                Self::said(&polled.events)
+            }
+
+            fn leave(&self, session: &str) {
+                let socket = SessionAddress::new(PathBuf::from("/nonexistent/x.sock"), None);
+                let now = self.h.clock.now();
+                self.h
+                    .store
+                    .update(now, |w| {
+                        w.attach(session, socket, now);
+                        w.detach(session);
+                    })
+                    .unwrap();
+            }
+        }
+
+        const DAY: TimeDelta = TimeDelta::hours(24);
+
+        #[test]
+        fn a_dm_answer_is_news_once_on_the_latest_watched_message() {
+            let w = world("replies-dm");
+            let first = w.post(ROOT, "U0000000Z", None);
+            w.watch(&first, "y", DAY);
+            w.poll();
+            let second = w.post("1786596200.000000", "U0000000Z", None);
+            w.watch(&second, "y", DAY);
+            w.poll();
+            w.post("1786596300.000000", "U00000001", None);
+            assert_eq!(w.poll(), ["1786596200.000000 replies @nU00000001 y"]);
+            assert_eq!(w.poll(), Vec::<String>::new());
+        }
+
+        #[test]
+        fn a_thread_reply_is_news_once_on_the_latest_watched_message_in_it() {
+            let w = world("replies-thread");
+            let root = w.post(ROOT, "U00000001", None);
+            w.watch(&root, "y", DAY);
+            w.poll();
+            let mine = w.post("1786596200.000000", "U0000000Z", Some(ROOT));
+            w.watch(&mine, "y", DAY);
+            w.poll();
+            w.post("1786596300.000000", "U00000002", Some(ROOT));
+            assert_eq!(w.poll(), ["1786596200.000000 replies @nU00000002 y"]);
+        }
+
+        #[test]
+        fn another_sessions_later_message_never_takes_my_answer() {
+            let w = world("replies-cross");
+            let first = w.post(ROOT, "U0000000Z", None);
+            w.watch(&first, "y", DAY);
+            w.poll();
+            let second = w.post("1786596200.000000", "U0000000Z", None);
+            w.watch(&second, "x", DAY);
+            w.poll();
+            w.post("1786596300.000000", "U00000001", None);
+            let mut got = w.poll();
+            got.sort();
+            assert_eq!(
+                got,
+                [
+                    format!("{ROOT} replies @nU00000001 y"),
+                    "1786596200.000000 replies @nU00000001 x".into(),
+                ]
+            );
+            // Its watch pausing hands nothing over: y already heard.
+            w.leave("x");
+            w.h.clock.advance(TimeDelta::hours(3));
+            assert_eq!(w.poll(), Vec::<String>::new());
+        }
+
+        #[test]
+        fn another_sessions_reply_in_my_thread_never_takes_the_next_one() {
+            let w = world("replies-cross-thread");
+            let root = w.post(ROOT, "U00000001", None);
+            w.watch(&root, "y", DAY);
+            w.poll();
+            let theirs = w.post("1786596200.000000", "U0000000Z", Some(ROOT));
+            w.watch(&theirs, "x", DAY);
+            w.poll();
+            w.post("1786596300.000000", "U00000002", Some(ROOT));
+            assert!(w.poll().contains(&format!("{ROOT} replies @nU00000002 y")),);
+        }
+
+        #[test]
+        fn an_answer_before_a_new_watchs_first_read_is_heard_once() {
+            // Both orders: the new watch read in the same poll as the old, and
+            // read alone first, the way a fresh watch is due before the rest.
+            for alone in [false, true] {
+                let w = world(&format!("replies-early-{alone}"));
+                let first = w.post(ROOT, "U0000000Z", None);
+                w.watch(&first, "y", DAY);
+                w.poll();
+                let second = w.post("1786596200.000000", "U0000000Z", None);
+                w.watch(&second, "y", DAY);
+                w.post("1786596300.000000", "U00000001", None);
+                let mut got = if alone {
+                    w.read(std::slice::from_ref(&second))
+                } else {
+                    vec![]
+                };
+                got.extend(w.poll());
+                got.extend(w.poll());
+                let heard = got.iter().filter(|e| e.contains("@nU00000001")).count();
+                assert_eq!(heard, 1, "alone: {alone}, {got:?}");
+            }
+        }
+
+        #[test]
+        fn a_reply_watch_ending_hands_nothing_back_to_the_root() {
+            let w = world("replies-expire");
+            let root = w.post(ROOT, "U00000001", None);
+            w.watch(&root, "y", DAY);
+            w.poll();
+            let mine = w.post("1786596200.000000", "U0000000Z", Some(ROOT));
+            w.watch(&mine, "y", TimeDelta::hours(1));
+            w.poll();
+            for (i, user) in ["U00000002", "U00000003", "U00000004"].iter().enumerate() {
+                w.post(&format!("17865963{i}0.000000"), user, Some(ROOT));
+                assert_eq!(w.poll().len(), 1);
+            }
+            w.h.clock.advance(TimeDelta::hours(2));
+            assert_eq!(w.poll(), Vec::<String>::new());
+        }
+
+        #[test]
+        fn two_readers_of_one_message_each_hear_a_reply_on_their_own_latest() {
+            let w = world("replies-shared");
+            let first = w.post(ROOT, "U0000000Z", None);
+            w.watch(&first, "x", DAY);
+            w.watch(&first, "y", DAY);
+            w.poll();
+            let second = w.post("1786596200.000000", "U0000000Z", None);
+            w.watch(&second, "y", DAY);
+            w.poll();
+            w.post("1786596300.000000", "U00000001", None);
+            let mut got = w.poll();
+            got.sort();
+            assert_eq!(
+                got,
+                [
+                    format!("{ROOT} replies @nU00000001 x"),
+                    "1786596200.000000 replies @nU00000001 y".into(),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_thread_reply_is_not_taken_by_a_later_message_outside_the_thread() {
+            let w = world("replies-other-thread");
+            let root = w.post(ROOT, "U00000001", None);
+            w.watch(&root, "y", DAY);
+            w.poll();
+            let later = w.post("1786596200.000000", "U0000000Z", None);
+            w.watch(&later, "y", DAY);
+            w.poll();
+            w.post("1786596300.000000", "U00000002", Some(ROOT));
+            assert_eq!(w.poll(), [format!("{ROOT} replies @nU00000002 y")]);
+        }
     }
 }

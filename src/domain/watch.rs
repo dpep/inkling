@@ -314,6 +314,10 @@ pub struct Actors {
     pub merged: Option<String>,
     /// Slack user id → the name a push says, for whoever a reading met.
     pub names: BTreeMap<String, String>,
+    /// Which of a Slack message's replies were read from its thread rather
+    /// than the channel after it, which decides the watched messages a reply
+    /// can be news on (`domain::slack::owner`).
+    pub threaded: BTreeSet<String>,
     /// The GitHub `@login` the credentials belong to, spelled as a pull
     /// request's actors are. Slack has no equivalent: the Slack MCP posts as
     /// the user, so who wrote a message can't say whether the session did —
@@ -743,6 +747,33 @@ fn commented(
     (Some(mark), Some(moved))
 }
 
+/// The transition for the replies in `new`, out of all a Slack message has
+/// (`are`), naming who wrote them. `new` may be fewer than arrived: a reply is
+/// news on one watched message per reader (`Watches::record`), so the count
+/// runs up to every reply and the step is the ones told here.
+pub fn replied(
+    are: &BTreeMap<String, String>,
+    new: &BTreeSet<String>,
+    by: &Actors,
+) -> Option<Transition> {
+    if new.is_empty() {
+        return None;
+    }
+    let authors: BTreeSet<&String> = new.iter().filter_map(|ts| are.get(ts)).collect();
+    let names: Vec<String> = authors.iter().map(|id| by.named(id)).collect();
+    Some(Transition {
+        axis: Axis::Replies,
+        from: are.len().saturating_sub(new.len()).to_string(),
+        to: are.len().to_string(),
+        detail: (!names.is_empty()).then(|| names.join(", ")),
+        job: None,
+        made: posted(new),
+        partial: false,
+        lines: 0,
+        after: None,
+    })
+}
+
 /// What moved on a Slack message: one transition for its replies, naming who
 /// wrote the new ones, and one per emoji whose count changed.
 ///
@@ -755,26 +786,12 @@ fn conversation(
     are: &BTreeMap<String, String>,
     by: &Actors,
 ) -> Vec<Transition> {
-    let mut moved = Vec::new();
-    let new: BTreeMap<&String, &String> = are
-        .iter()
-        .filter(|(ts, _)| !were.contains_key(*ts))
+    let new: BTreeSet<String> = are
+        .keys()
+        .filter(|ts| !were.contains_key(*ts))
+        .cloned()
         .collect();
-    if !new.is_empty() {
-        let authors: BTreeSet<&String> = new.values().copied().collect();
-        let names: Vec<String> = authors.iter().map(|id| by.named(id)).collect();
-        moved.push(Transition {
-            axis: Axis::Replies,
-            from: were.len().to_string(),
-            to: are.len().to_string(),
-            detail: (!names.is_empty()).then(|| names.join(", ")),
-            job: None,
-            made: posted(new.into_keys()),
-            partial: false,
-            lines: 0,
-            after: None,
-        });
-    }
+    let mut moved: Vec<Transition> = replied(are, &new, by).into_iter().collect();
     let emoji: BTreeSet<&String> = had.keys().chain(has.keys()).collect();
     for name in emoji {
         let (was, now) = (

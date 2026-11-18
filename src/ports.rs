@@ -9,7 +9,7 @@ use crate::domain::wait::CheckState;
 use crate::domain::watch::{Actors, Category, Discussion, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Where to look for messages.
 ///
@@ -203,8 +203,12 @@ pub type IssueLookup = (String, Result<IssueStatus, RefError>);
 pub struct MessageStatus {
     /// Emoji → how many. The bridge reads counts, not who reacted.
     pub reactions: BTreeMap<String, u32>,
-    /// The replies after it in its thread: ts → the user id that wrote it.
+    /// Every reply after it — in its thread, or the conversation's later
+    /// messages that answer it: ts → the user id that wrote it.
     pub replies: BTreeMap<String, String>,
+    /// Which of `replies` were read from its thread; the rest are later
+    /// messages in the channel.
+    pub threaded: BTreeSet<String>,
     /// User id → name, for everyone the read met, so a push names people.
     pub names: BTreeMap<String, String>,
 }
@@ -227,13 +231,7 @@ pub type MessageLookup = (Reference, Result<MessageStatus, RefError>);
 /// same reason those two are separate: nothing in its answer is shaped like
 /// theirs.
 pub trait MessageProvider {
-    /// `watched` is every live watched message, which decides the one a reply
-    /// belongs to (`domain::slack::owner`); a message read is always one.
-    fn read(
-        &self,
-        messages: &[Reference],
-        watched: &[Reference],
-    ) -> Result<Vec<MessageLookup>, ProviderError>;
+    fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError>;
 
     /// A channel's top-level messages after `oldest` (exclusive), or with
     /// `None` just its newest, for a baseline.

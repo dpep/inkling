@@ -898,10 +898,28 @@ was found.
   the thread. A reply read from a thread belongs to the latest watched message
   in that thread (the root, or a watched reply) posted before it; a later
   message in the channel, to the latest watched message anywhere in the
-  channel. Only live message watches count, due or not — a channel watch is
-  its own thing. `MessageProvider::read` is handed them for this
-  (`domain::slack::owner`); the store is unchanged, and a reply that a newer
-  watch takes over isn't a loss to the older one, since replies never shrink.
+  channel (`domain::slack::owner`). Only live message watches count, due or
+  not — a channel watch is its own thing.
+  - **Ownership decides who is told, not what is kept.** Every watch keeps
+    every reply that answers it, so a watch coming, going, pausing or
+    expiring loses or repeats nothing. When a reading brings a reply new to
+    a watch, `Watches::record` tells it to each reader whose latest watch
+    for it is this one, counting only *that reader's* watches: another
+    session's later message never takes a reply from you. The read says
+    which replies came from the thread (`MessageStatus::threaded`), since
+    that decides which watches a reply can belong to. Changed 2026-11-18
+    from deciding ownership in the read, which stored a reply only on its
+    owner: a later watch from another session silenced yours, and when a
+    reply watch ended its replies were pushed again on the root.
+  - **A watch counts once it has been read.** A never-read watch's first
+    reading is a baseline, so it takes nothing from older watches until
+    then. That baseline still tells a reader a reply one of their other
+    watches answers but hasn't read yet: it arrived since they last looked,
+    typically the answer to a follow-up you sent a minute ago, and would
+    otherwise reach nobody.
+  - **Each step counts every reply.** A replies event goes `3 → 4` when
+    the message has four replies and one is news here, even if the other
+    three were told on a later watch.
   One gap: a thread reply also sent to the channel is a thread's to the
   message that read its thread, but the channel read doesn't say it was
   threaded, so a later watched top-level message hears it too.
@@ -951,10 +969,21 @@ retried every tick. Two things follow:
   read alone: 0.4¢ warm, 2¢ cold). The channel read is `oldest` = the watched
   ts (exclusive, so exactly what came after), and a reply missing the
   `channel` key is a model that skipped the second call, so it is retried
-  rather than read as a quiet channel. One that parsed without the watched
-  message is `NotFound`, not retried: a deleted reply's thread still reads,
-  with no error code to match. The two reads are kept apart in the
+  rather than read as a quiet channel. One whose thread has rows but not the
+  watched message is `NotFound`, not retried: a deleted reply's thread still
+  reads, with no error code to match. A thread with no rows at all — a model
+  without the Slack tools echoing the JSON template — read nothing, and is
+  retried like any failed read. The two reads are kept apart in the
   reply, so a whole-channel watch could reuse the channel half unfiltered.
+- **A thread read is one page: its oldest 100.** The tool lists oldest first,
+  so on a longer thread the newest replies — the news — are past the page
+  (a watched reply is read from itself, so this counts from there). The
+  tool's maximum of 1000 was tried and backed out unmeasured: the model
+  writes a row back per reply, roughly 40k tokens for a full page, which no
+  bridge call finishes inside its timeout, so the thread would never read
+  again. The fix is reading from the newest reply already recorded, once a
+  real read shows whether `oldest` still returns the parent message, whose
+  row carries its reactions and proves it isn't gone.
 - **A channel read is one page: the newest 100.** A conversation busier than
   that since the watched message drops its earliest messages from the read,
   and the replies count can fall. Fine for a DM or a mention; a channel watch
