@@ -183,6 +183,7 @@ impl Waits {
                         failing: None,
                         head: None,
                         by: Default::default(),
+                        discussion: None,
                     }),
                     Seen::NotFound => Err(RefError::NotFound),
                     Seen::Failed { message } => Err(RefError::Other(message.clone())),

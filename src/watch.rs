@@ -187,11 +187,13 @@ impl Poller<'_> {
                                     standing: Standing::PullRequest {
                                         state: status.state,
                                         checks: status.checks,
+                                        comments: None,
                                     },
                                     title: status.title,
                                     failing: status.failing,
                                     head: status.head,
                                     by: status.by,
+                                    discussion: status.discussion,
                                 },
                             )),
                             Err(error) => {
@@ -232,6 +234,7 @@ impl Poller<'_> {
                                     failing: None,
                                     head: None,
                                     by: Default::default(),
+                                    discussion: None,
                                 },
                             )),
                             Err(error) => {
@@ -274,6 +277,7 @@ impl Poller<'_> {
                                         me: me.clone(),
                                         ..Actors::default()
                                     },
+                                    discussion: None,
                                 },
                             )),
                             Err(error) => {

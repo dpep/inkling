@@ -40,6 +40,21 @@ fixed, say where and leave the line.
 - An existing DM watch (`…/1771013011.519909`) jumped `replies 0 → 3` on its first read after the
   change: every later message in the DM became a reply at once. All mine, so `own` and no push;
   with someone else's messages in there it would have pushed one stale-looking transition.
+- Building PR comments: `gh pr view --comments` doesn't list line comments. On rippled#6493 one
+  author has 29 reviews, 27 of them a lone line comment, and gh prints 7 entries for them.
+  Expected the command a `comments` push ends in to show what it announced; for a reply in a
+  review thread it won't (docs/watching.md).
+- Good surprise: a review's line comments all carry its `submittedAt`, and each reply in a thread
+  is a review of its own (rippled#6493). One `reviews` connection with `comments { totalCount }`
+  covers line comments without reading them one by one.
+- Review bodies are most of the new query's weight: copilot's are ~10KB each, so care_fe#16618
+  went from 14KB to 175KB a reading (+~300ms median on a 3-PR batch), still one rate-limit point.
+  Expected `body` to be cheap; it is fetched only to learn whether it's empty.
+- Both CI probe repos named in CLAUDE.md are gone (`Could not resolve`), so there was nowhere
+  sanctioned to comment on my own PR live; the `own` path is tested by fixture only.
+- The session scratchpad is shared with sibling agents: its `live/` already held another run's
+  watches and a server it had started. Expected it to be mine; registered seven watches there
+  before noticing, then unwatched them. Use a fresh subdirectory per run.
 
 - First live Slack transition: a :dart: on the watched message arrived mid-turn as
   `inkling: slack:D1MG8KWNR/1794976101.418449 | reactions 0 → 1 :dart:`, read on the first tick

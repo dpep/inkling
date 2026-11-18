@@ -30,10 +30,12 @@ fn main() {
         standing: Standing::PullRequest {
             state: parse_state(state),
             checks: checks.first().map(|c| parse_checks(c)),
+            comments: None,
         },
         title: "a title nobody should see in a pushed message".into(),
         head: None,
         by: Default::default(),
+        discussion: None,
         failing: match checks.first().map(String::as_str) {
             Some("failure") => Some(FailedCheck {
                 name: "test / build".into(),

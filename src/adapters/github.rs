@@ -8,9 +8,10 @@
 use crate::domain::detect::Pushed;
 use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Actors, FailedCheck, Head};
+use crate::domain::watch::{Actors, Discussion, FailedCheck, Head, Remark};
 use crate::ports::{Lookup, ProviderError, RefError, RefStatus, StatusProvider};
 use crate::secret::Secret;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -190,10 +191,16 @@ impl StatusProvider for GitHubProvider {
     }
 }
 
+/// How many of the latest comments, and of the latest reviews, a reading
+/// asks for. A burst bigger than this still reads as news, as "at least".
+const PAGE: usize = 30;
+
 /// Aliases are positional (`r0`, `r1`, …) so results map back to the input
 /// slice without depending on GitHub preserving order.
 fn build_query(references: &[Reference]) -> String {
-    let mut query = String::from("query {");
+    // Who the reader is rides along: one field, in a request being made
+    // anyway, so there is nothing to cache and nothing to go stale.
+    let mut query = String::from("query { viewer { login }");
     for (i, reference) in references.iter().enumerate() {
         // The alias carries the index, so skipping one can't shift the rest.
         let Reference::GitHubPullRequest {
@@ -206,7 +213,7 @@ fn build_query(references: &[Reference]) -> String {
             continue;
         };
         query.push_str(&format!(
-            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision mergedBy {{ __typename login }} title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} latestReviews(first: 20) {{ nodes {{ state author {{ __typename login }} }} }} timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {{ nodes {{ ... on ReadyForReviewEvent {{ actor {{ __typename login }} }} ... on ConvertToDraftEvent {{ actor {{ __typename login }} }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
+            r#" r{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {number}) {{ isDraft state reviewDecision mergedBy {{ __typename login }} title headRefName headRepository {{ nameWithOwner }} author {{ login ... on User {{ name }} }} latestReviews(first: 20) {{ nodes {{ state author {{ __typename login }} }} }} comments(last: {PAGE}) {{ totalCount nodes {{ id createdAt author {{ __typename login }} }} }} reviews(last: {PAGE}) {{ totalCount nodes {{ id state submittedAt body author {{ __typename login }} comments {{ totalCount }} }} }} timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {{ nodes {{ ... on ReadyForReviewEvent {{ actor {{ __typename login }} }} ... on ConvertToDraftEvent {{ actor {{ __typename login }} }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{ __typename ... on CheckRun {{ name conclusion databaseId checkSuite {{ app {{ slug }} workflowRun {{ event workflow {{ name }} }} }} }} ... on StatusContext {{ context state }} }} }} }} }} }} }} }} }}"#,
             quote(owner),
             quote(repo),
         ));
@@ -275,6 +282,14 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
             .is_some_and(Repository::runs_checks)
     };
 
+    // Spelled as a pull request's actors are, so a comment can be told apart
+    // as the reader's own.
+    let me = response
+        .data
+        .viewer
+        .as_ref()
+        .map(|viewer| format!("@{}", viewer.login));
+
     references
         .iter()
         .enumerate()
@@ -291,7 +306,11 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                             .or_else(|| runs_checks(reference).then_some(CheckState::Pending)),
                         failing: pr.failing(),
                         head: pr.head(),
-                        by: pr.actors(),
+                        by: Actors {
+                            me: me.clone(),
+                            ..pr.actors()
+                        },
+                        discussion: Some(pr.discussion()),
                     }),
                     None => Err(RefError::NotFound),
                 },
@@ -310,9 +329,29 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
 #[derive(Debug, Deserialize, Default)]
 struct Response {
     #[serde(default)]
-    data: HashMap<String, Option<Repository>>,
+    data: Data,
     #[serde(default)]
     errors: Vec<GraphQlError>,
+}
+
+/// The aliased repositories, and who is asking.
+#[derive(Debug, Deserialize, Default)]
+struct Data {
+    #[serde(default)]
+    viewer: Option<Viewer>,
+    #[serde(flatten)]
+    repositories: HashMap<String, Option<Repository>>,
+}
+
+impl Data {
+    fn get(&self, alias: &str) -> Option<&Option<Repository>> {
+        self.repositories.get(alias)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Viewer {
+    login: String,
 }
 
 impl Response {
@@ -325,6 +364,7 @@ impl Response {
         }
         let rollups = self
             .data
+            .repositories
             .values_mut()
             .flatten()
             .filter_map(|repository| repository.pull_request.as_mut())
@@ -402,6 +442,12 @@ struct PullRequest {
     commits: Commits,
     #[serde(default, rename = "latestReviews")]
     latest_reviews: Option<Reviews>,
+    /// The latest conversation comments.
+    #[serde(default)]
+    comments: Option<Page<IssueComment>>,
+    /// The latest reviews, each carrying how many line comments it holds.
+    #[serde(default)]
+    reviews: Option<Page<SubmittedReview>>,
     /// The latest ready-for-review or convert-to-draft, whichever was last.
     #[serde(default, rename = "timelineItems")]
     draft_toggles: Option<Toggles>,
@@ -452,6 +498,72 @@ impl Reviewer {
         }
     }
 }
+
+/// The last page of a connection, and how long the whole of it is.
+#[derive(Debug, Deserialize)]
+struct Page<T> {
+    #[serde(default, rename = "totalCount")]
+    total_count: u64,
+    #[serde(default = "Vec::new")]
+    nodes: Vec<T>,
+}
+
+impl<T> Page<T> {
+    /// The oldest time on the page when the page didn't hold them all:
+    /// anything older wasn't read.
+    fn horizon(&self, at: impl Fn(&T) -> Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+        match self.total_count > self.nodes.len() as u64 {
+            true => self.nodes.iter().filter_map(at).min(),
+            false => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueComment {
+    id: String,
+    #[serde(rename = "createdAt")]
+    created_at: DateTime<Utc>,
+    /// Null for a deleted account.
+    #[serde(default)]
+    author: Option<Reviewer>,
+}
+
+/// A review as the conversation sees it. Its line comments are counted, not
+/// read: they are published with the review, at its `submittedAt` — recorded
+/// 2026-11-17, and a reply to a thread is a review of its own — so the review
+/// says who and when for all of them.
+#[derive(Debug, Deserialize)]
+struct SubmittedReview {
+    id: String,
+    state: String,
+    /// Null while the review is pending, which only its author can see.
+    #[serde(default, rename = "submittedAt")]
+    submitted_at: Option<DateTime<Utc>>,
+    /// Whether it has one. The text itself is never kept.
+    #[serde(default, deserialize_with = "has_text")]
+    body: bool,
+    #[serde(default)]
+    author: Option<Reviewer>,
+    #[serde(default)]
+    comments: Option<Count>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Count {
+    #[serde(default, rename = "totalCount")]
+    total_count: u64,
+}
+
+/// Reads a string down to whether it says anything, so somebody else's prose
+/// is never held past parsing.
+fn has_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let text: Option<String> = Option::deserialize(deserializer)?;
+    Ok(text.is_some_and(|text| !text.trim().is_empty()))
+}
+
+/// What a deleted account is shown as.
+const GHOST: &str = "@ghost";
 
 #[derive(Debug, Deserialize)]
 struct NamedRepository {
@@ -750,6 +862,57 @@ impl PullRequest {
             merged,
             ..Actors::default()
         }
+    }
+
+    /// The latest comments and reviews, as who said something and when.
+    ///
+    /// A review counts its line comments, plus one for a body; one with
+    /// neither, an approval with nothing to say, isn't a comment at all.
+    fn discussion(&self) -> Discussion {
+        let mut said = Discussion::default();
+        let mut horizons = Vec::new();
+        if let Some(comments) = &self.comments {
+            said.total += comments.total_count;
+            horizons.extend(comments.horizon(|c| Some(c.created_at)));
+            said.remarks.extend(comments.nodes.iter().map(|comment| {
+                Remark {
+                    id: comment.id.clone(),
+                    at: comment.created_at,
+                    by: comment
+                        .author
+                        .as_ref()
+                        .map_or(GHOST.into(), Reviewer::display),
+                    weight: 1,
+                    approval: false,
+                }
+            }));
+        }
+        if let Some(reviews) = &self.reviews {
+            horizons.extend(reviews.horizon(|r| r.submitted_at));
+            for review in &reviews.nodes {
+                let Some(at) = review.submitted_at else {
+                    continue;
+                };
+                let lines = review.comments.as_ref().map_or(0, |c| c.total_count);
+                let weight = lines + u64::from(review.body);
+                if weight == 0 {
+                    continue;
+                }
+                said.total += weight;
+                said.remarks.push(Remark {
+                    id: review.id.clone(),
+                    at,
+                    by: review
+                        .author
+                        .as_ref()
+                        .map_or(GHOST.into(), Reviewer::display),
+                    weight,
+                    approval: review.state == "APPROVED",
+                });
+            }
+        }
+        said.complete_after = horizons.into_iter().max();
+        said
     }
 
     /// GitHub reports more rollup states than matter here. Anything not
@@ -1611,5 +1774,105 @@ mod tests {
         // The quote that would have closed the string literal is escaped, so
         // the injected braces stay inert data.
         assert!(query.contains(r#"eviL\""#), "{query}");
+    }
+
+    /// Recorded 2026-11-17 from home-assistant/core#193001 with the query as
+    /// built: bots and people commenting, copilot reviewing with a body, two
+    /// approvals with none. Review bodies are masked to `…` or left empty,
+    /// which is all a reading keeps of them.
+    const HOME_ASSISTANT: &str = r#"{"data":{"viewer":{"login":"dpep"},"r0":{"pullRequest":{"isDraft":false,"state":"MERGED","reviewDecision":"APPROVED","comments":{"totalCount":5,"nodes":[{"id":"IC_kwDOAMSroc8AAAABnRRzZg","createdAt":"2026-11-16T21:45:23Z","author":{"__typename":"Bot","login":"home-assistant"}},{"id":"IC_kwDOAMSroc8AAAABnRR5qw","createdAt":"2026-11-16T21:45:27Z","author":{"__typename":"Bot","login":"home-assistant"}},{"id":"IC_kwDOAMSroc8AAAABnRb_mQ","createdAt":"2026-11-16T21:52:43Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDOAMSroc8AAAABnRfoJQ","createdAt":"2026-11-16T21:55:24Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDOAMSroc8AAAABnbWhog","createdAt":"2026-11-17T06:44:26Z","author":{"__typename":"User","login":"OnFreund"}}]},"reviews":{"totalCount":5,"nodes":[{"id":"PRR_kwDOAMSroc8AAAABYVqeVg","state":"COMMENTED","submittedAt":"2026-11-16T21:45:27Z","body":"…","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"},"comments":{"totalCount":0}},{"id":"PRR_kwDOAMSroc8AAAABYbOc8g","state":"APPROVED","submittedAt":"2026-11-17T06:44:52Z","body":"","author":{"__typename":"User","login":"OnFreund"},"comments":{"totalCount":0}},{"id":"PRR_kwDOAMSroc8AAAABYmF1VQ","state":"COMMENTED","submittedAt":"2026-11-17T19:53:09Z","body":"…","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"},"comments":{"totalCount":0}},{"id":"PRR_kwDOAMSroc8AAAABYmI5Iw","state":"COMMENTED","submittedAt":"2026-11-17T19:56:20Z","body":"…","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"},"comments":{"totalCount":0}},{"id":"PRR_kwDOAMSroc8AAAABYmJ8xg","state":"APPROVED","submittedAt":"2026-11-17T19:57:35Z","body":"","author":{"__typename":"User","login":"silamon"},"comments":{"totalCount":0}}]}}}}}"#;
+
+    fn discussion(json: &str) -> (Discussion, Option<String>) {
+        let status = interpret(&[pr("x", 1)], &parse(json))[0].1.clone().unwrap();
+        (status.discussion.unwrap(), status.by.me)
+    }
+
+    #[test]
+    fn a_reading_counts_comments_and_reviews_that_say_something() {
+        let (said, me) = discussion(HOME_ASSISTANT);
+        assert_eq!(
+            me.as_deref(),
+            Some("@dpep"),
+            "the viewer, spelled as an actor"
+        );
+        assert_eq!(said.total, 8, "five comments and copilot's three reviews");
+        assert_eq!(said.complete_after, None, "both pages held everything");
+        let who: Vec<&str> = said.remarks.iter().map(|r| r.by.as_str()).collect();
+        assert_eq!(
+            who,
+            [
+                "home-assistant (bot)",
+                "home-assistant (bot)",
+                "github-actions (bot)",
+                "github-actions (bot)",
+                "@OnFreund",
+                "copilot-pull-request-reviewer (bot)",
+                "copilot-pull-request-reviewer (bot)",
+                "copilot-pull-request-reviewer (bot)",
+            ],
+            "an approval with nothing to say is not a comment"
+        );
+    }
+
+    /// Recorded 2026-11-17 from ohcnetwork/care_fe#16618: 125 reviews, so
+    /// the page holds the latest 30; trimmed here to five of them. One is a
+    /// lint bot's 50 line comments under an empty review, one a person
+    /// requesting changes with a body and three line comments.
+    const CARE_FE: &str = r#"{"data":{"viewer":{"login":"dpep"},"r0":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":"CHANGES_REQUESTED","comments":{"totalCount":11,"nodes":[{"id":"IC_kwDODtfaXs8AAAABMrSJ-A","createdAt":"2026-07-31T17:22:27Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDODtfaXs8AAAABMrSbvg","createdAt":"2026-07-31T17:22:48Z","author":{"__typename":"Bot","login":"coderabbitai"}},{"id":"IC_kwDODtfaXs8AAAABMrdMDQ","createdAt":"2026-07-31T17:44:20Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDODtfaXs8AAAABMs4dQw","createdAt":"2026-07-31T20:49:25Z","author":{"__typename":"Bot","login":"cloudflare-workers-and-pages"}},{"id":"IC_kwDODtfaXs8AAAABNIGt6Q","createdAt":"2026-08-04T07:25:41Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDODtfaXs8AAAABNuXqIA","createdAt":"2026-08-07T10:42:30Z","author":{"__typename":"User","login":"nihal467"}},{"id":"IC_kwDODtfaXs8AAAABSgCgNg","createdAt":"2026-09-04T06:16:32Z","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"}},{"id":"IC_kwDODtfaXs8AAAABSg9ePA","createdAt":"2026-09-04T07:56:31Z","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"}},{"id":"IC_kwDODtfaXs8AAAABSz4IUw","createdAt":"2026-09-06T05:59:35Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDODtfaXs8AAAABUmxekg","createdAt":"2026-09-15T09:21:12Z","author":{"__typename":"Bot","login":"github-actions"}},{"id":"IC_kwDODtfaXs8AAAABXwa3Gw","createdAt":"2026-09-29T11:22:22Z","author":{"__typename":"Bot","login":"github-actions"}}]},"reviews":{"totalCount":125,"nodes":[{"id":"PRR_kwDODtfaXs8AAAABPjl4SQ","state":"COMMENTED","submittedAt":"2026-09-28T12:55:48Z","body":"","author":{"__typename":"Bot","login":"github-actions"},"comments":{"totalCount":50}},{"id":"PRR_kwDODtfaXs8AAAABRD49JA","state":"COMMENTED","submittedAt":"2026-10-07T08:52:20Z","body":"…","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"},"comments":{"totalCount":1}},{"id":"PRR_kwDODtfaXs8AAAABRgWsPA","state":"COMMENTED","submittedAt":"2026-10-09T12:02:25Z","body":"…","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"},"comments":{"totalCount":2}},{"id":"PRR_kwDODtfaXs8AAAABRrygeQ","state":"COMMENTED","submittedAt":"2026-10-11T03:28:29Z","body":"…","author":{"__typename":"Bot","login":"copilot-pull-request-reviewer"},"comments":{"totalCount":0}},{"id":"PRR_kwDODtfaXs8AAAABSpyv4w","state":"CHANGES_REQUESTED","submittedAt":"2026-10-22T08:18:06Z","body":"…","author":{"__typename":"User","login":"yash-learner"},"comments":{"totalCount":3}}]}}}}}"#;
+
+    #[test]
+    fn a_review_counts_its_line_comments_and_its_body() {
+        let (said, _) = discussion(CARE_FE);
+        let weights: Vec<(&str, u64, bool)> = said.remarks[11..]
+            .iter()
+            .map(|r| (r.by.as_str(), r.weight, r.approval))
+            .collect();
+        assert_eq!(
+            weights,
+            [
+                ("github-actions (bot)", 50, false),
+                ("copilot-pull-request-reviewer (bot)", 2, false),
+                ("copilot-pull-request-reviewer (bot)", 3, false),
+                ("copilot-pull-request-reviewer (bot)", 1, false),
+                ("@yash-learner", 4, false),
+            ]
+        );
+        assert_eq!(said.total, 11 + 50 + 2 + 3 + 1 + 4);
+    }
+
+    #[test]
+    fn more_reviews_than_a_page_marks_where_the_reading_stops() {
+        let (said, _) = discussion(CARE_FE);
+        assert_eq!(
+            said.complete_after,
+            Some("2026-09-28T12:55:48Z".parse().unwrap()),
+            "the oldest review on the page; the comments page held all eleven"
+        );
+    }
+
+    #[test]
+    fn the_query_asks_for_the_latest_comments_and_who_is_asking() {
+        let query = build_query(&[pr("a", 1), pr("b", 2)]);
+        assert_eq!(query.matches("viewer { login }").count(), 1, "{query}");
+        assert!(query.contains("comments(last: 30) { totalCount"), "{query}");
+        assert!(
+            query.contains("reviews(last: 30) { totalCount nodes { id state submittedAt body"),
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn a_pending_review_or_a_deleted_account_does_not_break_a_reading() {
+        let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":null,
+            "comments":{"totalCount":1,"nodes":[{"id":"IC_1","createdAt":"2026-11-17T10:00:00Z","author":null}]},
+            "reviews":{"totalCount":1,"nodes":[{"id":"PRR_1","state":"PENDING","submittedAt":null,"body":"…",
+            "author":{"__typename":"User","login":"dpep"},"comments":{"totalCount":2}}]}}}}}"#;
+        let (said, me) = discussion(json);
+        assert_eq!(
+            me, None,
+            "no viewer in the response, so nobody is the reader"
+        );
+        assert_eq!(said.total, 1, "a pending review is unpublished");
+        assert_eq!(said.remarks[0].by, "@ghost");
     }
 }

@@ -829,8 +829,119 @@ the child sees an environment variable set on it. The runner sets
 `INKLING_BRIDGE=1` and `inkling hook` returns before reading anything, so a
 read never subscribes a throwaway session or watches what it read.
 
+## Comments on a pull request
+
+Built 2026-11-17: a watched pull request reports new comments, from anyone, as
+a third axis beside `state` and `checks`:
+
+```
+github.com/you/repo#42 | comments 3 → 5 by @alice, coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)
+```
+
+**What counts.** Conversation comments (`comments`, GitHub's issue comments),
+line comments, and reviews with a body. A review is read as one unit — who,
+when, how many line comments, whether it has a body — rather than its line
+comments one by one: recorded on three pull requests (VoiceIsolate-Pro#938,
+care_fe#16618, XRPLF/rippled#6493), every line comment's `publishedAt` is its
+review's `submittedAt`, and on rippled each reply in a thread belongs to a
+review of its own. So one connection covers both, and a review weighs its
+line comments plus one for a body. An approval with nothing to say weighs
+nothing and isn't a comment. A pending review has no `submittedAt` and is
+skipped: only its author can see it.
+
+**The representation: a time, not a set of ids.** The standing keeps
+`Comments { count, latest, at_latest }` — how many, when the newest counted one
+was made, and the ids made in exactly that second. A comment is new if it was
+made after `latest`, or in that second and isn't in `at_latest`. Why not ids:
+
+- **A page slides.** Each reading asks for the latest 30 of each kind. Delete
+  one and an older comment slides into view; a set of ids calls it new. Times
+  only grow at the end, so "after the newest one counted" is new and nothing
+  else is.
+- **An edit keeps its time.** codecov, Vercel and home-assistant's bot rewrite
+  one comment in place on every push (recorded: `lastEditedAt` hours after
+  `createdAt`, same id). Same id, same time: not new. That is the whole of
+  "edits don't count", with no edit-detection code.
+- **Seconds tie.** GitHub's times are to the second, and bots post in bursts
+  (recorded on VoiceIsolate-Pro#938: five bots inside nine seconds). The ids
+  at `latest` keep a second comment in a counted second from being missed;
+  it is one or two ids, not the whole page.
+- **The count only grows.** `count = max(before + new, GitHub's total)`. A
+  deletion lowers GitHub's total and leaves the count alone; a deletion and a
+  new comment in one reading still reads `n → n+1`.
+
+What it costs: a comment that turns up later with an *older* time than one
+already counted is missed. GitHub doesn't backdate, so this would take
+replication lag between the two pages of one response.
+
+**A burst bigger than the page.** Each page reports `totalCount`; when it held
+fewer than that, the adapter hands over the oldest time on the page
+(`Discussion::complete_after`). If even that is newer than `latest`, the
+reading may not reach back to the last one counted, and the line says so:
+`comments 1 → 41 at least 40 new, by @bob`. The count comes from GitHub's
+totals, so it is right for conversation comments however many came; reviews
+beyond the page aren't summed, so for a pull request with more than 30 reviews
+the count is a floor (care_fe#16618 has 125). The names are the page's.
+
+**Who you are** is the authenticated viewer, `viewer { login }`, asked in the
+same batched query every time rather than cached. It is one field in a request
+already being made — measured, the cost stays at one rate-limit point — so
+there is nothing to store and nothing to go stale when the token changes. A
+transition whose new comments are all `@<viewer>` is `own`: recorded, shown at
+the next prompt, not pushed, exactly as Slack replies. Logins are compared as
+spelled, `@login`, the same form actors already use.
+
+**An approval is said once.** An approval moves `state` (`open → approved by
+@alice`), and an approval with a body is also a review with a body. When the
+same reading moves the state into `approved`, approvals are left out of that
+reading's comments line — still counted, so the next line's numbers are
+right. When the state doesn't move — the repository wants two approvals, or
+it was already approved — an approval with a body is a comment, since nothing
+else would report it. Changes requested always counts: inkling reads it as
+`open`, so the state axis says nothing. Line comments left with an approval
+are their own comments and do get a line; they are what there is to read.
+
+**No prose.** The review body is fetched only to know whether it is empty —
+`SubmittedReview::body` deserializes to a `bool`, so the text never outlives
+parsing — and no comment text is asked for at all. The push says who, how
+many, and the command to read them.
+
+**Cost, measured 2026-11-17** on a 3-reference batch (care_fe#16618,
+home-assistant/core#193001, dpep/inkling#30), ten interleaved runs each:
+
+| query | rate-limit cost | median | bytes |
+| --- | --- | --- | --- |
+| before | 1 | 2299ms | 14KB |
+| with comments, without review bodies | 1 | 2429ms | 23KB |
+| with comments and review bodies (built) | 1 | 2598ms | 175KB |
+
+The bytes are copilot's review bodies, ~10KB each on care_fe; a pull request
+without a review bot adds next to nothing. Without `body`, a review with line
+comments couldn't say whether it also had a body, nor an approval whether it
+had anything to say. If the bytes start to matter, the measured alternative is
+the middle row, with a review counting its line comments, or one when it has
+none.
+
+**The command doesn't show line comments.** `gh pr view --comments` lists
+conversation comments and reviews with a body. Checked on rippled#6493, where
+one author has 29 reviews, 27 of them a single line comment and no body: gh
+prints 7 entries for them. So a push for a reply in a review thread names who
+and how many, and the command it ends in won't show it; the line comments are
+in `gh api repos/<owner>/<repo>/pulls/<n>/comments`, oldest first. Not fixed
+here: telling the two apart needs the kind carried onto the event, to pick a
+command per line. What would change this: a session told of a comment it then
+couldn't find.
+
+**Out of scope.** Comments after a pull request merges or closes: the watch ends
+at its last event, as before.
+
 ## Not built, and what would change that
 
+- **Muting a bot's comments.** Every bot pushes, labelled `(bot)`. A bot that
+  deletes and reposts instead of editing — some coverage reporters do —
+  pushes on every push, since a new comment is new. `github.ignore_checks` is
+  the precedent if one earns it: a list of logins whose comments are counted
+  and never told. What would change this: a dogfood line naming the bot.
 - **Watching a Slack channel.** A channel is a stream, not a thing that moves
   between standings: "tell me about #eng" needs a filter — from whom, about
   what — before any of it is news, and every candidate filter is a guess. One

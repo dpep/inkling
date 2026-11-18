@@ -3,7 +3,7 @@
 Keep an eye on things.
 
 Inkling tells a Claude Code session when something it cares about changes. A pull
-request's checks go red or green, it gets approved, it merges; a Jira issue
+request's checks go red or green, somebody comments on it, it gets approved, it merges; a Jira issue
 moves column; somebody replies to a Slack message you posted. The news lands in the session as one line, mid-turn, without
 anyone asking:
 
@@ -108,9 +108,10 @@ One line per transition: from what, to what, and who caused it or which check
 went red:
 
 ```
-github.com/dpep/inkling#3  checks  pending → failure  test / build
-github.com/dpep/inkling#3  state   open → merged      by @dpep
-AI-123                     status  To Do → In Progress
+github.com/dpep/inkling#3  checks    pending → failure  test / build
+github.com/dpep/inkling#3  comments  3 → 5              by @alice, coderabbitai (bot)
+github.com/dpep/inkling#3  state     open → merged      by @dpep
+AI-123                     status    To Do → In Progress
 slack:C0123ABCD/1786596050.245879  replies    2 → 4  by @alice, @bob
 slack:C0123ABCD/1786596050.245879  reactions  0 → 1  :white_check_mark:
 ```
@@ -132,6 +133,23 @@ last event.
 
 Jira issues are a key (`AI-123`) or an `.atlassian.net/browse/` URL. Jira goes
 through `acli`, which must be on `PATH` and authenticated.
+
+### What a pull request reports
+
+Three axes, each moving on its own:
+
+- `state`: draft, open, approved, merged or closed, and who put it there.
+- `checks`: pending, success or failure, and which check went red.
+- `comments`: how many, and who wrote the new ones. Conversation comments,
+  line comments, and reviews with something to say all count; bots say
+  `(bot)`. Never what anybody wrote: to read it, run the command a push ends
+  in.
+
+An edited comment isn't new, so a coverage bot rewriting its comment on every
+push stays quiet, and a deleted one is never news. Comments only you wrote are
+in `events` but aren't pushed. An approval that moves the state is said once,
+on `state`; one that doesn't (a second approval still required) arrives as a
+comment if it has a body.
 
 ### Slack messages
 
@@ -196,11 +214,14 @@ some CI marks a build red while a retry is still running.
 
 A red Actions job ends in the command for its log, which GitHub serves as soon
 as that job ends (`gh run view --log-failed` waits for the whole run). A check
-from any other app ends in `gh pr checks` instead.
+from any other app ends in `gh pr checks` instead. New comments end in
+`gh pr view <n> --repo <host>/<owner>/<repo> --comments`, which shows
+conversation comments and review bodies but not line comments; those are in
+`gh api repos/<owner>/<repo>/pulls/<n>/comments`.
 
 The line is built only from what Inkling decided: the reference, what moved,
-who caused it, and which check went red. Never the pull request's title or the
-Jira summary. That is prose somebody else wrote, and this lands inside an
+who caused it, and which check went red. Never the pull request's title, a
+comment, or the Jira summary. That is prose somebody else wrote, and this lands inside an
 agent's turn.
 
 Push and pull share one cursor, so a transition arrives once either way.

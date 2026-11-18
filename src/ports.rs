@@ -6,7 +6,7 @@
 
 use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Actors, Category, FailedCheck, Head};
+use crate::domain::watch::{Actors, Category, Discussion, FailedCheck, Head};
 use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap};
@@ -127,6 +127,8 @@ pub struct RefStatus {
     pub head: Option<Head>,
     /// Who did what to it, so a transition can say.
     pub by: Actors,
+    /// Who has said something on it lately, and when. Never what.
+    pub discussion: Option<Discussion>,
 }
 
 impl RefStatus {
@@ -139,6 +141,7 @@ impl RefStatus {
             failing: None,
             head: None,
             by: Default::default(),
+            discussion: None,
         }
     }
 }

@@ -981,7 +981,12 @@ mod tests {
 
     fn seen_pull(state: State, checks: Option<CheckState>) -> Sighting {
         Sighting {
-            standing: Standing::PullRequest { state, checks },
+            discussion: None,
+            standing: Standing::PullRequest {
+                state,
+                checks,
+                comments: None,
+            },
             title: "Add inkling wait".into(),
             failing: None,
             head: None,
@@ -991,6 +996,7 @@ mod tests {
 
     fn seen_issue(status: &str, category: Category) -> Sighting {
         Sighting {
+            discussion: None,
             standing: Standing::Issue {
                 status: status.into(),
                 category,
@@ -1275,6 +1281,7 @@ mod tests {
 
     fn seen_message() -> Sighting {
         Sighting {
+            discussion: None,
             standing: Standing::Message {
                 reactions: Default::default(),
                 replies: Default::default(),
@@ -1839,7 +1846,8 @@ mod tests {
                 .map(|s| &s.standing),
             Some(&Standing::PullRequest {
                 state: State::Approved,
-                checks: None
+                checks: None,
+                comments: None,
             })
         );
     }

@@ -49,6 +49,10 @@ pub enum Standing {
         /// `None` when the head commit has no check rollup — no checks
         /// configured, or none created yet. See `carried_over`.
         checks: Option<CheckState>,
+        /// `None` until a reading has counted them, which is also what a
+        /// watch stored before comments were read has: a baseline, not news.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comments: Option<Comments>,
     },
     Issue {
         status: String,
@@ -97,6 +101,8 @@ pub enum Axis {
     Replies,
     /// How many of one emoji a Slack message carries.
     Reactions,
+    /// How many comments a pull request has: conversation, line, review.
+    Comments,
 }
 
 impl Axis {
@@ -107,6 +113,7 @@ impl Axis {
             Axis::Status => "status",
             Axis::Replies => "replies",
             Axis::Reactions => "reactions",
+            Axis::Comments => "comments",
         }
     }
 }
@@ -146,6 +153,90 @@ impl Head {
     }
 }
 
+/// How far into a pull request's conversation the last reading got: enough to
+/// tell a new comment from one already counted, and nothing anybody wrote.
+///
+/// A time and not a set of ids, because a page of the latest comments slides:
+/// one deleted pulls an older one into view, and a set would call it new.
+/// Comments are only ever added at the end, so "after the newest one counted"
+/// is new, and an edit, which keeps its comment's time, is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comments {
+    /// How many, as far as the readings could count. Only ever grows: a
+    /// deleted comment is not news.
+    pub count: u64,
+    /// When the newest comment counted was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<DateTime<Utc>>,
+    /// The comments made at exactly `latest`. GitHub's times are to the
+    /// second, so the time alone can't say whether another comment in that
+    /// second was counted.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub at_latest: BTreeSet<String>,
+}
+
+impl Comments {
+    fn baseline(said: &Discussion) -> Self {
+        let mut mark = Comments {
+            count: said.total,
+            latest: None,
+            at_latest: BTreeSet::new(),
+        };
+        mark.advance(&said.remarks);
+        mark
+    }
+
+    fn is_new(&self, remark: &Remark) -> bool {
+        self.latest.is_none_or(|latest| {
+            remark.at > latest || (remark.at == latest && !self.at_latest.contains(&remark.id))
+        })
+    }
+
+    fn advance<'a>(&mut self, remarks: impl IntoIterator<Item = &'a Remark>) {
+        for remark in remarks {
+            match self.latest {
+                Some(latest) if remark.at < latest => {}
+                Some(latest) if remark.at == latest => {
+                    self.at_latest.insert(remark.id.clone());
+                }
+                _ => {
+                    self.latest = Some(remark.at);
+                    self.at_latest = BTreeSet::from([remark.id.clone()]);
+                }
+            }
+        }
+    }
+}
+
+/// Something said on a pull request — a conversation comment, or a submitted
+/// review with its line comments — as a reading keeps it: who and when, never
+/// what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remark {
+    pub id: String,
+    pub at: DateTime<Utc>,
+    /// `@login`, or `login (bot)`.
+    pub by: String,
+    /// How many comments it is: one for a conversation comment; for a review,
+    /// its line comments, and one more if it has a body.
+    pub weight: u64,
+    /// An approval, which the state axis may already have said.
+    pub approval: bool,
+}
+
+/// What one reading saw of a pull request's conversation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Discussion {
+    /// The latest of each kind, a page of each.
+    pub remarks: Vec<Remark>,
+    /// How many comments there are, as far as the pages and GitHub's counts
+    /// say: exact unless there are more reviews than a page holds.
+    pub total: u64,
+    /// Every remark made at or after this is in `remarks`. `None` when all of
+    /// them are; otherwise a burst bigger than a page may reach past it.
+    pub complete_after: Option<DateTime<Utc>>,
+}
+
 /// One reading of one reference, as a poll hands it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sighting {
@@ -164,12 +255,17 @@ pub struct Sighting {
     /// Outside `Standing` for the same reason as `failing`: a second
     /// approver is not a transition.
     pub by: Actors,
+    /// A pull request's comments, when the provider read them. What is new
+    /// depends on the reading before, so `reading` turns this into the
+    /// standing's `Comments`.
+    pub discussion: Option<Discussion>,
 }
 
 /// Who moved a pull request, as `@login`, or `login (bot)` for an app: a
 /// review bot satisfying the requirement, or automation sending a pull
 /// request back to draft, is different news from a person. For a Slack
-/// message, how to name the people in it, and which of them is the reader.
+/// message, how to name the people in it; for either, which of them is the
+/// reader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Actors {
     /// Whose approvals stand.
@@ -180,7 +276,8 @@ pub struct Actors {
     pub merged: Option<String>,
     /// Slack user id → the name a push says, for whoever a reading met.
     pub names: BTreeMap<String, String>,
-    /// The Slack user the credentials belong to, when known.
+    /// Who the credentials belong to, when known: a Slack user id, or a
+    /// GitHub `@login` as a pull request's actors are spelled.
     pub me: Option<String>,
 }
 
@@ -277,22 +374,44 @@ pub struct Reading {
 /// was compared would diff the next reading against something nobody was ever
 /// told about.
 pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
-    let standing = carried_over(before, &after.standing);
-    let Some(before) = before else {
-        return Reading {
-            standing,
-            moved: Vec::new(),
+    let mut standing = carried_over(before, &after.standing);
+    let mut moved = before.map_or_else(Vec::new, |before| compared(before, &standing, after));
+    if let Standing::PullRequest {
+        state: now,
+        comments,
+        ..
+    } = &mut standing
+    {
+        let (had, was) = match before {
+            Some(Standing::PullRequest {
+                comments, state, ..
+            }) => (comments.as_ref(), Some(*state)),
+            _ => (None, None),
         };
-    };
-    let moved = match (before, &standing) {
+        // An approval the state axis is about to name is one action, so it
+        // is said once, there.
+        let approved = *now == State::Approved && was.is_some_and(|was| was != State::Approved);
+        let (mark, said) = commented(had, after.discussion.as_ref(), approved, &after.by);
+        *comments = mark;
+        moved.extend(said);
+    }
+    Reading { standing, moved }
+}
+
+/// What moved between two standings, on every axis but comments, which need
+/// the reading's discussion as well as the standing.
+fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Transition> {
+    match (before, standing) {
         (
             Standing::PullRequest {
                 state: was,
                 checks: had,
+                ..
             },
             Standing::PullRequest {
                 state: now,
                 checks: has,
+                ..
             },
         ) => {
             let mut moved = Vec::new();
@@ -343,8 +462,72 @@ pub fn reading(before: Option<&Standing>, after: &Sighting) -> Reading {
         // Same status, or a reference that somehow changed kind — which it
         // can't, since a watch is keyed by the reference itself.
         _ => Vec::new(),
+    }
+}
+
+/// Where a pull request's comments stand after this reading, and the
+/// transition when somebody said something new.
+///
+/// Only growth is news. An edit keeps its comment's time, so a coverage bot
+/// rewriting its comment on every push is not new; a deleted comment is not
+/// news either, so the count never goes down. A reading that didn't count
+/// them keeps the mark it had, and the first one that does is a baseline.
+fn commented(
+    had: Option<&Comments>,
+    said: Option<&Discussion>,
+    approved: bool,
+    by: &Actors,
+) -> (Option<Comments>, Option<Transition>) {
+    let (had, said) = match (had, said) {
+        (had, None) => return (had.cloned(), None),
+        (None, Some(said)) => return (Some(Comments::baseline(said)), None),
+        (Some(had), Some(said)) => (had, said),
     };
-    Reading { standing, moved }
+    let mut new: Vec<&Remark> = said.remarks.iter().filter(|r| had.is_new(r)).collect();
+    new.sort_by_key(|remark| remark.at);
+    let mut mark = had.clone();
+    mark.advance(new.iter().copied());
+    mark.count = mark
+        .count
+        .saturating_add(new.iter().map(|r| r.weight).sum())
+        .max(said.total);
+
+    let told: Vec<&Remark> = new
+        .into_iter()
+        .filter(|remark| !(approved && remark.approval))
+        .collect();
+    if told.is_empty() {
+        return (Some(mark), None);
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for remark in &told {
+        if !names.contains(&remark.by.as_str()) {
+            names.push(&remark.by);
+        }
+    }
+    let own = by
+        .me
+        .as_deref()
+        .is_some_and(|me| names.iter().all(|name| *name == me));
+    // The oldest of a full page is itself new, so the burst may reach further
+    // back than the page did.
+    let partial = said
+        .complete_after
+        .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
+    let names = names.join(", ");
+    let detail = match partial {
+        true => format!("at least {} new, by {names}", mark.count - had.count),
+        false => format!("by {names}"),
+    };
+    let moved = Transition {
+        axis: Axis::Comments,
+        from: had.count.to_string(),
+        to: mark.count.to_string(),
+        detail: Some(detail),
+        job: None,
+        own,
+    };
+    (Some(mark), Some(moved))
 }
 
 /// What moved on a Slack message: one transition for its replies, naming who
@@ -418,10 +601,12 @@ fn carried_over(before: Option<&Standing>, after: &Standing) -> Standing {
             Standing::PullRequest {
                 state,
                 checks: None,
+                comments,
             },
         ) => Standing::PullRequest {
             state: *state,
             checks: Some(*had),
+            comments: comments.clone(),
         },
         _ => after.clone(),
     }
@@ -543,7 +728,12 @@ mod tests {
 
     fn pull(state: State, checks: Option<CheckState>) -> Sighting {
         Sighting {
-            standing: Standing::PullRequest { state, checks },
+            discussion: None,
+            standing: Standing::PullRequest {
+                state,
+                checks,
+                comments: None,
+            },
             title: "Add inkling wait".into(),
             failing: None,
             head: None,
@@ -553,6 +743,7 @@ mod tests {
 
     fn issue(status: &str, category: Category) -> Sighting {
         Sighting {
+            discussion: None,
             standing: Standing::Issue {
                 status: status.into(),
                 category,
@@ -577,7 +768,11 @@ mod tests {
     }
 
     fn checks(state: State, checks: Option<CheckState>) -> Standing {
-        Standing::PullRequest { state, checks }
+        Standing::PullRequest {
+            state,
+            checks,
+            comments: None,
+        }
     }
 
     #[test]
@@ -594,6 +789,7 @@ mod tests {
         let before = Standing::PullRequest {
             state: State::Open,
             checks: None,
+            comments: None,
         };
         let moved = changed(Some(&before), &pull(State::Merged, None));
         assert_eq!(moved.len(), 1);
@@ -609,6 +805,7 @@ mod tests {
         let before = Standing::PullRequest {
             state: State::Open,
             checks: Some(CheckState::Pending),
+            comments: None,
         };
         assert!(changed(Some(&before), &pull(State::Open, Some(CheckState::Pending))).is_empty());
     }
@@ -620,6 +817,7 @@ mod tests {
         let before = Standing::PullRequest {
             state: State::Open,
             checks: Some(CheckState::Pending),
+            comments: None,
         };
         let moved = changed(
             Some(&before),
@@ -636,6 +834,7 @@ mod tests {
         let before = Standing::PullRequest {
             state: State::Open,
             checks: Some(CheckState::Pending),
+            comments: None,
         };
         let after = Sighting {
             failing: Some(FailedCheck {
@@ -656,6 +855,7 @@ mod tests {
         let before = Standing::PullRequest {
             state: State::Open,
             checks: Some(CheckState::Failure),
+            comments: None,
         };
         let after = Sighting {
             failing: Some(FailedCheck {
@@ -726,6 +926,7 @@ mod tests {
         let before = Standing::PullRequest {
             state: State::Open,
             checks: Some(CheckState::Failure),
+            comments: None,
         };
         let moved = changed(Some(&before), &pull(State::Open, Some(CheckState::Pending)));
         assert_eq!(
@@ -757,12 +958,14 @@ mod tests {
         let red = Standing::PullRequest {
             state: State::Open,
             checks: Some(CheckState::Failure),
+            comments: None,
         };
         assert!(!red.is_finished(), "a re-run can still turn this green");
 
         let merged = Standing::PullRequest {
             state: State::Merged,
             checks: Some(CheckState::Pending),
+            comments: None,
         };
         assert!(merged.is_finished(), "nothing follows merged");
     }
@@ -794,6 +997,7 @@ mod tests {
 
     fn seen_message(standing: Standing) -> Sighting {
         Sighting {
+            discussion: None,
             standing,
             title: String::new(),
             failing: None,
@@ -861,6 +1065,176 @@ mod tests {
         let standing = message(&[("eyes", 1)], &[("1.000001", "U1")]);
         assert!(changed(Some(&standing), &seen_message(standing.clone())).is_empty());
         assert!(!standing.is_finished());
+    }
+
+    fn remark(id: &str, at: &str, by: &str) -> Remark {
+        Remark {
+            id: id.into(),
+            at: format!("2026-11-17T{at}Z").parse().unwrap(),
+            by: by.into(),
+            weight: 1,
+            approval: false,
+        }
+    }
+
+    /// A reading of an open pull request by `@dpep`, with these comments.
+    fn commenting(state: State, remarks: &[Remark], total: u64) -> Sighting {
+        Sighting {
+            discussion: Some(Discussion {
+                remarks: remarks.to_vec(),
+                total,
+                complete_after: None,
+            }),
+            by: Actors {
+                me: Some("@dpep".into()),
+                ..Actors::default()
+            },
+            ..pull(state, None)
+        }
+    }
+
+    fn count(standing: &Standing) -> Option<u64> {
+        match standing {
+            Standing::PullRequest { comments, .. } => comments.as_ref().map(|c| c.count),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn new_comments_say_how_many_and_who_wrote_them() {
+        let alice = remark("a", "10:00:00", "@alice");
+        let base = reading(
+            None,
+            &commenting(State::Open, std::slice::from_ref(&alice), 1),
+        );
+        assert!(base.moved.is_empty(), "a baseline");
+
+        let later = [
+            alice,
+            remark("b", "10:05:00", "coderabbitai (bot)"),
+            remark("c", "10:06:00", "@alice"),
+        ];
+        let moved = changed(Some(&base.standing), &commenting(State::Open, &later, 3));
+        assert_eq!(labels(&moved), [("comments", "1", "3")]);
+        assert_eq!(
+            moved[0].detail.as_deref(),
+            Some("by coderabbitai (bot), @alice")
+        );
+        assert!(!moved[0].own);
+    }
+
+    #[test]
+    fn an_edited_or_deleted_comment_is_not_news() {
+        // A coverage bot rewrites its comment in place on every push: same
+        // id, same time.
+        let (a, b) = (
+            remark("a", "10:00:00", "codecov (bot)"),
+            remark("b", "10:01:00", "@alice"),
+        );
+        let base = reading(None, &commenting(State::Open, &[a.clone(), b], 2)).standing;
+        let edited = commenting(
+            State::Open,
+            &[a.clone(), remark("b", "10:01:00", "@alice")],
+            2,
+        );
+        assert!(changed(Some(&base), &edited).is_empty());
+
+        let deleted = reading(
+            Some(&base),
+            &commenting(State::Open, std::slice::from_ref(&a), 1),
+        );
+        assert!(deleted.moved.is_empty());
+        assert_eq!(count(&deleted.standing), Some(2), "a count never goes back");
+
+        // One deleted and one new: GitHub's total is unchanged, and it is news.
+        let c = remark("c", "10:02:00", "@bob");
+        let swapped = changed(
+            Some(&deleted.standing),
+            &commenting(State::Open, &[a, c], 2),
+        );
+        assert_eq!(labels(&swapped), [("comments", "2", "3")]);
+    }
+
+    #[test]
+    fn a_comment_in_the_same_second_as_the_last_counted_is_still_new() {
+        let a = remark("a", "10:00:00", "@alice");
+        let base = reading(None, &commenting(State::Open, std::slice::from_ref(&a), 1)).standing;
+        let both = [a, remark("b", "10:00:00", "@bob")];
+        let moved = changed(Some(&base), &commenting(State::Open, &both, 2));
+        assert_eq!(moved[0].detail.as_deref(), Some("by @bob"));
+    }
+
+    #[test]
+    fn comments_only_the_reader_wrote_are_their_own() {
+        let base = reading(None, &commenting(State::Open, &[], 0)).standing;
+        let mine = [remark("a", "10:00:00", "@dpep")];
+        let moved = changed(Some(&base), &commenting(State::Open, &mine, 1));
+        assert!(moved[0].own, "recorded, not worth a turn");
+
+        let with_a_bot = [
+            mine[0].clone(),
+            remark("b", "10:01:00", "coderabbitai (bot)"),
+        ];
+        assert!(!changed(Some(&base), &commenting(State::Open, &with_a_bot, 2))[0].own);
+    }
+
+    #[test]
+    fn an_approval_the_state_axis_names_is_not_said_twice() {
+        let approval = Remark {
+            approval: true,
+            ..remark("r", "10:00:00", "@alice")
+        };
+        let base = reading(None, &commenting(State::Open, &[], 0)).standing;
+
+        let approved = reading(
+            Some(&base),
+            &commenting(State::Approved, std::slice::from_ref(&approval), 1),
+        );
+        assert_eq!(labels(&approved.moved), [("state", "open", "approved")]);
+        assert_eq!(count(&approved.standing), Some(1), "still counted");
+
+        // A second approval required: the state stays open, so its body is
+        // only heard as a comment.
+        let moved = changed(Some(&base), &commenting(State::Open, &[approval], 1));
+        assert_eq!(labels(&moved), [("comments", "0", "1")]);
+    }
+
+    #[test]
+    fn a_burst_bigger_than_the_page_says_at_least() {
+        let base = reading(
+            None,
+            &commenting(State::Open, &[remark("a", "10:00:00", "@alice")], 1),
+        )
+        .standing;
+        let page: Vec<Remark> = (1..=3)
+            .map(|i| remark(&format!("n{i}"), &format!("11:0{i}:00"), "@bob"))
+            .collect();
+        let burst = Sighting {
+            discussion: Some(Discussion {
+                remarks: page.clone(),
+                total: 41,
+                complete_after: Some(page[0].at),
+            }),
+            ..commenting(State::Open, &[], 0)
+        };
+        let moved = changed(Some(&base), &burst);
+        assert_eq!(labels(&moved), [("comments", "1", "41")]);
+        assert_eq!(moved[0].detail.as_deref(), Some("at least 40 new, by @bob"));
+    }
+
+    #[test]
+    fn a_watch_stored_before_comments_were_read_baselines_them() {
+        let legacy = checks(State::Open, None);
+        let read = reading(
+            Some(&legacy),
+            &commenting(State::Open, &[remark("a", "10:00:00", "@alice")], 1),
+        );
+        assert!(read.moved.is_empty(), "{:?}", read.moved);
+        assert_eq!(count(&read.standing), Some(1));
+
+        // And a reading that didn't count them keeps the mark.
+        let unread = reading(Some(&read.standing), &pull(State::Open, None));
+        assert_eq!(unread.standing, read.standing);
     }
 
     fn log(seqs: &[u64]) -> Vec<Event> {

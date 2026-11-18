@@ -64,10 +64,10 @@ fn line(event: &Event) -> String {
         "{} | {} {} → {}",
         event.reference, event.axis, event.from, event.to
     );
-    // A state's or a reply's detail is who caused it ("by @x"), a reaction's
-    // its emoji, a check's its name.
+    // A state's, a reply's or a comment's detail is who caused it ("by @x"),
+    // a reaction's its emoji, a check's its name.
     match (&event.detail, event.axis) {
-        (Some(by), Axis::State | Axis::Replies | Axis::Reactions) => {
+        (Some(by), Axis::State | Axis::Replies | Axis::Reactions | Axis::Comments) => {
             text.push_str(&format!(" {by}"))
         }
         (Some(detail), _) => text.push_str(&format!(": {detail}")),
@@ -79,8 +79,9 @@ fn line(event: &Event) -> String {
     text
 }
 
-/// The one command that says more, in the one case where there obviously is
-/// one: checks went red, and the next question is always why.
+/// The one command that says more, in the cases where there obviously is
+/// one: checks went red, and the next question is always why; somebody
+/// commented, and the next step is reading it, which the push never carries.
 ///
 /// For an Actions job that is its log, which GitHub serves the moment the job
 /// ends. Not `gh run view --log-failed`: it refuses until every job in the run
@@ -96,6 +97,11 @@ fn more(event: &Event) -> Option<String> {
     else {
         return None;
     };
+    if event.axis == Axis::Comments {
+        return Some(format!(
+            "gh pr view {number} --repo {host}/{owner}/{repo} --comments"
+        ));
+    }
     if event.axis != Axis::Checks || event.to != CheckState::Failure.as_str() {
         return None;
     }
@@ -161,9 +167,10 @@ fn worth_a_turn(event: &Event) -> bool {
     let started = match event.axis {
         Axis::Checks => event.to == CheckState::Pending.as_str(),
         Axis::State => event.from == State::Draft.as_str() && event.to == State::Open.as_str(),
-        Axis::Status | Axis::Replies | Axis::Reactions => false,
+        Axis::Status | Axis::Replies | Axis::Reactions | Axis::Comments => false,
     };
-    // What the reader did themself — a reply only they wrote — is a receipt.
+    // What the reader did themself — a reply or a comment only they wrote —
+    // is a receipt.
     !started && !event.own
 }
 
@@ -486,7 +493,12 @@ mod tests {
 
     fn sighting(state: State, checks: Option<CheckState>) -> Sighting {
         Sighting {
-            standing: Standing::PullRequest { state, checks },
+            discussion: None,
+            standing: Standing::PullRequest {
+                state,
+                checks,
+                comments: None,
+            },
             title: "Add the session socket sink".into(),
             failing: None,
             head: None,
@@ -593,6 +605,7 @@ mod tests {
 
     fn conversation(reactions: &[(&str, u32)], replies: &[(&str, &str)]) -> Sighting {
         Sighting {
+            discussion: None,
             standing: Standing::Message {
                 reactions: reactions.iter().map(|(e, n)| (e.to_string(), *n)).collect(),
                 replies: replies
@@ -650,6 +663,71 @@ mod tests {
             &[(slack(), conversation(&[], &[("1.000001", "U9")]))],
             now(),
         );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert!(sessions.texts().is_empty());
+        assert_eq!(watches.take("s", now()).len(), 1);
+    }
+
+    fn commented(by: &[&str]) -> Sighting {
+        let remarks = by
+            .iter()
+            .enumerate()
+            .map(|(i, who)| crate::domain::watch::Remark {
+                id: format!("c{i}"),
+                at: now() + chrono::TimeDelta::seconds(i as i64),
+                by: who.to_string(),
+                weight: 1,
+                approval: false,
+            })
+            .collect();
+        Sighting {
+            discussion: Some(crate::domain::watch::Discussion {
+                remarks,
+                total: by.len() as u64,
+                complete_after: None,
+            }),
+            by: Actors {
+                me: Some("@dpep".into()),
+                ..Actors::default()
+            },
+            ..sighting(State::Open, None)
+        }
+    }
+
+    #[test]
+    fn a_comment_says_who_and_how_many_and_where_to_read_it() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(42), "s", forever(), now());
+        watches.record(&[(pr(42), commented(&["@dpep"]))], now());
+        watches.attach("s", address("/tmp/a"), now());
+
+        watches.record(
+            &[(
+                pr(42),
+                commented(&["@dpep", "@alice", "coderabbitai (bot)"]),
+            )],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert_eq!(
+            sessions.texts(),
+            [
+                "inkling: github.com/dpep/inkling#42 | comments 1 → 3 by @alice, coderabbitai (bot) \
+              (gh pr view 42 --repo github.com/dpep/inkling --comments)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_comment_only_the_reader_wrote_waits_in_the_feed() {
+        let mut watches = Watches::default();
+        watches.watch(&pr(42), "s", forever(), now());
+        watches.record(&[(pr(42), commented(&[]))], now());
+        watches.attach("s", address("/tmp/a"), now());
+
+        watches.record(&[(pr(42), commented(&["@dpep"]))], now());
         let sessions = FakeSessions::default();
         deliver(&sessions, &mut watches);
         assert!(sessions.texts().is_empty());
@@ -1117,6 +1195,7 @@ mod tests {
             failing: None,
             head: None,
             by: Default::default(),
+            discussion: None,
         };
         watches.record(&[(key.clone(), issue("To Do"))], now());
         watches.record(&[(key, issue("In Review"))], now());

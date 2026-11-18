@@ -2047,10 +2047,19 @@ fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
     use inkling::domain::watch::Standing;
     match standing {
         None => "unread".to_string(),
-        Some(Standing::PullRequest { state, checks }) => match checks {
-            Some(checks) => format!("{state}, checks {checks}"),
-            None => state.to_string(),
-        },
+        Some(Standing::PullRequest {
+            state,
+            checks,
+            comments,
+        }) => {
+            let mut said = vec![state.to_string()];
+            said.extend(checks.map(|checks| format!("checks {checks}")));
+            said.extend(comments.as_ref().map(|c| match c.count {
+                1 => "1 comment".to_string(),
+                n => format!("{n} comments"),
+            }));
+            said.join(", ")
+        }
         Some(Standing::Issue { status, .. }) => status.clone(),
         Some(Standing::Message { reactions, replies }) => {
             let mut said = vec![format!("{} replies", replies.len())];
@@ -2770,9 +2779,11 @@ mod tests {
         (
             pr(number),
             Sighting {
+                discussion: None,
                 standing: Standing::PullRequest {
                     state: inkling::domain::model::State::Merged,
                     checks: None,
+                    comments: None,
                 },
                 title: "Add the serve lifecycle".into(),
                 failing: None,
