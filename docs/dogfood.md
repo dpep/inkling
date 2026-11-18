@@ -6,6 +6,15 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Own rule, live: a text reply from the phone to a watched self-DM message (09:09:18 PST) arrived
+  mid-turn as `1 reply from @dpepper` 92s later, at the next 5-min read. It woke the session as
+  intended, but the line doesn't carry the text, so acting on it took one `slack_read_channel`.
+- The same DM answer also pushed as a reply to the older watched message in that DM: the deferred
+  "one DM answer pushes once per watched message" item, live. Earlier, this session's own test
+  post pushed the same way: hooks here are plugin 0.2.0, so no receipt was recorded.
+- Bridge reads cost about $0.02 apiece today, about 10x the $0.0022 logged yesterday. Two DM
+  watches read every 5 min is about $0.50/hour. The two reads ran one after the other (21s and
+  20s per round).
 - The watch-store version tripwire (`watches_json::tests::stored_shape`) refused to compile twice
   while rebasing onto main, once for `lines`/`after`, once for `receipts`/`receipt_for`: exactly
   the missed-bump case that wiped a store, caught at build time. Good surprise.
