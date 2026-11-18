@@ -988,13 +988,16 @@ reply.
 `[slack.mcp]` (`ToolNames::send`, `mcp__claude_ai_Slack__slack_send_message` by
 default), and Bash `curl`s to `chat.postMessage`:
 
-- **The MCP tool:** the channel is the call's `channel_id`; the ts can only
-  come from the result, so the result is searched for a permalink into that
-  channel (a DM to a user id lands in a `D` channel, so there any DM permalink
+- **The MCP tool:** the result's `message_context` names the channel id and
+  ts outright (recorded from the first real send, dogfood.md), even when the
+  call named the channel by handle. Without one, the channel is the call's
+  `channel_id` and the result is searched for a permalink into that channel
+  (a DM to a user id lands in a `D` channel, so there any DM permalink
   counts). A permalink the session wrote into the message itself is skipped,
-  and more than one candidate watches nothing. *Unverified:* no real send
-  result was recorded (dogfood.md, 2026-11-17), so that the result carries a
-  permalink at all is the guess the first real send tests.
+  and more than one candidate watches nothing.
+- **Not `slack_schedule_message`:** a scheduled message has no ts until it is
+  delivered, so there is nothing to watch or hold a receipt for. A scheduled
+  post pushes as someone else's reply.
 - **`chat.postMessage`:** the Web API's documented reply, `{"ok": true,
   "channel", "ts", "message": {"thread_ts"}}`, read as JSON from stdout or not
   at all. The `slack` CLI isn't recognized: nothing here could say what it
