@@ -125,9 +125,11 @@ pub const PAGE_LIMIT: usize = 20;
 /// `slack_read_channel`'s maximum page.
 pub const CHANNEL_PAGE: usize = 100;
 
-/// `slack_read_thread`'s maximum page. It lists oldest first, so a thread
-/// longer than a page loses its newest replies, the ones that are news.
-const THREAD_PAGE: usize = 1000;
+/// One `slack_read_thread` page. It lists oldest first, so a thread longer
+/// than this loses its newest replies, the ones that are news. Not the tool's
+/// 1000: the model writes a row back per reply, and a page that size can't
+/// be written inside the bridge's timeout, so the thread would never read.
+const THREAD_PAGE: usize = 100;
 
 impl<R: Runner> SlackClaude<R> {
     pub fn new(runner: R) -> Self {

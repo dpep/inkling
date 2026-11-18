@@ -940,6 +940,15 @@ retried every tick. Two things follow:
   without the Slack tools echoing the JSON template — read nothing, and is
   retried like any failed read. The two reads are kept apart in the
   reply, so a whole-channel watch could reuse the channel half unfiltered.
+- **A thread read is one page: its oldest 100.** The tool lists oldest first,
+  so on a longer thread the newest replies — the news — are past the page
+  (a watched reply is read from itself, so this counts from there). The
+  tool's maximum of 1000 was tried and backed out unmeasured: the model
+  writes a row back per reply, roughly 40k tokens for a full page, which no
+  bridge call finishes inside its timeout, so the thread would never read
+  again. The fix is reading from the newest reply already recorded, once a
+  real read shows whether `oldest` still returns the parent message, whose
+  row carries its reactions and proves it isn't gone.
 - **A channel read is one page: the newest 100.** A conversation busier than
   that since the watched message drops its earliest messages from the read,
   and the replies count can fall. Fine for a DM or a mention; a channel watch

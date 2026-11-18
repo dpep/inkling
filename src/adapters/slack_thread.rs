@@ -364,13 +364,12 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_is_read_to_the_tools_maximum() {
-        // Oldest first, so a smaller page never reaches the newest replies.
+    fn a_thread_is_read_one_page_a_model_can_write_back() {
         let (slack, prompts) = threads(&[THREAD]);
         let _ = slack.read(&[message("C0123ABCD", "1786596000.123456", None)], &[]);
         let prompt = &prompts.borrow()[0];
         let thread = &prompt[..prompt.find("Then call").unwrap()];
-        assert!(thread.contains("limit: 1000\n"), "{thread}");
+        assert!(thread.contains("limit: 100\n"), "{thread}");
     }
 
     #[test]
