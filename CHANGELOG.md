@@ -7,6 +7,11 @@
   stopped every poll before it started, Jira and Slack included, and `inkling serve` refused to
   start. The token is now fetched only when a pull request is due, and failing to get one fails
   GitHub alone; the server starts without one and picks up a login made after it started.
+- **A command's time limit now holds.** A token command, `acli` or `claude -p` that left a
+  background process holding its output kept Inkling waiting as long as that process ran, past
+  the 2s, 5s or 180s limit; one that printed more than a pipe holds stalled until killed. Output
+  is now read as it arrives, and a command that runs out of time is killed with everything it
+  started.
 <!-- /fix2-latency -->
 
 - **A watch on something that isn't there any more ends, once.** A Slack message that was
