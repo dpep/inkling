@@ -2214,21 +2214,38 @@ fn finished_already(
 }
 
 /// Why the references just asked for couldn't be read, if they couldn't —
-/// not the other watches the same poll happened to read.
-fn unread<'a>(
+/// not the other watches the same poll happened to read. One that has no line
+/// of its own and wasn't read fell with its whole provider, whose line it gets.
+fn unread(
     asked: &[inkling::domain::model::Reference],
-    polled: &'a inkling::watch::Polled,
-) -> Vec<&'a str> {
-    polled
-        .failures
-        .iter()
-        .filter(|line| {
-            asked
-                .iter()
-                .any(|reference| line.starts_with(&format!("{reference}: ")))
-        })
-        .map(String::as_str)
-        .collect()
+    polled: &inkling::watch::Polled,
+) -> Vec<String> {
+    let mut own = Vec::new();
+    let mut whole: Vec<(&str, Vec<String>)> = Vec::new();
+    for reference in asked {
+        let mine = format!("{reference}: ");
+        if let Some(line) = polled.failures.iter().find(|l| l.starts_with(&mine)) {
+            own.push(line.clone());
+            continue;
+        }
+        if polled.sightings.iter().any(|(seen, _)| seen == reference) {
+            continue;
+        }
+        let prefix = inkling::ports::ProviderError::prefix(reference);
+        let Some(line) = polled.failures.iter().find(|l| l.starts_with(prefix)) else {
+            continue;
+        };
+        match whole.iter_mut().find(|(l, _)| *l == line.as_str()) {
+            Some((_, references)) => references.push(reference.to_string()),
+            None => whole.push((line, vec![reference.to_string()])),
+        }
+    }
+    own.extend(
+        whole
+            .into_iter()
+            .map(|(line, references)| format!("{}: {line}", references.join(", "))),
+    );
+    own
 }
 
 fn watch_out(
@@ -3177,6 +3194,23 @@ mod tests {
         assert_eq!(
             unread(&[pr(7)], &polled),
             ["github.com/dpep/inkling#7: not found or not visible"]
+        );
+    }
+
+    #[test]
+    fn watching_something_whose_whole_provider_failed_says_why() {
+        let jira = |key: &str| inkling::domain::model::Reference::JiraIssue { key: key.into() };
+        let polled = Polled {
+            sightings: vec![merged(7)],
+            failures: vec![
+                "github request failed: HTTP 401".into(),
+                "jira request failed: running `acli`: no answer within 5s".into(),
+            ],
+            ..Polled::default()
+        };
+        assert_eq!(
+            unread(&[jira("AI-1"), jira("AI-2"), pr(7)], &polled),
+            ["AI-1, AI-2: jira request failed: running `acli`: no answer within 5s"]
         );
     }
 
