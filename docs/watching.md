@@ -451,6 +451,9 @@ why it is a placeholder.
   `post-tool`, `subscribe` — writes a byte to it, non-blocking, before
   deciding whether to spawn a server at all. A pipe rather than a signal: a
   stale pid can name a stranger, whose default action on SIGUSR1 is to die.
+  Only the loop reads the pipe, so each time it wakes it wakes the Slack
+  worker too; otherwise a sent message's watch waits out the worker's nap,
+  and a reply landing meanwhile is taken into the silent first reading.
   Where the FIFO can't be made, a nap is capped at the interval — the old
   cadence.
 - **`--refresh` is a floor under the schedule, not a schedule of its own.**

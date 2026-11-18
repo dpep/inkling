@@ -96,7 +96,7 @@ impl<F: Fn() -> Ticked> Work for F {
 /// Whether someone has asked this process to stop. Behind a trait for the same
 /// reason `Clock` is: a test shouldn't have to signal itself to assert the
 /// shutdown path.
-pub trait Shutdown {
+pub trait Shutdown: Sync {
     fn requested(&self) -> bool;
 }
 
@@ -388,23 +388,28 @@ pub type Worker<'a> = dyn Fn(&Beside) + Sync + 'a;
 /// the loop to deliver what it recorded.
 pub struct Beside<'a> {
     done: &'a AtomicBool,
+    shutdown: &'a dyn Shutdown,
+    /// Set each time the loop wakes, so a ring reaches the worker too: only
+    /// the loop can read the doorbell.
+    woken: &'a AtomicBool,
     doorbell: &'a Path,
 }
 
 impl Beside<'_> {
     /// The loop has finished, or a signal asked it to.
     pub fn stopping(&self) -> bool {
-        self.done.load(Ordering::Relaxed) || SIGNALLED.load(Ordering::Relaxed)
+        self.done.load(Ordering::Relaxed) || self.shutdown.requested()
     }
 
     pub fn wake(&self) {
         ring(self.doorbell);
     }
 
-    /// Up to `duration`, or until it is time to stop.
+    /// Up to `duration`, until the loop wakes, or until it is time to stop.
+    /// A wake during the worker's round ends its next nap at once.
     pub fn nap(&self, duration: Duration) {
         let until = std::time::Instant::now() + duration;
-        while !self.stopping() {
+        while !self.stopping() && !self.woken.swap(false, Ordering::Relaxed) {
             let left = until.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
                 break;
@@ -475,10 +480,13 @@ impl Serve<'_> {
         };
 
         let done = AtomicBool::new(false);
+        let woken = AtomicBool::new(false);
         let exit = std::thread::scope(|scope| {
             if let Some(worker) = self.beside {
                 let beside = Beside {
                     done: &done,
+                    shutdown: self.shutdown,
+                    woken: &woken,
                     doorbell: &self.config.doorbell,
                 };
                 scope.spawn(move || worker(&beside));
@@ -561,6 +569,7 @@ impl Serve<'_> {
                 };
                 tracing::debug!(nap_seconds = nap.as_secs(), "napping");
                 self.sleeper.sleep(nap);
+                woken.store(true, Ordering::Relaxed);
             }
         });
 
@@ -805,6 +814,7 @@ mod tests {
     use super::*;
     use crate::testing::FixedClock;
     use std::cell::Cell;
+    use std::sync::atomic::AtomicU32;
 
     struct Scratch(PathBuf);
 
@@ -840,6 +850,16 @@ mod tests {
         fn sleep(&self, duration: Duration) {
             self.0
                 .advance(chrono::TimeDelta::from_std(duration).unwrap());
+        }
+    }
+
+    /// Moves the clock, and the wall a little, so a worker thread gets a look in.
+    struct Walled<'a>(&'a FixedClock);
+
+    impl Sleeper for Walled<'_> {
+        fn sleep(&self, duration: Duration) {
+            std::thread::sleep(Duration::from_millis(30));
+            Fast(self.0).sleep(duration);
         }
     }
 
@@ -1266,6 +1286,43 @@ mod tests {
         .expect("served");
 
         assert!(matches!(outcome, Outcome::Served(_)), "and did not hang");
+    }
+
+    #[test]
+    fn waking_the_loop_wakes_the_worker_too() {
+        // A watch registered while the worker naps must be read before a
+        // reply to it can land, or the reply becomes the silent baseline.
+        let scratch = Scratch::new("beside-woken");
+        let clock = FixedClock::at("2026-09-20T12:00:00Z");
+        let rounds = AtomicU32::new(0);
+        let worker = |beside: &Beside| {
+            while !beside.stopping() {
+                rounds.fetch_add(1, Ordering::Relaxed);
+                beside.nap(Duration::from_secs(60));
+            }
+        };
+        let work = || match rounds.load(Ordering::Relaxed) {
+            0 | 1 => Ok(Pulse::Busy.into()),
+            _ => Ok(Pulse::Idle.into()),
+        };
+        let outcome = Serve {
+            config: Config {
+                max_lifetime: Duration::from_secs(30),
+                ..scratch.config()
+            },
+            work: &work,
+            clock: &clock,
+            sleeper: &Walled(&clock),
+            shutdown: &Never,
+            beside: Some(&worker),
+        }
+        .run()
+        .expect("served");
+
+        let Outcome::Served(report) = outcome else {
+            panic!("stood down")
+        };
+        assert_eq!(report.exit, Exit::Idle, "the worker slept through the loop");
     }
 
     #[test]
