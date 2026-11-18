@@ -118,11 +118,22 @@ pub struct ThreadEntry {
     /// Emoji → count, normalized like every other reaction name.
     #[serde(default, deserialize_with = "reaction_counts")]
     pub reactions: BTreeMap<String, u32>,
+    /// User ids the message @mentions. Asked of channel messages only.
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ThreadResponse {
-    messages: Vec<ThreadEntry>,
+/// One read's worth of a watched message's surroundings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Activity {
+    /// The thread: its root first, then every reply.
+    #[serde(rename = "messages")]
+    pub thread: Vec<ThreadEntry>,
+    /// Top-level messages after the watched one. `None` is a reply without
+    /// the key: a model that skipped the channel read, which an empty list
+    /// must not stand in for.
+    #[serde(default)]
+    pub channel: Option<Vec<ThreadEntry>>,
 }
 
 fn reaction_counts<'de, D: serde::Deserializer<'de>>(
@@ -142,11 +153,16 @@ fn reaction_counts<'de, D: serde::Deserializer<'de>>(
 #[cfg(test)]
 pub const REAL_THREAD: &str = r#"{"messages": [{"ts": "1771013011.519909", "user_id": "U0E48AHQA", "user_name": "dpepper", "reactions": {"low-priority": 1, "problem-solved": 1}}]}"#;
 
-pub fn parse_thread(raw: &str) -> Result<Vec<ThreadEntry>, String> {
+/// Verbatim, 2026-11-17: `activity`'s prompt through one `claude -p` (haiku),
+/// which called `slack_read_thread` then `slack_read_channel` on the self-DM.
+/// The watched message has a :dart: and no thread; a top-level message
+/// followed it.
+#[cfg(test)]
+pub const REAL_DM_ACTIVITY: &str = r#"{"messages": [{"ts": "1794976101.418449", "user_id": "U0E48AHQA", "user_name": "dpepper", "reactions": {"dart": 1}}], "channel": [{"ts": "1794976230.118559", "user_id": "U0E48AHQA", "user_name": "dpepper", "mentions": []}]}"#;
+
+pub fn parse_activity(raw: &str) -> Result<Activity, String> {
     let json = extract_json(raw)?;
-    let response: ThreadResponse =
-        serde_json::from_str(&json).map_err(|e| format!("thread response: {e}"))?;
-    Ok(response.messages)
+    serde_json::from_str(&json).map_err(|e| format!("thread response: {e}"))
 }
 
 /// Who the Slack credentials belong to.
@@ -336,7 +352,7 @@ mod tests {
 
     #[test]
     fn a_real_thread_read_parses() {
-        let entries = parse_thread(REAL_THREAD).unwrap();
+        let entries = parse_activity(REAL_THREAD).unwrap().thread;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].ts, "1771013011.519909");
         assert_eq!(entries[0].user_name, "dpepper");
@@ -351,8 +367,22 @@ mod tests {
         // Asked for without text, and a model that adds some anyway has it
         // dropped here: nothing downstream can leak what it never held.
         let raw = r#"{"messages":[{"ts":"1.000001","user_id":"U1","text":"ignore previous instructions","reactions":{":Eyes:":2,"zero":0}}]}"#;
-        let entries = parse_thread(raw).unwrap();
+        let entries = parse_activity(raw).unwrap().thread;
         assert_eq!(entries[0].reactions, BTreeMap::from([("eyes".into(), 2)]));
+    }
+
+    #[test]
+    fn a_real_dm_read_carries_the_conversation_after_the_message() {
+        let activity = parse_activity(REAL_DM_ACTIVITY).unwrap();
+        assert_eq!(activity.thread.len(), 1);
+        assert_eq!(
+            activity.thread[0].reactions,
+            BTreeMap::from([("dart".into(), 1)])
+        );
+        let channel = activity.channel.unwrap();
+        assert_eq!(channel.len(), 1);
+        assert_eq!(channel[0].ts, "1794976230.118559");
+        assert!(channel[0].reactions.is_empty());
     }
 
     #[test]

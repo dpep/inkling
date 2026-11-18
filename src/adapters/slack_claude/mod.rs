@@ -11,12 +11,12 @@
 mod parse;
 mod runner;
 
-#[cfg(test)]
-pub use parse::REAL_THREAD;
 pub use parse::{
-    Identity, Reaction, SearchHit, ThreadEntry, parse_channel_id, parse_identity, parse_reactions,
-    parse_search, parse_thread,
+    Activity, Identity, Reaction, SearchHit, ThreadEntry, parse_activity, parse_channel_id,
+    parse_identity, parse_reactions, parse_search,
 };
+#[cfg(test)]
+pub use parse::{REAL_DM_ACTIVITY, REAL_THREAD};
 pub use runner::{BRIDGE_ENV, ClaudeRunner, Runner, RunnerError, extract_result};
 
 use crate::config::SlackMcp;
@@ -479,9 +479,13 @@ impl<R: Runner> SlackClaude<R> {
         Ok(hits.into_iter().map(SearchHit::into_message).collect())
     }
 
-    /// Who wrote each message of a thread and what reactions it carries —
-    /// never what it says. `thread()` asks for text, which a watch must not
-    /// hold: it would be one careless format string from a push.
+    /// Who wrote each message of a thread and of the channel after `wanted`,
+    /// what reactions the thread's carry, and whom the channel's @mention —
+    /// never what any of them says. `thread()` asks for text, which a watch
+    /// must not hold: it would be one careless format string from a push.
+    ///
+    /// Both reads go in one `claude -p`: a second tool call costs a turn, not
+    /// another session.
     ///
     /// `wanted` is the message being watched. A reply that leaves it out is a
     /// model that dropped a row, not a deleted message, so it is retried.
@@ -490,32 +494,49 @@ impl<R: Runner> SlackClaude<R> {
         channel_id: &str,
         root_ts: &str,
         wanted: &str,
-    ) -> Result<Vec<ThreadEntry>, ActivityError> {
-        let tool = &self.tools.read_thread;
+    ) -> Result<Activity, ActivityError> {
+        let thread_tool = &self.tools.read_thread;
+        let channel_tool = &self.tools.read_channel;
+        // `oldest` is exclusive, so the channel read is everything after `wanted`.
         let prompt = format!(
-            "Call {tool} with these exact arguments:\n\
+            "Call {thread_tool} with these exact arguments:\n\
              channel_id: {channel_id:?}\n\
              message_ts: {root_ts:?}\n\
              limit: 100\n\
              response_format: \"detailed\"\n\n\
+             Then call {channel_tool} with these exact arguments:\n\
+             channel_id: {channel_id:?}\n\
+             oldest: {wanted:?}\n\
+             limit: 100\n\
+             response_format: \"detailed\"\n\n\
              Then output ONLY this JSON, no commentary and no code fence:\n\
              {{\"messages\": [{{\"ts\": \"...\", \"user_id\": \"...\", \
-             \"user_name\": \"...\", \"reactions\": {{\"name\": 1}}}}]}}\n\n\
-             List the parent message first, then every reply in order. `ts` \
-             is the Message TS. `user_id` is the ID in parentheses after the \
-             author. `user_name` is the author's name as shown before any \
-             <email>; never include the email. `reactions` maps each reaction \
-             name, exactly as shown and without colons, to its count; use {{}} \
-             for a message with none. Do not include message text.\n\
-             If the tool fails, output only its error code.",
+             \"user_name\": \"...\", \"reactions\": {{\"name\": 1}}}}], \
+             \"channel\": [{{\"ts\": \"...\", \"user_id\": \"...\", \
+             \"user_name\": \"...\", \"mentions\": [\"U...\"]}}]}}\n\n\
+             `messages` is the thread read: the parent message first, then every \
+             reply in order. `channel` is every message the channel read \
+             returned, in order. `ts` is the Message TS. `user_id` is the ID in \
+             parentheses after the author. `user_name` is the author's name as \
+             shown before any <email>; never include the email. `reactions` maps \
+             each reaction name, exactly as shown and without colons, to its \
+             count; use {{}} for a message with none. `mentions` lists the user \
+             IDs the message @mentions, written <@U...> in it; use [] for none. \
+             Do not include message text.\n\
+             If a tool fails, output only its error code.",
         );
-        self.attempt(&prompt, &[tool.as_str()], |raw| {
+        self.attempt(&prompt, &[thread_tool, channel_tool], |raw| {
             if GONE.iter().any(|code| raw.contains(code)) {
                 return Err(Retry::Fatal(format!("{GONE_MARK}: {}", raw.trim())));
             }
-            match parse_thread(raw) {
-                Ok(entries) if entries.iter().any(|e| e.ts == wanted) => Ok(entries),
-                Ok(_) => Err(Retry::Again(format!("the read left out {wanted}"))),
+            match parse_activity(raw) {
+                Ok(read) if !read.thread.iter().any(|e| e.ts == wanted) => {
+                    Err(Retry::Again(format!("the read left out {wanted}")))
+                }
+                Ok(read) if read.channel.is_none() => {
+                    Err(Retry::Again("the read left out the channel".into()))
+                }
+                Ok(read) => Ok(read),
                 Err(error) => Err(Retry::Again(error)),
             }
         })

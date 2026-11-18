@@ -72,6 +72,13 @@ fn is_channel(id: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
+/// A direct message, where the next message in the conversation is the
+/// answer whether or not it was threaded. Slack gives every IM a `D` id; a
+/// group DM can be `G` or `C`, indistinguishable from a channel by its id.
+pub fn is_dm(channel: &str) -> bool {
+    channel.starts_with('D')
+}
+
 /// A user id, which `slack_send_message` accepts as a channel to DM them.
 fn is_user(id: &str) -> bool {
     id.len() >= 9

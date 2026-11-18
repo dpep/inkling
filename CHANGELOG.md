@@ -4,7 +4,8 @@
 
 - **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
   `replies 2 → 4 by @alice, @bob` and `reactions 0 → 1 :white_check_mark:` — who and how many,
-  never what anybody wrote. A reply only you wrote stays in `events` without a push. Reads go
+  never what anybody wrote. A reply is a message in its thread, or a later one in the same
+  conversation: any in a DM, one that @mentions you in a channel. A reply only you wrote stays in `events` without a push. Reads go
   through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read
   at most every 5 minutes, and only by the resident server, `watch` and `events`. **To have
   posting a message watch it, add the Slack send tool to the `PostToolUse` matcher:**

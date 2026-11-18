@@ -140,8 +140,10 @@ A Slack message is its permalink (Slack's *Copy link*), always in full:
 `?thread_ts=…` when it is a reply. Inkling names it back as
 `slack:<channel>/<ts>`, which `unwatch` also takes and Slack's own tools read.
 
-It reports new replies in the message's thread — after it, if it is itself a
-reply — and who wrote them, and each emoji whose count changes. Never what
+It reports new replies and who wrote them, and each emoji whose count changes.
+A reply is a message in its thread — after it, if it is itself a reply — or a
+later message in the same conversation: any at all in a DM, where the next
+message is the answer, and one that @mentions you in a channel. Never what
 anybody wrote: that is somebody else's prose, and to read it you use Slack.
 Reactions are counts, so they can't say who reacted. A reply only you wrote is
 in `events` but isn't pushed; reactions can't be told apart, so yours are.

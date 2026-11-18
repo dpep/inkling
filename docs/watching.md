@@ -666,8 +666,7 @@ one message, and the `post-tool` hook watches a message the session just
 posted.
 
 **The standing** is two things: the message's reactions, as emoji → count, and
-the replies after it in its thread, as ts → who wrote it. Two axes, like a pull
-request's:
+the replies after it, as ts → who wrote it. Two axes, like a pull request's:
 
 ```
 slack:C0123ABCD/1786596050.245879  replies    2 → 4  by @alice, @bob
@@ -682,6 +681,23 @@ slack:C0123ABCD/1786596050.245879  reactions  0 → 1  :white_check_mark:
   `response_format: "detailed"` prints `Reactions: low-priority (1),
   problem-solved (1)` — counts only, no users. So a reaction transition is one
   per emoji whose count moved, and cannot say who, nor whether it was you.
+- **A reply is whatever answers the message, threaded or not.** Live
+  dogfooding found the gap: a watched DM message was answered with a plain
+  message in the DM, and a thread-only read saw nothing. So the channel after
+  the message is read too, and its messages join the same `replies` map — same
+  wording, same names, same `own` — by one rule per kind of conversation:
+  - **In a DM, every later message.** There the next message *is* the answer.
+    A DM is a `D` id, which Slack gives every IM and nothing else.
+  - **In a channel, a later message that @mentions the reader.** The bridge
+    reports each channel message's `mentions` as user ids, and the reader is
+    the same `me` that marks replies `own`. No window beyond the watch itself:
+    after the message, while watched. A channel message that mentions nobody
+    is someone else's conversation.
+  - **A group DM is a channel here.** Its id is `G…` or `C…`, so nothing local
+    tells it apart, and the read's header that might (`Channel: DM (D…)` for
+    an IM) was never seen for one: this workspace has no group DM to read.
+    So a group DM gets the mention rule. What would change this: one real
+    read of a group DM's header, which makes a third rule a string match.
 - **A reply's replies are the later ones.** A permalink to a reply carries
   `thread_ts`; the thread is read from that root and only replies after the
   watched message count. A thread is one conversation, and what came before
@@ -707,9 +723,25 @@ retried every tick. Two things follow:
   still pays for it. `Poller::slack` is `None` there, and Slack watches are
   left for whoever has the time: the resident server, `inkling watch`, and
   `inkling events` at a terminal (which can therefore take a minute).
-- **One call per watched message.** The thread tool reads one thread; a
-  channel read would batch, but carries neither reply authors nor anything
-  past its page. Fine at the handful a session posts.
+- **One call per watched message, two tools inside it.** The thread tool reads
+  one thread and the channel tool lists top-level messages only, so a read
+  needs both — but both fit in one `claude -p`. Measured 2026-11-17 on the
+  self-DM: two tool calls cost one more turn, not another session — 7–10s,
+  and 0.1¢–2¢ depending only on whether the prompt cache was warm (a thread
+  read alone: 0.4¢ warm, 2¢ cold). The channel read is `oldest` = the watched
+  ts (exclusive, so exactly what came after), and a reply missing the
+  `channel` key is a model that skipped the second call, so it is retried
+  rather than read as a quiet channel. The two reads are kept apart in the
+  reply, so a whole-channel watch could reuse the channel half unfiltered.
+- **A channel read is one page: the newest 100.** A conversation busier than
+  that since the watched message drops its earliest messages from the read,
+  and the replies count can fall. Fine for a DM or a mention; it is the first
+  thing a whole-channel watch would have to fix.
+- **How a mention is printed is unseen.** The prompt asks for ids "written
+  `<@U…>`"; no message in this workspace mentions anyone, so whether the read
+  tool prints the id or a display name is untested. If it prints a name, the
+  model has no id to give and a mention reads as none. The first channel
+  watch that should have caught one is the test.
 
 **Why no prose.** A push lands inside an agent's turn, and a Slack message's
 text is untrusted prose — somebody else's, and a prompt-injection surface. So
@@ -755,6 +787,7 @@ read never subscribes a throwaway session or watches what it read.
   what — before any of it is news, and every candidate filter is a guess. One
   message is the unit that has an answer. What would change this: a dogfood
   line about wanting to hear of a thread nobody in the session started.
+  The channel half of a message's read is the piece it would start from.
 - **Who reacted.** Needs the Web API (`reactions.get`) — see the Slack app in
   docs/deferred.md.
 

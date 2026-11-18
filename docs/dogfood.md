@@ -6,6 +6,22 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Replies outside the thread: the user answered a watched DM message with a plain DM message,
+  and the thread read saw nothing. Now the channel after the message is read in the same
+  `claude -p` (a second tool call; one more turn, 7–10s, 0.1¢ warm / 2¢ cold — cache state, not
+  the extra call, decides the cost). Haiku made both calls 6/6 by hand, including once under the
+  old "exactly one MCP tool call" system prompt, which now says "only the calls the request names".
+- Couldn't see how `slack_read_channel` prints thread info or a mention: dpepper.slack.com has
+  four messages, all in the self-DM, no threads, no mentions, no group DMs. So the channel
+  @mention rule's fixture is invented, and group DMs get the channel rule because their header
+  was never observed. Expected a workspace with history to record from.
+- First live read through the new code: attempt 1 answered "the Slack tools … are not
+  available", attempt 2 worked (28.6s for two watched messages). The known hiccup, not new, but
+  it now costs a two-tool read.
+- An existing DM watch (`…/1771013011.519909`) jumped `replies 0 → 3` on its first read after the
+  change: every later message in the DM became a reply at once. All mine, so `own` and no push;
+  with someone else's messages in there it would have pushed one stale-looking transition.
+
 - First live Slack transition: a :dart: on the watched message arrived mid-turn as
   `inkling: slack:D1MG8KWNR/1794976101.418449 | reactions 0 → 1 :dart:`, read on the first tick
   after the 5-minute floor (7s bridge call) and pushed 0ms later. Actionable without a lookup,
