@@ -30,6 +30,11 @@ use std::path::{Path, PathBuf};
 
 pub const VERSION: u32 = 1;
 
+/// The reader a person at a terminal is. Every watch has an owner and every
+/// read names one, so there is one rule rather than an owned path and an
+/// unowned one. Its watches never pause: nothing says a terminal has gone.
+pub const TERMINAL: &str = "cli";
+
 /// The file holds session tokens, so nobody else on the machine reads it.
 const OWNER_ONLY: u32 = 0o600;
 
@@ -237,6 +242,11 @@ pub struct Subscriber {
     /// `PUSH_WINDOW`. What `allowance` counts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pushes: Vec<DateTime<Utc>>,
+    /// Had an address and lost it: a session that ended. Stored because a
+    /// missing address can't say it — a session without the hooks never had
+    /// one, and nothing will ever tell us it has gone. What pauses a watch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub departed: bool,
 }
 
 impl Watches {
@@ -256,7 +266,9 @@ impl Watches {
         deadline: DateTime<Utc>,
         now: DateTime<Utc>,
     ) {
-        self.meet(owner, now);
+        // Registering interest is a sign of life. Failing open: a reader with
+        // no address and no departure on record is read until its deadline.
+        self.meet(owner, now).departed = false;
         let entry = self
             .watches
             .entry(reference.to_string())
@@ -428,11 +440,38 @@ impl Watches {
             .map(|(subscriber, _, _)| subscriber)
     }
 
+    /// Whether nobody left can hear this watch: every owner is a session that
+    /// was attached and has since ended. Derived from the owners each time,
+    /// so there is no flag on the watch to drift from them.
+    ///
+    /// Paused, not cancelled: the deadline still runs, the baseline is kept,
+    /// and the session's return (`attach`) makes it due again — so a resumed
+    /// session hears the net change, as it does for its cursor.
+    pub fn paused(&self, watch: &Watch) -> bool {
+        !watch.owners.is_empty() && watch.owners.iter().all(|owner| self.departed(owner))
+    }
+
+    fn departed(&self, owner: &str) -> bool {
+        owner != TERMINAL
+            && self
+                .subscribers
+                .get(owner)
+                .is_some_and(|entry| entry.departed)
+    }
+
+    fn paused_keys(&self) -> BTreeSet<String> {
+        self.watches
+            .iter()
+            .filter(|(_, watch)| self.paused(watch))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     /// What is still worth asking about.
     pub fn active(&self, now: DateTime<Utc>) -> Vec<Reference> {
         self.watches
             .values()
-            .filter(|watch| watch.deadline > now)
+            .filter(|watch| watch.deadline > now && !self.paused(watch))
             .map(|watch| watch.reference.clone())
             .collect()
     }
@@ -451,7 +490,9 @@ impl Watches {
     pub fn due_now(&self, now: DateTime<Utc>, floor: TimeDelta) -> Vec<Reference> {
         self.watches
             .values()
-            .filter(|watch| watch.deadline > now && watch.next_read(floor) <= now)
+            .filter(|watch| {
+                watch.deadline > now && !self.paused(watch) && watch.next_read(floor) <= now
+            })
             .map(|watch| watch.reference.clone())
             .collect()
     }
@@ -461,6 +502,7 @@ impl Watches {
     pub fn next_read(&self) -> Option<DateTime<Utc>> {
         self.watches
             .values()
+            .filter(|watch| !self.paused(watch))
             .map(|watch| watch.next_read(TimeDelta::zero()))
             .min()
     }
@@ -608,6 +650,7 @@ impl Watches {
                 seen_at: now,
                 address: None,
                 pushes: Vec::new(),
+                departed: false,
             });
         entry.seen_at = now;
         entry
@@ -620,16 +663,29 @@ impl Watches {
     /// id but gets a new process and a new socket, and what that session
     /// wants is the net change since it left — not a replay of it, and not
     /// silence about it.
+    ///
+    /// The same goes for its watches: any it paused on leaving are stirred,
+    /// due at once, and read against the baseline they kept.
     pub fn attach(
         &mut self,
         subscriber: &str,
         address: SessionAddress,
         now: DateTime<Utc>,
     ) -> bool {
-        self.meet(subscriber, now)
-            .address
-            .replace(address)
-            .is_some()
+        let paused: Vec<String> = self
+            .paused_keys()
+            .into_iter()
+            .filter(|key| self.watches[key].owners.contains(subscriber))
+            .collect();
+        let entry = self.meet(subscriber, now);
+        entry.departed = false;
+        let replaced = entry.address.replace(address).is_some();
+        for key in paused {
+            if let Some(watch) = self.watches.get_mut(&key) {
+                watch.stirred_at = Some(now);
+            }
+        }
+        replaced
     }
 
     /// Stop pushing to a subscriber, and nothing else.
@@ -638,10 +694,12 @@ impl Watches {
     /// unread news can still pull it on its way back in. Reports whether
     /// there was an address to detach.
     pub fn detach(&mut self, subscriber: &str) -> bool {
-        self.subscribers
-            .get_mut(subscriber)
-            .and_then(|entry| entry.address.take())
-            .is_some()
+        let Some(entry) = self.subscribers.get_mut(subscriber) else {
+            return false;
+        };
+        let had = entry.address.take().is_some();
+        entry.departed |= had;
+        had
     }
 
     /// Every subscriber a push could reach, with where its cursor sits.
@@ -700,12 +758,31 @@ impl Watches {
             live
         });
         self.events.retain(|event| now - event.at < retention);
-        self.subscribers
-            .retain(|_, subscriber| now - subscriber.seen_at < SUBSCRIBER_RETENTION);
+        // A departed reader that still owns a watch is kept: dropping it
+        // would forget the departure and quietly resume that watch's reads.
+        let watches = &self.watches;
+        self.subscribers.retain(|id, subscriber| {
+            now - subscriber.seen_at < SUBSCRIBER_RETENTION
+                || (subscriber.departed && watches.values().any(|w| w.owners.contains(id)))
+        });
         Pruned {
             watches: before.0 - self.watches.len(),
             events: before.1 - self.events.len(),
             subscribers: before.2 - self.subscribers.len(),
+        }
+    }
+}
+
+/// Say when a watch pauses or resumes — once, at the change that did it,
+/// rather than on every tick it spends paused.
+fn log_pauses(before: &BTreeSet<String>, watches: &Watches) {
+    let after = watches.paused_keys();
+    for key in after.difference(before) {
+        tracing::info!(reference = %key, "watch paused; every reader has gone");
+    }
+    for key in before.difference(&after) {
+        if watches.watches.contains_key(key) {
+            tracing::info!(reference = %key, "watch resumed");
         }
     }
 }
@@ -804,9 +881,11 @@ impl WatchStore {
                 "pruned"
             );
         }
+        let paused = watches.paused_keys();
         let outcome = change(&mut watches);
         watches.version = VERSION;
         self.save(&watches)?;
+        log_pauses(&paused, &watches);
         Ok(outcome)
     }
 
@@ -1833,5 +1912,134 @@ mod tests {
             "{:?} is not a bound a prompt can pay",
             started.elapsed()
         );
+    }
+
+    /// `owner` subscribed and then ended: the only way a reader departs.
+    fn ended(watches: &mut Watches, owner: &str) {
+        watches.attach(owner, address("/tmp/s"), now());
+        watches.detach(owner);
+    }
+
+    fn is_live(watches: &Watches, at: DateTime<Utc>) -> bool {
+        watches.due_now(at, TimeDelta::zero()) == [pr(3)]
+            && watches.active(at) == [pr(3)]
+            && watches.next_read().is_some()
+    }
+
+    #[test]
+    fn a_watch_pauses_when_every_reader_has_ended() {
+        let mut watches = watching(State::Open);
+        let later = now() + TimeDelta::hours(2);
+        assert!(is_live(&watches, later));
+
+        ended(&mut watches, "s-1");
+        assert!(watches.paused(&watches.watches["github.com/dpep/inkling#3"]));
+        assert!(
+            watches.due_now(later, TimeDelta::zero()).is_empty(),
+            "not read"
+        );
+        assert!(watches.active(later).is_empty());
+        assert_eq!(watches.next_read(), None, "nothing to wake a server for");
+        assert_eq!(watches.watches.len(), 1, "paused, not cancelled");
+    }
+
+    #[test]
+    fn a_watch_with_a_reader_we_cannot_see_leave_never_pauses() {
+        let later = now() + TimeDelta::hours(2);
+        // The terminal has no session to end; a session without the hooks
+        // never had an address, so nothing says it has gone. Either one keeps
+        // a watch live beside a session that has ended — as does a session
+        // still attached.
+        for other in [TERMINAL, "no-hooks", "attached"] {
+            let mut watches = watched_by(&["s-1", other], State::Open);
+            if other == "attached" {
+                watches.attach(other, address("/tmp/a"), now());
+            }
+            ended(&mut watches, "s-1");
+            assert!(is_live(&watches, later), "{other} still hears it");
+        }
+
+        let mut watches = watched_by(&["no-hooks"], State::Open);
+        watches.detach("no-hooks");
+        assert!(is_live(&watches, later), "detaching nothing is not ending");
+    }
+
+    #[test]
+    fn a_resumed_session_hears_the_net_change_since_it_left() {
+        // Quiet for a day, so it is on hourly readings: only the return can
+        // make it due five minutes after its last one.
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", forever(), now() - TimeDelta::days(1));
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+        ended(&mut watches, "s-1");
+
+        let back = now() + TimeDelta::minutes(5);
+        watches.attach("s-1", address("/tmp/resumed"), back);
+        assert_eq!(watches.due_now(back, TimeDelta::zero()), [pr(3)]);
+
+        let events = watches.record(&[(pr(3), seen_pull(State::Approved, None))], back);
+        assert_eq!(events.len(), 1, "one transition, not a fresh baseline");
+        assert_eq!(
+            (events[0].from.as_str(), events[0].to.as_str()),
+            ("open", "approved")
+        );
+        assert_eq!(
+            watches.take("s-1", back).len(),
+            1,
+            "and it is this session's"
+        );
+    }
+
+    #[test]
+    fn watching_again_is_a_sign_of_life() {
+        let mut watches = watching(State::Open);
+        ended(&mut watches, "s-1");
+        watches.watch(&pr(4), "s-1", forever(), now());
+        assert!(!watches.paused(&watches.watches["github.com/dpep/inkling#3"]));
+        assert!(!watches.paused(&watches.watches["github.com/dpep/inkling#4"]));
+    }
+
+    #[test]
+    fn an_ended_reader_outlives_its_retention_while_it_owns_a_watch() {
+        // Forgetting the departure would quietly resume the reads.
+        let mut watches = watching(State::Open);
+        ended(&mut watches, "s-1");
+        watches.take("idle", now());
+        let week = now() + SUBSCRIBER_RETENTION + TimeDelta::hours(1);
+
+        watches.collect_garbage(week, RETENTION);
+        assert!(watches.knows("s-1"));
+        assert!(!watches.knows("idle"));
+
+        watches.unwatch(&pr(3), "s-1");
+        watches.collect_garbage(week, RETENTION);
+        assert!(!watches.knows("s-1"));
+    }
+
+    #[test]
+    fn only_paused_watches_give_a_server_no_reason_to_stay() {
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.attach("s-2", address("/tmp/t"), now());
+        assert!(crate::push::should_serve(&watches, now()));
+
+        watches.detach("s-1");
+        assert!(
+            !crate::push::should_serve(&watches, now()),
+            "s-2 watches nothing"
+        );
+        assert!(watches.reachable("s-1", now()), "but status still shows it");
+    }
+
+    #[test]
+    fn a_pause_survives_the_file() {
+        let store = WatchStore::new(scratch("paused"));
+        store
+            .update(now(), |w| {
+                w.watch(&pr(3), "s-1", forever(), now());
+                ended(w, "s-1");
+            })
+            .unwrap();
+        assert!(store.read().due_now(now(), TimeDelta::zero()).is_empty());
     }
 }

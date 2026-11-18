@@ -570,6 +570,55 @@ and a merge to get the debugging view back — and made two readers' tokens
 look interchangeable when they are not. A gap in your sequence numbers is
 honest: something happened that wasn't yours.
 
+### A watch nobody can hear is paused
+
+A session that ends is detached (the `SessionEnd` hook, a push that finds the
+socket gone, or the per-tick probe), and its events stay pullable for 72h so
+`claude --resume` reads the net change. Its watches used to go on being read
+until their deadline. A GitHub reading is nearly free; a Slack reading is a
+`claude -p` call, about 2¢, and `post-tool` watches every Slack message a
+session posts. So a closed session kept paying for news nobody could hear.
+
+> A watch is **paused** while every one of its owners is a session that was
+> attached and has since been detached. A paused watch isn't read, isn't due,
+> and isn't a reason for the server to wake or stay up.
+
+- **Pause, not cancel.** Cancelling (unwatching on detach) would break the
+  promise `--resume` already makes for the cursor: the net change since you
+  left, not silence. Pausing keeps the baseline, so the first reading after
+  the session comes back is one honest transition, `open → approved`, and
+  never a re-baseline that swallows it. The deadline still runs; expiry stays
+  the only cleanup, so pausing adds no new way for a watch to end.
+- **Resuming makes it due now.** `attach` stirs each watch the session had
+  paused, as a touch does, so a watch that was on hourly readings is read
+  within the minute floor, and `subscribe` rings the server the way
+  registering a watch does. Slack's 5-minute attempt floor still applies; it
+  is about cost, and a resume doesn't change that.
+- **Derived, with one stored bit.** Paused is computed from the owners every
+  time (`Watches::paused`), so there's no flag on the watch to drift. But it
+  needs one fact the store didn't keep: whether a reader *had* an address.
+  A missing address alone can't say, because a session without the hooks
+  never had one. So `Subscriber::departed` is set when `detach` removes a real
+  address and cleared by `attach` or by the reader registering a watch.
+- **`cli` and readers that never attached are exempt.** Pausing is only safe
+  when we *saw* the reader leave. The terminal has no session to end, and a
+  session without the hooks gives no sign either way. Pausing their watches
+  would turn "we can't tell" into "they've gone" and lose news someone is
+  waiting for. One such owner, or one attached owner, keeps a watch live.
+  Failing open costs reads; failing closed costs news.
+- **A departed reader's record outlives `SUBSCRIBER_RETENTION` while it owns
+  a watch.** Otherwise a watch with a `--ttl` past seven days would forget
+  the departure and quietly start reading again.
+- **The server needs no change of its own.** `should_serve` already counts
+  only attached subscribers' watches, and an attached owner can't have a
+  paused watch, so paused watches were never a reason to stay. What did
+  change is `next_read`: it skips paused watches, so the server doesn't wake
+  on their schedule only to find nothing due.
+- **Logged on the change, not per tick.** `WatchStore::update` compares the
+  paused set before and after each write and logs `watch paused` or
+  `watch resumed` once.
+- **`wait` is unaffected.** A wait has a foreground reader by construction.
+
 ## Watching what a session touched
 
 `inkling hook post-tool` registers a watch for the pull request or issue a

@@ -208,6 +208,14 @@ Subscribing attaches; it doesn't create. `unsubscribe` detaches the address
 and leaves your watches and your place alone, so `claude --resume` picks up
 the net change since you left rather than a replay or a silence.
 
+While you're gone, watches only your ended sessions hold are paused: not
+read, and not keeping the server up. Their deadlines still run. Resuming makes
+them due at once, and the first reading reports what moved while you were
+away. A watch that is also yours at a terminal (`cli`), or belongs to a session
+without the hooks, keeps being read: nothing tells Inkling those have gone.
+`inkling watch` marks paused watches `(paused)`, and `inkling status` counts
+them and lists their session as `ended`.
+
 ### The resident server
 
 One `inkling` per machine does the polling. `subscribe` or `watch` starts it

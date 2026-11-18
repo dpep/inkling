@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
 use inkling::adapters::store_json::{JsonStore, Store};
-use inkling::adapters::watches_json::Unwatched;
+use inkling::adapters::watches_json::{TERMINAL, Unwatched};
 use inkling::app::{Report, Run};
 use inkling::config::Config;
 use inkling::config_edit;
@@ -631,8 +631,16 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 .values()
                 .filter(|w| w.deadline > now)
                 .count();
+            let paused = watched
+                .watches
+                .values()
+                .filter(|w| w.deadline > now && watched.paused(w))
+                .count();
             println!();
             println!("watching    {live}");
+            if paused > 0 {
+                println!("  paused    {paused} (every reader's session has ended)");
+            }
             println!("  events    {} in the last day", watched.events.len());
 
             println!();
@@ -1317,11 +1325,6 @@ fn classify(
 /// log, so treat both as unstable.
 const SOCKET_ENV: &str = "CLAUDE_CODE_MESSAGING_SOCKET";
 const SESSION_ENV: &str = "CLAUDE_CODE_SESSION_ID";
-
-/// The reader a person at a terminal is. Every watch has an owner and every
-/// read names one, so there is one rule rather than an owned path and an
-/// unowned one.
-const TERMINAL: &str = "cli";
 
 /// Which reader this invocation is.
 ///
@@ -2112,6 +2115,7 @@ fn watch_out(
                     "title": watch.seen.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
                     "owners": watch.owners,
                     "mine": watch.owners.contains(owner),
+                    "paused": watches.paused(watch),
                 })
             })
             .collect();
@@ -2130,9 +2134,15 @@ fn watch_out(
     let rows: Vec<_> = live
         .iter()
         .map(|watch| {
+            let state = standing(watch.seen.as_ref().map(|seen| &seen.standing));
             (
                 watch.reference.to_string(),
-                standing(watch.seen.as_ref().map(|seen| &seen.standing)),
+                // Not read until a reader comes back, so the standing is as of
+                // when it paused — the answer to "why wasn't I told".
+                match watches.paused(watch) {
+                    true => format!("{state} (paused)"),
+                    false => state,
+                },
                 humanize(watch.deadline - now),
                 watch
                     .seen
@@ -2362,9 +2372,12 @@ fn subscribers_out(watches: &inkling::adapters::watches_json::Watches, now: Date
         println!(
             "  {:<8}  {:<8}  cursor {:<5}  watching {watching:<3}  last seen {}",
             short(id),
-            match subscriber.address.is_some() {
-                true => "attached",
-                false => "detached",
+            // "ended" is a session we saw go, which is what pauses watches;
+            // "detached" never attached, so nothing says it has gone.
+            match (subscriber.address.is_some(), subscriber.departed) {
+                (true, _) => "attached",
+                (false, true) => "ended",
+                (false, false) => "detached",
             },
             subscriber.cursor,
             humanize(now - subscriber.seen_at),

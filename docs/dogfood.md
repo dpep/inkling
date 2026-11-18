@@ -6,6 +6,20 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Pausing an ended session's watches, live against scratch paths with a fake socket: `unsubscribe`
+  logged `watch paused` once; a server started with only that watch did no reads and stood down
+  idle after 30s (`idle_after = "20s"`), though the schedule had it due; `subscribe` logged
+  `watch resumed`, spawned a server, and it read the PR 0.7s later. Not seen live: a net
+  transition on resume (the PR didn't move; that's unit-tested only).
+- A fake session socket can't live in the scratchpad: its path is past macOS's 104-byte
+  `AF_UNIX` limit, so the listener never bound. Used `/tmp/claude/`. Not inkling's bug, but
+  worth knowing before the next live push experiment.
+- Subagents share the session's scratchpad: a `scratchpad/live/` store from another agent's Slack
+  dogfooding got my subscriber and watch, and a server of mine, before I noticed. Cleaned up;
+  use a uniquely named dir per experiment.
+- A rebuild during a live experiment replaces the scratch server (`reason="replaced"`), which
+  muddies "did it stand down because it was idle". Start it by hand after building.
+
 - Replies outside the thread: the user answered a watched DM message with a plain DM message,
   and the thread read saw nothing. Now the channel after the message is read in the same
   `claude -p` (a second tool call; one more turn, 7–10s, 0.1¢ warm / 2¢ cold — cache state, not
