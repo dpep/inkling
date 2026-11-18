@@ -884,10 +884,28 @@ was found.
   the thread. A reply read from a thread belongs to the latest watched message
   in that thread (the root, or a watched reply) posted before it; a later
   message in the channel, to the latest watched message anywhere in the
-  channel. Only live message watches count, due or not — a channel watch is
-  its own thing. `MessageProvider::read` is handed them for this
-  (`domain::slack::owner`); the store is unchanged, and a reply that a newer
-  watch takes over isn't a loss to the older one, since replies never shrink.
+  channel (`domain::slack::owner`). Only live message watches count, due or
+  not — a channel watch is its own thing.
+  - **Ownership decides who is told, not what is kept.** Every watch keeps
+    every reply that answers it, so a watch coming, going, pausing or
+    expiring loses or repeats nothing. When a reading brings a reply new to
+    a watch, `Watches::record` tells it to each reader whose latest watch
+    for it is this one, counting only *that reader's* watches: another
+    session's later message never takes a reply from you. The read says
+    which replies came from the thread (`MessageStatus::threaded`), since
+    that decides which watches a reply can belong to. Changed 2026-11-18
+    from deciding ownership in the read, which stored a reply only on its
+    owner: a later watch from another session silenced yours, and when a
+    reply watch ended its replies were pushed again on the root.
+  - **A watch counts once it has been read.** A never-read watch's first
+    reading is a baseline, so it takes nothing from older watches until
+    then. That baseline still tells a reader a reply one of their other
+    watches answers but hasn't read yet: it arrived since they last looked,
+    typically the answer to a follow-up you sent a minute ago, and would
+    otherwise reach nobody.
+  - **Each step counts every reply.** A replies event goes `3 → 4` when
+    the message has four replies and one is news here, even if the other
+    three were told on a later watch.
   One gap: a thread reply also sent to the channel is a thread's to the
   message that read its thread, but the channel read doesn't say it was
   threaded, so a later watched top-level message hears it too.

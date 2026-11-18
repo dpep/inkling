@@ -3669,7 +3669,6 @@ mod tests {
         fn read(
             &self,
             messages: &[inkling::domain::model::Reference],
-            _: &[inkling::domain::model::Reference],
         ) -> Result<Vec<inkling::ports::MessageLookup>, inkling::ports::ProviderError> {
             Ok(messages
                 .iter()

@@ -19,8 +19,9 @@ use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
 use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
+use crate::domain::slack::owner;
 use crate::domain::watch::{
-    Axis, Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading,
+    Axis, Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading, replied,
 };
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -615,6 +616,10 @@ impl Watches {
         let mut fresh = Vec::new();
         for (reference, sighting) in sightings {
             let key = reference.key();
+            let heard = self
+                .watches
+                .get(&key)
+                .and_then(|watch| self.heard(watch, sighting, observed_at));
             let Some(watch) = self.watches.get_mut(&key) else {
                 // Expired while the poll was in flight.
                 continue;
@@ -637,10 +642,33 @@ impl Watches {
             // finished and its owners gone.
             let audience = watch.owners.clone();
             let read = reading(watch.seen.as_ref().map(|s| &s.standing), sighting);
-            if !read.moved.is_empty() {
+            let stirred = !read.moved.is_empty();
+            // A Slack reply is told to each reader on one watch, not all.
+            let moved = match (heard, &read.standing) {
+                (Some(heard), Standing::Message { replies, .. }) => {
+                    let mut by_heard: BTreeMap<BTreeSet<String>, BTreeSet<String>> =
+                        BTreeMap::new();
+                    for (reader, new) in heard {
+                        by_heard.entry(new).or_default().insert(reader);
+                    }
+                    let replied = by_heard.into_iter().filter_map(|(new, readers)| {
+                        replied(replies, &new, &sighting.by).map(|moved| (moved, readers))
+                    });
+                    let rest = read.moved.into_iter().filter(|m| m.axis != Axis::Replies);
+                    replied
+                        .chain(rest.map(|moved| (moved, audience.clone())))
+                        .collect()
+                }
+                _ => read
+                    .moved
+                    .into_iter()
+                    .map(|moved| (moved, audience.clone()))
+                    .collect::<Vec<_>>(),
+            };
+            if stirred || !moved.is_empty() {
                 watch.stirred_at = Some(observed_at);
             }
-            for moved in read.moved {
+            for (moved, audience) in moved {
                 self.last_seq += 1;
                 tracing::info!(
                     reference = %reference,
@@ -694,6 +722,82 @@ impl Watches {
         }
         self.events.extend(fresh.iter().cloned());
         fresh
+    }
+
+    /// For a Slack message, the replies new to it that each of its readers is
+    /// told on it.
+    ///
+    /// Every watch keeps every reply that answers it, so one coming or going
+    /// loses or repeats nothing. A reader is told each reply once, on the
+    /// latest of *their own* watched messages it answers, among those already
+    /// read once — another session's watch never takes a reply from them. A
+    /// first reading tells only what one of the reader's other watches has
+    /// yet to see: it arrived since they last looked, and the baseline would
+    /// swallow it. Anything else was there when they asked.
+    fn heard(
+        &self,
+        watch: &Watch,
+        sighting: &Sighting,
+        now: DateTime<Utc>,
+    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+        let (
+            Reference::SlackMessage {
+                channel,
+                ts,
+                thread,
+            },
+            Standing::Message { replies, .. },
+        ) = (&watch.reference, &sighting.standing)
+        else {
+            return None;
+        };
+        let held = |w: &Watch, reply: &str| {
+            matches!(&w.seen, Some(Seen { standing: Standing::Message { replies, .. }, .. })
+                if replies.contains_key(reply))
+        };
+        let root = thread.as_deref().unwrap_or(ts);
+        let new: Vec<&String> = replies.keys().filter(|r| !held(watch, r)).collect();
+        let heard = |reader: &String| {
+            let theirs: Vec<&Watch> = self
+                .watches
+                .values()
+                .filter(|w| {
+                    matches!(w.reference, Reference::SlackMessage { .. })
+                        && w.reference != watch.reference
+                        && w.owners.contains(reader)
+                        && w.seen.is_some()
+                        && w.deadline > now
+                        && !self.paused(w)
+                })
+                .collect();
+            new.iter()
+                .filter(|reply| {
+                    let context = sighting.by.threaded.contains(**reply).then_some(root);
+                    let answers =
+                        |w: &Watch| owner(channel, reply, context, [&w.reference]).is_some();
+                    let candidates = theirs.iter().map(|w| &w.reference);
+                    let latest = owner(
+                        channel,
+                        reply,
+                        context,
+                        candidates.chain([&watch.reference]),
+                    );
+                    // The read keeps only what answers this message, so a reply
+                    // no watch claims is still this one's.
+                    latest.is_none_or(|latest| latest == ts)
+                        && (watch.seen.is_some()
+                            || theirs.iter().any(|w| answers(w) && !held(w, reply)))
+                })
+                .map(|reply| (*reply).clone())
+                .collect()
+        };
+        Some(
+            watch
+                .owners
+                .iter()
+                .map(|reader| (reader.clone(), heard(reader)))
+                .collect(),
+        )
     }
 
     /// Count a reading that found each of these missing, and finish the
