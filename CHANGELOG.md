@@ -10,9 +10,15 @@
 <!-- fix3-state -->
 - **A prompt no longer leaves `acli` processes behind.** A prompt hook that gave up refreshing
   after 3s left the `acli` reads it had started running, past their own timeout. While a server is
-  running the prompt hook no longer looks upstream at all, since the server keeps readings fresh;
-  with no server it refreshes as before.
+  running and ticking the prompt hook no longer looks upstream at all, since the server keeps
+  readings fresh; otherwise it refreshes as before.
 <!-- /fix3-state -->
+
+<!-- fix4-life -->
+- **`inkling unsubscribe` is a mute.** It stops pushes and nothing else: the session's watches,
+  Slack included, keep being read and shown at its prompt, and a server stays up for them. Run on
+  a session that has already ended, it does nothing and says so.
+<!-- /fix4-life -->
 
 <!-- fix2-github-jira -->
 - **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,

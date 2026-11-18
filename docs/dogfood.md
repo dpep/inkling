@@ -6,6 +6,11 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Three rounds of unsubscribe fixes each added a clause (`departed |= unsubscribed`, clearing
+  `departed`, gating SessionStart on `source`) and hunt 4 found three more holes. Expected a rule
+  per case to converge; it didn't. Replaced by one model in fix4-life: unsubscribe is a mute that
+  keeps the address, so probing and serving work unchanged. Also learned: `/clear` gives a new
+  session id in Claude Code, so a rule written for it never ran.
 - Hunt 3 found that df35579's reply ownership decided what each watch stored. Another session's
   later watch took my replies, a reply that arrived before a new watch's first read reached nobody,
   and an expiring reply watch re-dumped its replies on the root. Fixed in 2500a05: every watch
