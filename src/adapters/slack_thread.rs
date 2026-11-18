@@ -19,14 +19,19 @@ use crate::domain::slack::{is_dm, later};
 use crate::ports::{
     ChannelStatus, MessageLookup, MessageProvider, MessageStatus, ProviderError, RefError,
 };
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
+use std::time::{Duration, Instant};
 
 pub struct SlackThreads<R: Runner> {
     slack: SlackClaude<R>,
-    /// Asked once, and only once a message is actually read: finding out who
-    /// the credentials belong to may itself be a bridge call.
+    /// Asked only once a message is actually read: finding out who the
+    /// credentials belong to may itself be a bridge call.
     identify: Box<dyn Fn() -> Option<String>>,
-    me: OnceCell<Option<String>>,
+    me: OnceCell<String>,
+    /// When finding out last failed. A failure isn't kept for the life of a
+    /// server, but isn't retried on every read either: each try is paid.
+    failed: Cell<Option<Instant>>,
+    retry: Duration,
 }
 
 impl<R: Runner> SlackThreads<R> {
@@ -35,13 +40,33 @@ impl<R: Runner> SlackThreads<R> {
             slack,
             identify: Box::new(identify),
             me: OnceCell::new(),
+            failed: Cell::new(None),
+            retry: crate::adapters::watches_json::SLACK_READ_FLOOR
+                .to_std()
+                .unwrap_or_default(),
         }
     }
 
     /// The reader's Slack user id, which is how a channel message that
     /// @mentions them is recognized as a reply.
     fn me(&self) -> Option<String> {
-        self.me.get_or_init(|| (self.identify)()).clone()
+        if let Some(me) = self.me.get() {
+            return Some(me.clone());
+        }
+        if self
+            .failed
+            .get()
+            .is_some_and(|at| at.elapsed() < self.retry)
+        {
+            return None;
+        }
+        match (self.identify)() {
+            Some(me) => Some(self.me.get_or_init(|| me).clone()),
+            None => {
+                self.failed.set(Some(Instant::now()));
+                None
+            }
+        }
     }
 
     fn read_one(&self, reference: &Reference) -> Result<MessageStatus, RefError> {
@@ -382,5 +407,29 @@ mod tests {
         assert_eq!(slack.me().as_deref(), Some("U00000009"));
         assert_eq!(slack.me().as_deref(), Some("U00000009"));
         assert_eq!(asked.get(), 1);
+    }
+
+    #[test]
+    fn not_finding_out_who_i_am_is_asked_again_later_not_never() {
+        // A server lives for days; one failed whoami must not blind the
+        // mention rule for all of them.
+        let answers = Rc::new(RefCell::new(vec![Some("U00000009"), None]));
+        let left = answers.clone();
+        let runner = Replay {
+            replies: RefCell::new(Vec::new()),
+            prompts: Rc::new(RefCell::new(Vec::new())),
+        };
+        let slack = SlackThreads::new(SlackClaude::new(runner), move || {
+            left.borrow_mut().pop().flatten().map(Into::into)
+        });
+        assert_eq!(slack.me(), None);
+        assert_eq!(slack.me(), None, "not asked again at once");
+        assert_eq!(answers.borrow().len(), 1);
+
+        let slack = SlackThreads {
+            retry: std::time::Duration::ZERO,
+            ..slack
+        };
+        assert_eq!(slack.me().as_deref(), Some("U00000009"));
     }
 }
