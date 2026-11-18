@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// an older build refuses a newer file rather than parse what it can and save
 /// back less (docs/watching.md, "An older build meets a newer store").
 /// `tests::stored_shape` stops compiling when the shape moves.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The reader a person at a terminal is. Every watch has an owner and every
 /// read names one, so there is one rule rather than an owned path and an
@@ -80,6 +80,11 @@ pub fn read_every(quiet: TimeDelta) -> TimeDelta {
 /// floor counts attempts rather than successes: a bridge that keeps failing
 /// must not be retried on every tick.
 pub const SLACK_READ_FLOOR: TimeDelta = TimeDelta::minutes(5);
+
+/// How many readings in a row must say a reference isn't there before its
+/// watch ends. One can be wrong: a read that otherwise succeeded can leave a
+/// message out, and a source can answer "not found" for an outage.
+pub const GONE_AFTER: u32 = 3;
 
 /// The least time between attempts to read this kind of reference.
 fn attempt_floor(reference: &Reference) -> TimeDelta {
@@ -172,6 +177,14 @@ pub struct Watch {
     /// it. Kept on the watch so it goes when the watch does.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub receipts: BTreeMap<String, Receipts>,
+    /// Readings in a row that found the reference missing; a sighting resets
+    /// it. Ends the watch at `GONE_AFTER`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub misses: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Watch {
@@ -294,6 +307,7 @@ impl Watches {
                 head: None,
                 tried_at: None,
                 receipts: BTreeMap::new(),
+                misses: 0,
             });
         // A channel first watched by id takes its name once one is known.
         if matches!(reference, Reference::SlackChannel { name: Some(_), .. }) {
@@ -657,6 +671,7 @@ impl Watches {
             if sighting.head.is_some() {
                 watch.head = sighting.head.clone();
             }
+            watch.misses = 0;
             let finished = read.standing.is_finished();
             watch.seen = Some(Seen {
                 at: observed_at,
@@ -672,13 +687,23 @@ impl Watches {
         fresh
     }
 
-    /// Finish the watches on references that aren't there any more, each with
+    /// Count a reading that found each of these missing, and finish the
+    /// watches that have been missing `GONE_AFTER` times in a row, each with
     /// one event saying so — the same end a merged pull request gets, so a
     /// deleted Slack message isn't paid for until its deadline.
     pub fn gone(&mut self, references: &[Reference], observed_at: DateTime<Utc>) -> Vec<Event> {
         let mut fresh = Vec::new();
         for reference in references {
-            let Some(watch) = self.watches.remove(&reference.key()) else {
+            let key = reference.key();
+            let Some(watch) = self.watches.get_mut(&key) else {
+                continue;
+            };
+            watch.misses += 1;
+            if watch.misses < GONE_AFTER {
+                tracing::info!(reference = %reference, misses = watch.misses, "watch missing");
+                continue;
+            }
+            let Some(watch) = self.watches.remove(&key) else {
                 continue;
             };
             self.last_seq += 1;
@@ -2121,7 +2146,7 @@ mod tests {
     /// pattern. (`SessionAddress` keeps its fields private; it changes rarely.)
     #[allow(dead_code)]
     fn stored_shape(file: Watches, standing: Standing, axis: Axis, reference: Reference) {
-        const _: () = assert!(VERSION == 2, "update the patterns below for this version");
+        const _: () = assert!(VERSION == 3, "update the patterns below for this version");
         let Watches {
             version: _,
             watches,
@@ -2140,6 +2165,7 @@ mod tests {
                 head,
                 tried_at: _,
                 receipts,
+                misses: _,
             } = watch;
             for (_, receipt) in receipts {
                 let crate::domain::watch::Receipts { posted: _, reacted } = receipt;
@@ -2489,6 +2515,50 @@ mod tests {
             "s-2 watches nothing"
         );
         assert!(watches.reachable("s-1", now()), "but status still shows it");
+    }
+
+    #[test]
+    fn a_watch_is_gone_only_after_repeated_misses() {
+        let mut watches = watching(State::Open);
+        for _ in 1..GONE_AFTER {
+            assert!(watches.gone(&[pr(3)], now()).is_empty());
+        }
+        assert!(
+            watches.watches.contains_key(&pr(3).key()),
+            "a miss is a failure"
+        );
+        let ended = watches.gone(&[pr(3)], now());
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].to, "gone");
+        assert!(watches.watches.is_empty());
+    }
+
+    #[test]
+    fn a_reading_between_misses_starts_the_count_again() {
+        let mut watches = watching(State::Open);
+        for _ in 1..GONE_AFTER {
+            watches.gone(&[pr(3)], now());
+        }
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], now());
+        for _ in 1..GONE_AFTER {
+            assert!(watches.gone(&[pr(3)], now()).is_empty());
+        }
+        assert!(watches.watches.contains_key(&pr(3).key()));
+    }
+
+    #[test]
+    fn a_version_2_store_has_missed_nothing() {
+        let mut old = serde_json::to_value(watching(State::Open)).unwrap();
+        old["version"] = 2.into();
+        old["watches"][pr(3).key()]
+            .as_object_mut()
+            .unwrap()
+            .remove("misses");
+        let raw = old.to_string();
+        let Ok(watches) = parse(&raw) else {
+            panic!("a version 2 store parses")
+        };
+        assert_eq!(watches.watches[&pr(3).key()].misses, 0);
     }
 
     #[test]

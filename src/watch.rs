@@ -713,6 +713,9 @@ mod tests {
         let h = Harness::new("gone");
         h.github.fail(&pr(3), RefError::NotFound);
         h.watch(&pr(3));
+        for _ in 1..crate::adapters::watches_json::GONE_AFTER {
+            assert!(h.poll().events.is_empty(), "one miss can be wrong");
+        }
         let polled = h.poll();
         assert_eq!(polled.failures.len(), 1);
         assert_eq!(labels(&polled.events), [("state", "watched", "gone")]);

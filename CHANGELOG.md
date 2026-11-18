@@ -4,7 +4,8 @@
 
 - **A watch on something that isn't there any more ends, once.** A Slack message that was
   deleted, or a channel the connector can't see, used to be read (and paid for) every five minutes
-  until its deadline; its first such read now says `state watched → gone` and the watch is dropped.
+  until its deadline; its third such read in a row now says `state watched → gone` and the watch is
+  dropped.
   `inkling watch` prints why a reference it was just given couldn't be read, and exits 1.
 - **Each Slack bridge call logs what it cost** as `total_cost_usd`, failed calls included.
 - **Every line that counts something ends in the read that shows it.** Slack lines end in the MCP
@@ -29,7 +30,7 @@
   a newer one (a channel watch, say) called it corrupt, set it aside and started empty, losing
   every watch and cursor; one that could parse it saved back without the fields it didn't know.
   Now an older build refuses the file and leaves it untouched, and a resident server running one
-  stands down for the newer build. The store is now version 2, so the build you are replacing
+  stands down for the newer build. The store is now version 3, so the build you are replacing
   refuses it too — expected during `make install`. Builds from before this change still can't
   tell, so don't run one against a store this build has written.
 - **A long watch no longer forgets its reader after a quiet week.** A reader silent for seven days

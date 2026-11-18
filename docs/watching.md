@@ -397,9 +397,11 @@ baseline, `departed`, `tried_at`, `own`).
   `receipt_for`, `lines`, `after`, and watches keyed by `Reference::key`
   (older keys are rekeyed on read). The tripwire caught the last four landing
   from two other lanes while this rule was being merged.
+- **Version 3 adds `misses`** (see "A conversation never finishes"); a version
+  2 file reads as having missed nothing.
 - **Builds from before this rule still quarantine.** They parse everything
   before looking at the version. Nothing this build does can reach them;
-  version 2 only parses for them if it holds nothing they lack.
+  version 2 or 3 only parses for them if it holds nothing they lack.
 
 ## How often a watch is read
 
@@ -866,11 +868,15 @@ was found.
   read it, not which message it is, so it isn't in the name. Always given in
   full: the short forms are pull requests only.
 - **A conversation never finishes, but it can be gone.** The watch ends at
-  its deadline, or at the first read that says the message or channel isn't
-  there (`RefError::NotFound`: deleted, another workspace, a private channel
-  the connector can't see). That read records one `state watched → gone` and
-  drops the watch, the way `wait` already treats a vanished reference —
-  otherwise it was paid for every five minutes until the deadline, silently.
+  its deadline, or once `GONE_AFTER` (3) reads in a row say the message or
+  channel isn't there (`RefError::NotFound`: deleted, another workspace, a
+  private channel the connector can't see). The last of them records one
+  `state watched → gone` and drops the watch, the way `wait` already treats a
+  vanished reference — otherwise it was paid for every five minutes until the
+  deadline, silently. Not the first: one read can be wrong (a reply left out
+  of a thread that otherwise read fine, an outage answered as "not found"),
+  and ending a watch can't be undone. Until then a miss is an ordinary failed
+  read, and any successful read starts the count again.
   `inkling watch` prints why a reference it was just given couldn't be read,
   and exits 1.
 
