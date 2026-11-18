@@ -273,9 +273,8 @@ pub struct Subscriber {
     /// one, and nothing will ever tell us it has gone. What pauses a watch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub departed: bool,
-    /// Detached because it asked to be. Unlike a probe or `SessionEnd`, that
-    /// is not undone by the session's next hook — only by attaching. Not a
-    /// departure: the session is still pulling until its `SessionEnd`.
+    /// Muted by `inkling unsubscribe`: still attached and probed, never
+    /// pushed to. Undone only by attaching.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsubscribed: bool,
 }
@@ -950,20 +949,19 @@ impl Watches {
             return false;
         };
         let had = entry.address.take().is_some();
-        // An unsubscribed session gave its address up while still here.
-        entry.departed |= had || entry.unsubscribed;
+        entry.departed |= had;
         had
     }
 
-    /// Stop pushing because the session asked to, which its own hooks won't
-    /// undo. The session is still here and pulling, so it hasn't departed.
+    /// Mute: stop pushing because the session asked to. It keeps its address,
+    /// so it is still probed and its end still noticed. Reports whether there
+    /// was an attached session to mute.
     pub fn unsubscribe(&mut self, subscriber: &str) -> bool {
         let Some(entry) = self.subscribers.get_mut(subscriber) else {
             return false;
         };
-        entry.unsubscribed = true;
-        entry.departed = false;
-        entry.address.take().is_some()
+        entry.unsubscribed |= entry.address.is_some();
+        entry.address.is_some()
     }
 
     /// Detach, but only from `address`: a session that resumed onto a new
@@ -2620,37 +2618,32 @@ mod tests {
     }
 
     #[test]
-    fn an_unsubscribed_session_stays_unsubscribed_until_it_attaches() {
-        // Found by the hunt: the PostToolUse hook of `inkling unsubscribe`
-        // itself attached the session again.
+    fn unsubscribing_mutes_and_nothing_else() {
+        // Found by the hunt: unsubscribe dropped the address, so a session
+        // that died afterwards was never probed and its watches never paused.
         let mut watches = watching(State::Open);
         watches.attach("s-1", address("/tmp/s"), now());
         assert!(watches.unsubscribe("s-1"));
+        assert_eq!(watches.attached().len(), 1, "still probed");
         assert!(!watches.lost_address("s-1"));
-
-        watches.attach("s-1", address("/tmp/s"), now());
-        watches.detach("s-1");
-        assert!(watches.lost_address("s-1"), "attaching ends the choice");
-    }
-
-    #[test]
-    fn unsubscribing_stops_pushes_and_nothing_else() {
-        // Found by the hunt: unsubscribe paused the session's watches, so a
-        // live session pulling with `events` heard nothing.
-        let mut watches = watching(State::Open);
-        watches.attach("s-1", address("/tmp/s"), now());
-        watches.unsubscribe("s-1");
-        assert!(watches.attached().is_empty());
-        assert!(
-            !watches.paused(&watches.watches[&pr(3).key()]),
-            "the session is still here, pulling"
-        );
+        assert!(!watches.paused(&watches.watches[&pr(3).key()]));
 
         watches.detach("s-1");
         assert!(
             watches.paused(&watches.watches[&pr(3).key()]),
             "until it ends"
         );
+    }
+
+    #[test]
+    fn unsubscribing_an_ended_session_changes_nothing() {
+        // Found by the hunt: it un-paused the ended session's watches.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.detach("s-1");
+        assert!(!watches.unsubscribe("s-1"));
+        assert!(!watches.subscribers["s-1"].unsubscribed);
+        assert!(watches.paused(&watches.watches[&pr(3).key()]));
     }
 
     #[test]

@@ -193,8 +193,8 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Stop pushing to this session. Its watches and its place in the stream
-    /// stay until their own expiry, so nothing is lost by ending a session.
+    /// Stop pushing to this session. It stays attached, so its watches keep
+    /// being read and the prompt hook still shows what moved.
     Unsubscribe {
         #[arg(long)]
         session: Option<String>,
@@ -549,7 +549,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let id = session_id(session.as_deref())?;
             match unsubscribe(&id, &cli.common, true)? {
                 true => println!("unsubscribed {}", short(&id)),
-                false => println!("{}: not subscribed", short(&id)),
+                false => println!("{}: not attached; nothing to unsubscribe", short(&id)),
             }
             Ok(0)
         }
@@ -2011,9 +2011,9 @@ fn revive(id: &str, config: &Config, common: &Common) {
     }
 }
 
-/// Detach the address, and only the address. Whatever this session is still
-/// owed stays owed, so ending one loses nothing. `asked` is a person's
-/// `inkling unsubscribe`, which the session's own hooks must not undo.
+/// `asked` is a person's `inkling unsubscribe`: a mute, which keeps the
+/// address. Otherwise the session ended: detach the address, and only the
+/// address, so whatever it is still owed stays owed.
 fn unsubscribe(id: &str, common: &Common, asked: bool) -> Result<bool, String> {
     let clock = SystemClock;
     let detached = watch_store(common)
@@ -2815,10 +2815,10 @@ fn connection(subscriber: &inkling::adapters::watches_json::Subscriber) -> &'sta
         subscriber.departed,
         subscriber.unsubscribed,
     ) {
-        (true, _, _) => "attached",
+        (true, _, true) => "unsubscribed",
+        (true, _, false) => "attached",
         (false, true, _) => "ended",
-        (false, false, true) => "unsubscribed",
-        (false, false, false) => "detached",
+        (false, false, _) => "detached",
     }
 }
 
