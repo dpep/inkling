@@ -1064,8 +1064,9 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
 - **The handle is resolved once.** `#name` goes through the bridge's
   `search_channels` lookup and is cached in `state.json` with the rest of the
   channel cache, so `#general` and `C0E48AHSN` are one watch named
-  `slack:#general`. An id the cache doesn't know is named by its id. The name
-  is display and key only; the id is what is read.
+  `slack:#general`. An id the cache doesn't know is named by its id until the
+  name turns up. The watch is keyed by the id (`Reference::key`), so either
+  form stops it, in either order; the name is display only.
 - **Threaded replies don't count.** `read_channel` lists top-level messages
   only, and a thread reply is that thread's news — watch the message for it. A
   reply also sent to the channel (`reply_broadcast`) is top-level and does

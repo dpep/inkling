@@ -311,7 +311,7 @@ fn ripe(event: &Event, watches: &Watches) -> Ripe {
     // settle it.
     let Some(seen) = watches
         .watches
-        .get(&event.reference.to_string())
+        .get(&event.reference.key())
         .and_then(|watch| watch.seen.as_ref())
     else {
         return Ripe::Push;

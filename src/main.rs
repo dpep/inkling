@@ -1700,7 +1700,7 @@ fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), 
             for (reference, why) in &touched {
                 let known = file
                     .watches
-                    .get(&reference.to_string())
+                    .get(&reference.key())
                     .is_some_and(|watch| watch.owners.contains(&owner));
                 file.watch(reference, &owner, deadline, clock.now());
                 if !known {
@@ -1738,7 +1738,7 @@ fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), 
                 for (reference, head) in &found {
                     let known = file
                         .watches
-                        .get(&reference.to_string())
+                        .get(&reference.key())
                         .is_some_and(|watch| watch.owners.contains(&owner));
                     file.watch(reference, &owner, deadline, clock.now());
                     file.remember_head(reference, head.clone());
@@ -2015,9 +2015,9 @@ fn watch_target(
 
 /// A Slack channel by `#name` or by id, named when that is known.
 ///
-/// The name is display only, but it is also the watch's key, so an id takes
-/// the name the cache already has for it: `#general` and `C0E48AHSN` are then
-/// one watch. A name nobody has resolved yet costs one bridge call, kept in
+/// The name is display only: a watch is keyed by the id, so `#general` and
+/// `C0E48AHSN` are one watch whichever came first. An id takes the name the
+/// cache has for it. A name nobody has resolved yet costs one bridge call, kept in
 /// `state.json` with the rest of the channel cache.
 fn slack_channel<R: slack_claude::Runner>(
     handle: &str,
@@ -2172,7 +2172,7 @@ fn finished_already(
         .sightings
         .iter()
         .filter(|(reference, _)| {
-            asked.contains(reference) && !watches.watches.contains_key(&reference.to_string())
+            asked.contains(reference) && !watches.watches.contains_key(&reference.key())
         })
         .map(|(reference, sighting)| {
             format!(

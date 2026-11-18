@@ -98,6 +98,17 @@ pub enum Reference {
     },
 }
 
+impl Reference {
+    /// What makes two references one watch: the display form, except that a
+    /// channel is its id whether or not its name is known yet.
+    pub fn key(&self) -> String {
+        match self {
+            Reference::SlackChannel { channel, .. } => format!("slack:{channel}"),
+            other => other.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for Reference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

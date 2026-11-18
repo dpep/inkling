@@ -275,7 +275,7 @@ impl Watches {
         self.meet(owner, now).departed = false;
         let entry = self
             .watches
-            .entry(reference.to_string())
+            .entry(reference.key())
             .or_insert_with(|| Watch {
                 reference: reference.clone(),
                 since: now,
@@ -287,6 +287,10 @@ impl Watches {
                 tried_at: None,
                 receipts: BTreeMap::new(),
             });
+        // A channel first watched by id takes its name once one is known.
+        if matches!(reference, Reference::SlackChannel { name: Some(_), .. }) {
+            entry.reference = reference.clone();
+        }
         entry.deadline = entry.deadline.max(deadline);
         entry.owners.insert(owner.to_string());
         entry.stirred_at = Some(now);
@@ -390,7 +394,7 @@ impl Watches {
     /// Note that these were asked about at `at`, whatever came back.
     pub fn tried(&mut self, references: &[Reference], at: DateTime<Utc>) {
         for reference in references {
-            if let Some(watch) = self.watches.get_mut(&reference.to_string()) {
+            if let Some(watch) = self.watches.get_mut(&reference.key()) {
                 watch.tried_at = Some(at);
             }
         }
@@ -398,14 +402,14 @@ impl Watches {
 
     /// Note where a watched pull request's commits come from.
     pub fn remember_head(&mut self, reference: &Reference, head: Head) {
-        if let Some(watch) = self.watches.get_mut(&reference.to_string()) {
+        if let Some(watch) = self.watches.get_mut(&reference.key()) {
             watch.head = Some(head);
         }
     }
 
     /// Withdraw `owner`'s interest, and remove the watch once nobody is left.
     pub fn unwatch(&mut self, reference: &Reference, owner: &str) -> Unwatched {
-        let key = reference.to_string();
+        let key = reference.key();
         let Some(watch) = self.watches.get_mut(&key) else {
             return Unwatched::Absent;
         };
@@ -569,7 +573,7 @@ impl Watches {
     ) -> Vec<Event> {
         let mut fresh = Vec::new();
         for (reference, sighting) in sightings {
-            let key = reference.to_string();
+            let key = reference.key();
             let Some(watch) = self.watches.get_mut(&key) else {
                 // Expired while the poll was in flight.
                 continue;
@@ -956,7 +960,14 @@ impl WatchStore {
             Ok(watches) if watches.version > VERSION => Err(StoreError::FutureVersion {
                 found: watches.version,
             }),
-            Ok(watches) => Ok(watches),
+            Ok(mut watches) => {
+                // A channel was keyed by its name before 2026-11-17.
+                let rekeyed = std::mem::take(&mut watches.watches)
+                    .into_values()
+                    .map(|watch| (watch.reference.key(), watch));
+                watches.watches = rekeyed.collect();
+                Ok(watches)
+            }
             // Subscriptions and cursors can't be rebuilt from anywhere else,
             // so the unreadable file is kept for a look rather than replaced.
             Err(error) => {
@@ -1034,6 +1045,26 @@ mod tests {
 
     fn forever() -> DateTime<Utc> {
         at("2099-01-01T00:00:00Z")
+    }
+
+    #[test]
+    fn a_channel_by_id_and_by_name_is_one_watch_and_either_stops_it() {
+        let channel = |name: Option<&str>| Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: name.map(Into::into),
+        };
+        let mut watches = Watches::default();
+        watches.watch(&channel(None), "s", forever(), now());
+        watches.watch(&channel(Some("general")), "s", forever(), now());
+        assert_eq!(watches.watches.len(), 1);
+        let watch = watches.watches.values().next().unwrap();
+        assert_eq!(
+            watch.reference.to_string(),
+            "slack:#general",
+            "named once known"
+        );
+
+        assert_eq!(watches.unwatch(&channel(None), "s"), Unwatched::Removed);
     }
 
     fn seen_pull(state: State, checks: Option<CheckState>) -> Sighting {

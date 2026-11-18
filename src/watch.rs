@@ -322,7 +322,7 @@ impl Poller<'_> {
             let Reference::SlackChannel { channel, .. } = reference else {
                 continue;
             };
-            let before = match watches.watches.get(&reference.to_string()) {
+            let before = match watches.watches.get(&reference.key()) {
                 Some(Watch {
                     seen:
                         Some(Seen {
