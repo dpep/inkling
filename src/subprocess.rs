@@ -7,39 +7,72 @@
 //! for good — which is the shape of failure a notification tool is least
 //! allowed to have.
 
-use std::io;
+use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How often to look in on the child. Short enough to add nothing measurable
 /// to a fast command, long enough not to spin.
 const LOOK: Duration = Duration::from_millis(10);
 
-/// Run to completion, or kill the child once `budget` has passed.
+/// Run to completion, or kill the child and everything it started once
+/// `budget` has passed.
 ///
-/// Output is collected at the end rather than as it arrives, so a child that
-/// writes more than a pipe buffer stalls until the deadline kills it. Both
-/// callers read a token or a small JSON object, and the deadline is the
-/// backstop either way.
+/// Done means exited *and* its output closed: a background process that
+/// inherited stdout holds the pipe open after the child is gone, and the
+/// deadline covers that wait too.
 pub fn output_within(command: &mut Command, budget: Duration) -> io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Its own group, so giving up reaches what it started. The price: a
+        // Ctrl-C at the terminal no longer reaches it.
+        .process_group(0)
         .spawn()?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
 
     let deadline = Instant::now() + budget;
-    while child.try_wait()?.is_none() {
+    loop {
+        if let Some(status) = child.try_wait()?
+            && stdout.is_finished()
+            && stderr.is_finished()
+        {
+            return Ok(Output {
+                status,
+                stdout: stdout.join().unwrap_or_default(),
+                stderr: stderr.join().unwrap_or_default(),
+            });
+        }
         if Instant::now() >= deadline {
+            // The drains are left to end when the pipe closes: something that
+            // left the group can hold it for as long as it likes.
             return Err(gave_up(&mut child, budget));
         }
         std::thread::sleep(LOOK);
     }
-    child.wait_with_output()
 }
 
-/// Kill it and reap it, so the caller's process doesn't collect zombies.
+/// Read a pipe to its end on a thread of its own, so a child that writes more
+/// than a pipe buffer never stalls waiting for us.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
+}
+
+/// Kill its whole process group and reap it, so neither its descendants nor
+/// zombies outlive the call.
 fn gave_up(child: &mut Child, budget: Duration) -> io::Error {
+    // The group is the child's pid: `process_group(0)` made it the leader.
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
     let _ = child.kill();
     let _ = child.wait();
     io::Error::new(
@@ -80,6 +113,45 @@ mod tests {
         // Distinct from a hang: the caller decides what a non-zero exit means.
         let output = output_within(&mut sh("exit 7"), Duration::from_secs(5)).unwrap();
         assert_eq!(output.status.code(), Some(7));
+    }
+
+    #[test]
+    fn more_output_than_a_pipe_holds_is_read_in_full() {
+        let output =
+            output_within(&mut sh("head -c 200000 /dev/zero"), Duration::from_secs(5)).unwrap();
+        assert_eq!(output.stdout.len(), 200000);
+    }
+
+    #[test]
+    fn a_background_process_holding_the_output_does_not_outlast_the_deadline() {
+        // Found by the hunt: a token command that forked something which
+        // inherited stdout held a 2s call for as long as that ran.
+        let started = Instant::now();
+        let error =
+            output_within(&mut sh("echo tok; sleep 5 &"), Duration::from_millis(200)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn giving_up_kills_what_the_command_started_too() {
+        let pidfile = std::env::temp_dir().join(format!("inkling-group-{}", std::process::id()));
+        let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
+        output_within(&mut sh(&script), Duration::from_millis(300)).unwrap_err();
+
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::remove_file(&pidfile).unwrap();
+        // Reaped by init once killed; a moment to get there.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "sleep {pid} outlived the call"
+        );
     }
 
     #[test]

@@ -113,18 +113,50 @@ impl Poller<'_> {
         self.poll_then(floor, why, &mut || {})
     }
 
-    /// `poll`, in two steps. GitHub and Jira are read and recorded first;
-    /// `between` runs once they are, and only if Slack reads follow — so the
-    /// server can push a red PR rather than hold it behind a bridge call of
-    /// a minute or more.
+    /// `poll`, a source at a time: GitHub, then Jira, then each Slack message
+    /// or channel, each recorded as it lands. `between` runs before every
+    /// read after the first, so the server can push what is recorded rather
+    /// than hold it behind an `acli` or a `claude -p` of a minute or more.
     pub fn poll_then(
         &self,
         floor: TimeDelta,
         why: &str,
         between: &mut dyn FnMut(),
     ) -> Result<Polled, StoreError> {
+        self.read_due(floor, why, &|_| true, None, &mut || {
+            between();
+            true
+        })
+    }
+
+    /// `poll`, of `these` only: what `inkling watch` just registered, without
+    /// paying for anything else that happens to be due.
+    pub fn poll_these(&self, these: &[Reference], why: &str) -> Result<Polled, StoreError> {
+        let given = |r: &Reference| these.contains(r);
+        self.read_due(TimeDelta::zero(), why, &given, None, &mut || true)
+    }
+
+    /// The server's Slack worker: each due Slack watch in turn, until `stop`.
+    /// Takes no poll lock — the claim is what keeps two readers from paying
+    /// for one reading — so GitHub and Jira never wait on the bridge.
+    pub fn poll_slack(&self, why: &str, stop: &dyn Fn() -> bool) -> Result<Polled, StoreError> {
+        self.read_due(TimeDelta::zero(), why, &is_slack, None, &mut || !stop())
+    }
+
+    /// What `which` picks of what is due, a source at a time. `lock` is let go
+    /// before the first Slack read; `go_on` runs between reads and can end
+    /// the poll.
+    fn read_due(
+        &self,
+        floor: TimeDelta,
+        why: &str,
+        which: &dyn Fn(&Reference) -> bool,
+        lock: Option<FileLock>,
+        go_on: &mut dyn FnMut() -> bool,
+    ) -> Result<Polled, StoreError> {
         let observed_at = self.clock.now();
-        let references = self.wanted(&self.store.read(), observed_at, floor);
+        let mut references = self.wanted(&self.store.read(), observed_at, floor);
+        references.retain(|r| which(r));
         if references.is_empty() {
             tracing::debug!(why, "nothing is due");
             return Ok(Polled {
@@ -136,43 +168,31 @@ impl Poller<'_> {
         let count = |is: fn(&Reference) -> bool| references.iter().filter(|r| is(r)).count();
         let pulls = count(|r| matches!(r, Reference::GitHubPullRequest { .. }));
         let messages = count(is_slack);
+        let mut polled = Polled {
+            watched: references.len(),
+            ..Polled::default()
+        };
         let (slow, quick): (Vec<Reference>, Vec<Reference>) =
             references.iter().cloned().partition(is_slack);
-        let mut failures = Vec::new();
-        let mut sightings = Vec::new();
-        let mut events = Vec::new();
-
-        if !quick.is_empty() {
-            let mut gone = Vec::new();
-            let read = self.sightings(&quick, &mut failures, &mut gone);
-            events.extend(self.store.update(self.clock.now(), |watches| {
-                watches.tried(&quick, observed_at);
-                let mut events = watches.record(&read, observed_at);
-                events.extend(watches.gone(&gone, observed_at));
-                events
-            })?);
-            sightings.extend(read);
+        let (github, jira): (Vec<Reference>, Vec<Reference>) = quick
+            .into_iter()
+            .partition(|r| matches!(r, Reference::GitHubPullRequest { .. }));
+        let mut first = true;
+        let mut go_on = || std::mem::take(&mut first) || go_on();
+        for group in [github, jira].into_iter().filter(|g| !g.is_empty()) {
+            if !go_on() {
+                break;
+            }
+            self.read_and_record(&group, &mut polled)?;
         }
-        if !slow.is_empty() {
-            between();
-            // Claimed before paying: a poller arriving mid-read finds these
-            // tried and waits out the floor instead of reading them again.
-            let read_at = self.clock.now();
-            let claimed = self.store.update(read_at, |watches| {
-                let due = watches.due_now(read_at, floor);
-                let claimed: Vec<Reference> =
-                    slow.into_iter().filter(|r| due.contains(r)).collect();
-                watches.tried(&claimed, read_at);
-                claimed
-            })?;
-            let mut gone = Vec::new();
-            let read = self.sightings(&claimed, &mut failures, &mut gone);
-            events.extend(self.store.update(self.clock.now(), |watches| {
-                let mut events = watches.record(&read, read_at);
-                events.extend(watches.gone(&gone, read_at));
-                events
-            })?);
-            sightings.extend(read);
+        drop(lock);
+        for reference in slow {
+            if !go_on() {
+                break;
+            }
+            if self.claim(&reference, floor)? {
+                self.read_and_record(std::slice::from_ref(&reference), &mut polled)?;
+            }
         }
         let elapsed = (self.clock.now() - observed_at).num_milliseconds();
 
@@ -184,19 +204,49 @@ impl Poller<'_> {
             github = pulls,
             jira = references.len() - pulls - messages,
             slack = messages,
-            read = sightings.len(),
-            events = events.len(),
-            failures = failures.len(),
+            read = polled.sightings.len(),
+            events = polled.events.len(),
+            failures = polled.failures.len(),
             elapsed_ms = elapsed,
             "polled watches"
         );
-        Ok(Polled {
-            events,
-            sightings,
-            watched: references.len(),
-            failures,
-            skipped: false,
+        Ok(polled)
+    }
+
+    /// Mark a paid read as tried before paying for it, if it is still due: a
+    /// poller arriving mid-read then waits out the floor instead of reading it
+    /// again.
+    fn claim(&self, reference: &Reference, floor: TimeDelta) -> Result<bool, StoreError> {
+        let now = self.clock.now();
+        self.store.update(now, |watches| {
+            let due = watches.due_now(now, floor).contains(reference);
+            if due {
+                watches.tried(std::slice::from_ref(reference), now);
+            }
+            due
         })
+    }
+
+    /// Read `references` and record what came back, stamped with when the
+    /// read began: the reading can't be older than that.
+    fn read_and_record(
+        &self,
+        references: &[Reference],
+        polled: &mut Polled,
+    ) -> Result<(), StoreError> {
+        let read_at = self.clock.now();
+        let mut gone = Vec::new();
+        let read = self.sightings(references, &mut polled.failures, &mut gone);
+        polled
+            .events
+            .extend(self.store.update(self.clock.now(), |watches| {
+                watches.tried(references, read_at);
+                let mut events = watches.record(&read, read_at);
+                events.extend(watches.gone(&gone, read_at));
+                events
+            })?);
+        polled.sightings.extend(read);
+        Ok(())
     }
 
     /// Poll only if something is due, and only if nobody else is already
@@ -211,7 +261,9 @@ impl Poller<'_> {
         self.poll_if_stale_then(floor, why, &mut || {})
     }
 
-    /// `poll_if_stale`, with `poll_then`'s `between`.
+    /// `poll_if_stale`, with `poll_then`'s `between`. The lock is let go before
+    /// any Slack read: the claim already stops a second paid read, and a
+    /// prompt hook mustn't skip its GitHub refresh for a minute-long one.
     pub fn poll_if_stale_then(
         &self,
         floor: TimeDelta,
@@ -230,14 +282,17 @@ impl Poller<'_> {
         let lock_path = self.store.poll_lock_path();
         let held =
             FileLock::try_acquire(&lock_path).map_err(|e| StoreError::Write(e.to_string()))?;
-        let Some(_lock) = held else {
+        let Some(lock) = held else {
             tracing::debug!(why, "another process is polling; reading what it writes");
             return Ok(Polled {
                 skipped: true,
                 ..Polled::default()
             });
         };
-        self.poll_then(floor, why, between)
+        self.read_due(floor, why, &|_| true, Some(lock), &mut || {
+            between();
+            true
+        })
     }
 
     /// What this caller would read now: everything due, less what needs a
@@ -1168,6 +1223,161 @@ mod tests {
         .poll(TimeDelta::zero(), "test")
         .unwrap();
         assert!(claimed.get(), "another poller would have read it too");
+    }
+
+    fn another_slack() -> Reference {
+        Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596060.245879".into(),
+            thread: None,
+        }
+    }
+
+    #[test]
+    fn each_slack_reading_is_recorded_as_it_lands_and_stamped_when_it_was_read() {
+        // Found by the hunt: every reading waited for the last read of the
+        // poll, and was stamped with the time the first one began.
+        let h = Harness::new("per-read");
+        h.slack.replied(&slack(), &[]);
+        h.slack.replied(&another_slack(), &[]);
+        h.watch(&slack());
+        h.watch(&another_slack());
+        h.poll();
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        h.slack.replied(&slack(), &[("1786596100.000001", "U1")]);
+        h.slack
+            .replied(&another_slack(), &[("1786596100.000002", "U1")]);
+
+        let recorded_before_next = RefCell::new(Vec::new());
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| {
+                let events = h.store.read().events.len();
+                recorded_before_next.borrow_mut().push(events);
+                // Each bridge call takes a while.
+                h.clock.advance(TimeDelta::seconds(30));
+            }),
+        };
+        let started = h.clock.now();
+        let polled = Poller {
+            slack: Some(&spy),
+            ..h.poller()
+        }
+        .poll(TimeDelta::zero(), "test")
+        .unwrap();
+
+        assert_eq!(*recorded_before_next.borrow(), vec![0, 1]);
+        let at: Vec<_> = polled.events.iter().map(|e| e.at).collect();
+        assert_eq!(at, vec![started, started + TimeDelta::seconds(30)]);
+    }
+
+    #[test]
+    fn the_poll_lock_is_let_go_before_a_slack_read() {
+        // A prompt hook found the lock held for a whole Slack phase and
+        // skipped the GitHub refresh it had come for.
+        let h = Harness::new("lock-released");
+        h.slack.replied(&slack(), &[]);
+        h.watch(&slack());
+        let free = std::cell::Cell::new(None);
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| {
+                let lock = FileLock::try_acquire(&h.store.poll_lock_path()).unwrap();
+                free.set(Some(lock.is_some()));
+            }),
+        };
+        Poller {
+            slack: Some(&spy),
+            ..h.poller()
+        }
+        .poll_if_stale(TimeDelta::zero(), "test")
+        .unwrap();
+        assert_eq!(free.get(), Some(true));
+    }
+
+    #[test]
+    fn the_slack_worker_reads_only_slack_and_stops_between_reads() {
+        let h = Harness::new("slack-worker");
+        h.github.set(&pr(3), State::Open);
+        h.slack.replied(&slack(), &[]);
+        h.slack.replied(&another_slack(), &[]);
+        h.watch(&pr(3));
+        h.watch(&slack());
+        h.watch(&another_slack());
+
+        let stop = std::cell::Cell::new(false);
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| stop.set(true)),
+        };
+        let polled = Poller {
+            slack: Some(&spy),
+            ..h.poller()
+        }
+        .poll_slack("test", &|| stop.get())
+        .unwrap();
+
+        assert_eq!(polled.sightings.len(), 1, "stopped after the first read");
+        assert_eq!(h.github.calls(), 0, "GitHub is the tick's");
+        let due = h.store.read().due_now(h.clock.now(), TimeDelta::zero());
+        assert_eq!(due.len(), 2, "the PR and the unread message: {due:?}");
+    }
+
+    #[test]
+    fn reading_what_was_just_watched_reads_nothing_else() {
+        // `inkling watch <pr>` waited on a paid Slack read it hadn't asked for.
+        let h = Harness::new("these");
+        h.github.set(&pr(3), State::Open);
+        h.github.set(&pr(4), State::Open);
+        h.slack.replied(&slack(), &[]);
+        h.watch(&pr(3));
+        h.watch(&pr(4));
+        h.watch(&slack());
+
+        let polled = h.poller().poll_these(&[pr(3)], "test").unwrap();
+
+        let read: Vec<_> = polled.sightings.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(read, vec![pr(3)]);
+        assert_eq!(h.slack.calls.get(), 0);
+    }
+
+    /// Issues that look at the store when asked, the way `Spy` does.
+    struct IssueSpy<'a> {
+        inner: &'a ScriptedIssues,
+        on_read: Box<dyn Fn() + 'a>,
+    }
+
+    impl IssueProvider for IssueSpy<'_> {
+        fn read(&self, keys: &[String]) -> Result<Vec<IssueLookup>, ProviderError> {
+            (self.on_read)();
+            self.inner.read(keys)
+        }
+    }
+
+    #[test]
+    fn github_is_recorded_before_jira_is_read() {
+        // A slow `acli` held a red PR's reading back with it.
+        let h = Harness::new("github-first");
+        h.github.set(&pr(3), State::Open);
+        h.jira.set("AI-1", "To Do", Category::New);
+        h.watch(&pr(3));
+        h.watch(&issue("AI-1"));
+        h.poll();
+        h.github.set(&pr(3), State::Merged);
+
+        let recorded = std::cell::Cell::new(0);
+        let jira = IssueSpy {
+            inner: &h.jira,
+            on_read: Box::new(|| recorded.set(h.store.read().events.len())),
+        };
+        Poller {
+            jira: &jira,
+            ..h.poller()
+        }
+        .poll(TimeDelta::zero(), "test")
+        .unwrap();
+        assert_eq!(recorded.get(), 1, "merged was recorded before acli ran");
     }
 
     #[test]

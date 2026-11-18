@@ -17,6 +17,21 @@
   line per change, with a message's new emoji on one line rather than one line each.
 <!-- /fix2-github-jira -->
 
+<!-- fix2-latency -->
+- **No GitHub login no longer means nothing is read.** A missing, lapsed or slow `gh auth token`
+  stopped every poll before it started, Jira and Slack included, and `inkling serve` refused to
+  start. The token is now fetched only when a pull request is due, and failing to get one fails
+  GitHub alone; the server starts without one and picks up a login made after it started.
+- **A command's time limit now holds.** A token command, `acli` or `claude -p` that left a
+  background process holding its output kept Inkling waiting as long as that process ran, past
+  the 2s, 5s or 180s limit; one that printed more than a pipe holds stalled until killed. Output
+  is now read as it arrives, and a command that runs out of time is killed with everything it
+  started.
+- **`inkling watch` reads only what it was given**, not every other watch that happened to be
+  due, and `inkling events` leaves Slack to a running server, so neither waits on a Slack read it
+  didn't ask for.
+<!-- /fix2-latency -->
+
 - **A watch on something that isn't there any more ends, once.** A Slack message that was
   deleted, or a channel the connector can't see, used to be read (and paid for) every five minutes
   until its deadline; its third such read in a row now says `state watched → gone` and the watch is
@@ -52,9 +67,9 @@
   was dropped even while it owned a watch, so a `--ttl 30d` watch lost news still inside
   retention, and a session waiting quietly lost its push address. A reader is now kept while it
   owns a watch or is owed news, and a session that answers the server's probe counts as alive.
-- **CI news no longer waits for Slack.** In a poll that also read Slack, a pull request's change
-  was held until every Slack read (up to a minute or more each) had returned. GitHub and Jira are
-  now recorded and pushed first.
+- **CI news no longer waits for Slack.** The server reads Slack watches on a thread of their own,
+  so a pull request's or issue's change is read and pushed on schedule however long the Slack
+  reads (up to a minute or more each) take.
 - **A live session wrongly taken for ended comes back by itself.** A session resumed in the moment
   between the server's probe and its write, or one whose socket refused a connection while busy,
   was marked ended and its watches paused until its next `SessionStart`. The server now drops only

@@ -268,8 +268,12 @@ request and nothing else.
 
 The common case is the cheap one, which is what makes this affordable on
 every prompt: one small file read, no lock, no network, no output. The GitHub
-token is resolved only when a poll is actually going to happen — resolving it
-shells out to `gh auth token`, which is not something to do on every prompt.
+token is resolved only when a pull request is actually about to be read —
+resolving it shells out to `gh auth token`, which is not something to do on
+every prompt. Resolving it at each read rather than once is also what keeps a
+missing or lapsed `gh` login GitHub's failure alone: Jira and Slack watches are
+still read, and the server starts without one and picks up a login made after
+it started.
 
 Measured 2026-09-20 against 14 live pull requests, which is what makes the
 case either way:
@@ -293,16 +297,21 @@ carry the time they were taken, so a slower poller's older answer can't land
 last and report a pull request moving backwards. The poll lock is left to the
 opportunistic caller, the only one that might be redundant.
 
-**Quick sources first.** A poll reads and records GitHub and Jira before it
-starts on Slack, and the server pushes in between (`Poller::poll_then`). One
+**Slack is off the tick.** The server reads Slack on a worker thread of its
+own (`Poller::poll_slack`, run beside `serve::Serve`'s loop), so its tick reads
+GitHub and Jira and delivers on schedule however long the bridge takes. One
 batch for everything held a red pull request in memory behind every `claude -p`
-in the same poll — 9–75s each, serially (found 2026-11-18). And a Slack
-watch is *claimed* before it is read: `tried_at` is stamped under the data
-lock, after checking it is still due, so a second poller arriving during a
-minute-long read finds it inside the attempt floor instead of paying for the
-same reading again. The prompt hook asks only whether something *it* would
-read is due (`watch::due_without_bridge`) before resolving a GitHub token, so
-a Slack watch alone no longer costs every prompt a `gh auth token`.
+in the same poll — 9–75s each, serially (found 2026-11-18); putting Slack last
+in the poll only fixed the half inside one tick, because the next tick still
+waited for the whole Slack phase. Any poll reads a source at a time —
+GitHub, Jira, then each Slack watch — and records each as it lands, stamped
+with when that read began. A Slack watch is *claimed* just before its read:
+`tried_at` is stamped under the data lock, after checking it is still due, so
+a second poller arriving during a minute-long read finds it inside the attempt
+floor instead of paying for the same reading again. That claim is why the poll
+lock is let go before the first Slack read: the lock only saves redundant
+GitHub requests. The worker checks for shutdown between reads, so a signal or
+a hand-off waits for at most the read in flight.
 
 The event log is bounded by age (72h) rather than by what every live
 subscriber has passed: one dead session must not be able to pin it. It was
@@ -899,8 +908,11 @@ retried every tick. Two things follow:
 - **Only the server and the explicit commands read Slack.** The prompt hook
   gives a refresh 3s; a bridge call can't fit, and abandoning one mid-flight
   still pays for it. `Poller::slack` is `None` there, and Slack watches are
-  left for whoever has the time: the resident server, `inkling watch`, and
-  `inkling events` at a terminal (which can therefore take a minute).
+  left for whoever has the time: the resident server; `inkling watch`, which
+  reads only what it was just given (`Poller::poll_these`), so a PR's baseline
+  never waits on somebody else's Slack read; and `inkling events`, only when no
+  server holds the serve lock (which can then take a minute). A running server
+  reads Slack anyway, so `events` beside one would only pay to wait.
 - **One call per watched message, two tools inside it.** The thread tool reads
   one thread and the channel tool lists top-level messages only, so a read
   needs both — but both fit in one `claude -p`. Measured 2026-11-17 on the
