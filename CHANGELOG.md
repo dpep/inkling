@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A command only mentioned inside another is no longer watched.** The post-tool hook watched a
+  pull request or Jira issue named anywhere in a command, including a commit message, a quoted JSON
+  payload or a heredoc body. Now `gh pr …` and `acli jira workitem` must be run as a command, at the
+  start of a shell segment.
+
 <!-- fix2-github-jira -->
 - **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,
   so a pull request on an enterprise host was reported as the same number on github.com. List only

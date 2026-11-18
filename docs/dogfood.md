@@ -15,7 +15,8 @@ fixed, say where and leave the line.
   `gh pr view https://github.com/rust-lang/rust/pull/166160`. The lead session's own post-tool hook
   saw that command text and auto-watched a rust-lang PR in the live store for 3 days. Subagent Bash
   runs the parent's hooks, and detection matches `gh pr view <url>` anywhere in a command, quoted
-  payloads included. Expected: only a command that actually runs `gh pr view` counts.
+  payloads included. Expected: only a command that actually runs `gh pr view` counts. Fixed: a
+  command must now be run, not just quoted (`detect::run_at`).
 - The latency lane's scratch server stood down as "replaced" when `make check` rebuilt
   `target/debug` under it. That's correct, but surprising: copy the binary before running a scratch
   server from the build directory.

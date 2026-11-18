@@ -240,8 +240,11 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
         }
     };
 
-    if let Some(verb) = PULL_COMMANDS.iter().find(|verb| command.contains(**verb)) {
-        for reference in detect(arguments(command, verb), hosts)
+    if let Some((verb, at)) = PULL_COMMANDS
+        .iter()
+        .find_map(|verb| run_at(command, verb).map(|at| (verb, at)))
+    {
+        for reference in detect(arguments(&command[at..], verb), hosts)
             .into_iter()
             .chain(detect(
                 if *verb == "gh pr view" { "" } else { output },
@@ -259,7 +262,8 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
             add(reference, "git push");
         }
     }
-    if let Some((_, arguments)) = command.split_once(ISSUE_COMMAND) {
+    if let Some(at) = run_at(command, ISSUE_COMMAND) {
+        let arguments = &command[at + ISSUE_COMMAND.len()..];
         for word in arguments.split(|c: char| c.is_whitespace() || c == '=') {
             if let Some(reference) = parse_jira(word) {
                 add(reference, ISSUE_COMMAND);
@@ -274,6 +278,70 @@ pub fn touched(command: &str, output: &str, hosts: &[String]) -> Vec<(Reference,
         }
     }
     found
+}
+
+/// Where `verb` is run as a command, rather than quoted inside one: at the
+/// start of a shell segment (after any `VAR=value`), and not in a heredoc's
+/// body. A hook payload or commit message that mentions `gh pr view <url>`
+/// is not a command about that pull request.
+fn run_at(command: &str, verb: &str) -> Option<usize> {
+    let mut heredoc: Option<&str> = None;
+    let mut offset = 0;
+    for line in command.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if let Some(end) = heredoc {
+            if line.trim() == end {
+                heredoc = None;
+            }
+            continue;
+        }
+        heredoc = heredoc_end(line);
+        for (i, _) in line.match_indices(verb) {
+            if starts_segment(&line[..i]) {
+                return Some(start + i);
+            }
+        }
+    }
+    None
+}
+
+/// The delimiter a line's `<<WORD`, `<<-WORD` or `<<'WORD'` opens a heredoc with.
+fn heredoc_end(line: &str) -> Option<&str> {
+    let (_, rest) = line.split_once("<<")?;
+    let word = rest.trim_start_matches('-').trim_start();
+    let word = word.split_whitespace().next()?;
+    let word = word.trim_matches(|c| c == '\'' || c == '"');
+    (!word.is_empty() && !word.starts_with('<')).then_some(word)
+}
+
+/// Whether what precedes a word on its line leaves it in command position.
+fn starts_segment(before: &str) -> bool {
+    let mut before = before.trim_end();
+    let last = loop {
+        let (head, last) = before
+            .rsplit_once(char::is_whitespace)
+            .unwrap_or(("", before));
+        // Environment assignments: `GH_HOST=x gh pr view …`.
+        if !is_assignment(last) {
+            break last;
+        }
+        before = head.trim_end();
+    };
+    // Quotes aren't tracked, so `echo 'a; gh pr view …'` still counts.
+    before.is_empty()
+        || ["then", "do", "else"].contains(&last)
+        || ["&&", "||", ";", "|", "(", "{", "`"]
+            .iter()
+            .any(|s| before.ends_with(s))
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+    })
 }
 
 /// The part of `command` that names which pull request `verb` is about.
@@ -804,6 +872,37 @@ mod touched_tests {
             ),
             ["github.com/dpep/inkling#26"]
         );
+    }
+
+    #[test]
+    fn a_command_only_quoted_inside_another_is_not_run() {
+        // A hook payload passed to a test named a stranger's PR, and the live
+        // hook watched it.
+        for command in [
+            r#"echo '{"command":"gh pr view https://github.com/dpep/inkling/pull/7"}' | inkling hook post-tool"#,
+            "inkling hook post-tool <<'EOF'\ngh pr view https://github.com/dpep/inkling/pull/7\nEOF",
+            "cat > p.json <<EOF\n{\"command\": \"acli jira workitem view AI-7\"}\nEOF",
+            r#"git commit -m "fix: gh pr view https://github.com/dpep/inkling/pull/7 no longer hangs""#,
+        ] {
+            assert_eq!(names(command, ""), Vec::<String>::new(), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_command_run_after_another_or_with_env_still_counts() {
+        for command in [
+            "cd repo && gh pr view https://github.com/dpep/inkling/pull/7",
+            "GH_HOST=github.com gh pr view https://github.com/dpep/inkling/pull/7",
+            "cat <<EOF\nnotes\nEOF\ngh pr view https://github.com/dpep/inkling/pull/7",
+            "(gh pr view https://github.com/dpep/inkling/pull/7)",
+        ] {
+            assert_eq!(
+                names(command, ""),
+                ["github.com/dpep/inkling#7"],
+                "{command}"
+            );
+        }
+        assert_eq!(names("true; acli jira workitem view AI-7", ""), ["AI-7"]);
     }
 
     fn names(command: &str, output: &str) -> Vec<String> {
