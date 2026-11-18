@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A watch on something that isn't there any more ends, once.** A Slack message that was
+  deleted, or a channel the connector can't see, used to be read (and paid for) every five minutes
+  until its deadline; its first such read now says `state watched → gone` and the watch is dropped.
+  `inkling watch` prints why a reference it was just given couldn't be read, and exits 1.
+- **Each Slack bridge call logs what it cost** as `total_cost_usd`, failed calls included.
 - **Every line that counts something ends in the read that shows it.** Slack lines end in the MCP
   call to make, with the channel's id even when the line says `#name`:
   `slack:#incidents | 3 messages from @john and @jane (slack_read_channel channel_id=C0E48AHSN
