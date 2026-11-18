@@ -6,6 +6,9 @@
 - **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,
   so a pull request on an enterprise host was reported as the same number on github.com. List only
   the host `api_url` serves.
+- **One slow Jira issue no longer costs the others their reading.** An `acli` call that timed out
+  threw away every issue read that poll; now only that issue fails. Issues are read four at a
+  time rather than one after another, so a pull request read in the same poll waits less.
 <!-- /fix2-github-jira -->
 
 - **A watch on something that isn't there any more ends, once.** A Slack message that was

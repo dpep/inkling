@@ -1241,8 +1241,9 @@ and posting to make one was off limits.
   or a deleted PR polls quietly until its TTL. `watch` reports the failure at
   registration, which is where a typo is actually caught.
 - **Batched Jira reads.** `acli jira workitem view` takes one key, so N
-  watched issues cost N subprocesses. Cheap at the volume a watch list runs
-  at; a file of keys or the REST API is the answer if it stops being.
+  watched issues cost N subprocesses, run four at a time so a poll waits
+  about N/4 answers rather than N. Cheap at the volume a watch list runs at;
+  a file of keys or the REST API is the answer if it stops being.
 
 ## Known gap: the Jira fixtures
 
