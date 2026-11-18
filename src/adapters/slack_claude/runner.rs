@@ -24,6 +24,8 @@ pub enum RunnerError {
     TimedOut { command: String, timeout: Duration },
     #[error("could not read the claude envelope: {0}")]
     Envelope(String),
+    #[error("not starting a bridge call: inkling is stopping")]
+    Stopping,
 }
 
 /// Runs a prompt and returns the model's reply. Behind a trait so tests
@@ -63,6 +65,8 @@ pub struct ClaudeRunner {
     /// call runs. This is the only way to stop paying for servers we don't
     /// use.
     pub mcp_config: Option<String>,
+    /// Asked before each call, which costs money and can take minutes.
+    pub stopping: fn() -> bool,
 }
 
 impl Default for ClaudeRunner {
@@ -74,6 +78,7 @@ impl Default for ClaudeRunner {
             model: Some("haiku".into()),
             timeout: Duration::from_secs(180),
             mcp_config: None,
+            stopping: crate::serve::signalled,
         }
     }
 }
@@ -145,6 +150,9 @@ impl Runner for ClaudeRunner {
         allowed_tools: &[&str],
         attempt: usize,
     ) -> Result<String, RunnerError> {
+        if (self.stopping)() {
+            return Err(RunnerError::Stopping);
+        }
         // Bounded: a watch read happens on the resident server's tick, which
         // a hung `claude` would otherwise stop for good.
         let output = crate::subprocess::output_within(
@@ -264,6 +272,18 @@ mod tests {
         assert!(first.iter().any(|a| a == SYSTEM_PROMPT));
         assert!(!second.iter().any(|a| a == SYSTEM_PROMPT));
         assert!(second.iter().any(|a| a.contains("(attempt 2)")));
+    }
+
+    #[test]
+    fn a_stopping_server_starts_no_new_bridge_call() {
+        // Every call is paid; one begun after a SIGTERM only delays the exit.
+        let runner = ClaudeRunner {
+            command: "true".into(),
+            stopping: || true,
+            ..ClaudeRunner::default()
+        };
+        let error = runner.run("x", &["t"], 0).unwrap_err();
+        assert!(matches!(error, RunnerError::Stopping), "{error:?}");
     }
 
     #[test]

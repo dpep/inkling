@@ -310,8 +310,10 @@ with when that read began. A Slack watch is *claimed* just before its read:
 a second poller arriving during a minute-long read finds it inside the attempt
 floor instead of paying for the same reading again. That claim is why the poll
 lock is let go before the first Slack read: the lock only saves redundant
-GitHub requests. The worker checks for shutdown between reads, so a signal or
-a hand-off waits for at most the read in flight.
+GitHub requests. The worker checks for shutdown between reads, so a hand-off
+waits for at most the read in flight, retries included. After a signal it
+waits only for the `claude -p` in flight: the bridge starts no other, and that
+read counts as a failed one.
 
 The event log is bounded by age (72h) rather than by what every live
 subscriber has passed: one dead session must not be able to pin it. It was
@@ -451,6 +453,9 @@ why it is a placeholder.
   `post-tool`, `subscribe` — writes a byte to it, non-blocking, before
   deciding whether to spawn a server at all. A pipe rather than a signal: a
   stale pid can name a stranger, whose default action on SIGUSR1 is to die.
+  Only the loop reads the pipe, so each time it wakes it wakes the Slack
+  worker too; otherwise a sent message's watch waits out the worker's nap,
+  and a reply landing meanwhile is taken into the silent first reading.
   Where the FIFO can't be made, a nap is capped at the interval — the old
   cadence.
 - **`--refresh` is a floor under the schedule, not a schedule of its own.**
@@ -1413,6 +1418,7 @@ and cursor move writes its own. Read them with `inkling logs -g polled` or
 
 ```
 polled watches why="serve" watched=5 github=4 jira=1 slack=0 read=5 events=1 failures=0 elapsed_ms=412
+polled watches why="serve-slack" watched=1 github=0 jira=0 slack=1 read=1 events=0 failures=0 elapsed_ms=21480
 transition reference="github.com/dpep/inkling#3" axis="checks" from="pending" to="failure" seq=7 audience=1
 watch registered reference="github.com/dpep/inkling#3" owner="abc-123" deadline="2026-09-21T20:44:00Z"
 subscribed subscriber="abc-123" socket="/tmp/cc-socks/9317.sock" reattached=false

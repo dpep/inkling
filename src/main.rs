@@ -589,7 +589,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                     ..poller()
                 };
                 while !beside.stopping() {
-                    match poller.poll_slack("serve", &|| beside.stopping()) {
+                    match poller.poll_slack("serve-slack", &|| beside.stopping()) {
                         Ok(polled) if !polled.events.is_empty() => beside.wake(),
                         Ok(_) => {}
                         Err(error) => tracing::warn!(%error, "could not read slack watches"),
