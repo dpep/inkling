@@ -644,7 +644,10 @@ session posts. So a closed session kept paying for news nobody could hear.
   needs one fact the store didn't keep: whether a reader *had* an address.
   A missing address alone can't say, because a session without the hooks
   never had one. So `Subscriber::departed` is set when `detach` removes a real
-  address and cleared by `attach` or by the reader registering a watch.
+  address and cleared only by `attach`. Registering a watch used to clear it
+  too, without an address for the next `detach` to take, so a session that
+  ended after that never paused (found 2026-11-18). A live session that
+  registers a watch while taken for ended gets attached by the same hook.
 - **A hook from an ended session attaches it again.** Only a live session
   fires hooks, and the probe can be wrong: macOS refuses a connection to a
   listener whose backlog is full exactly as it does to a dead one, so a live

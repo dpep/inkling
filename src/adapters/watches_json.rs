@@ -277,9 +277,9 @@ impl Watches {
         deadline: DateTime<Utc>,
         now: DateTime<Utc>,
     ) {
-        // Registering interest is a sign of life. Failing open: a reader with
-        // no address and no departure on record is read until its deadline.
-        self.meet(owner, now).departed = false;
+        // A sign of life, but not a way back from having ended: only `attach`
+        // is, since only it gives `detach` an address to take away again.
+        self.meet(owner, now);
         let entry = self
             .watches
             .entry(reference.key())
@@ -2332,10 +2332,25 @@ mod tests {
     }
 
     #[test]
-    fn watching_again_is_a_sign_of_life() {
+    fn a_session_that_ends_after_watching_again_still_pauses() {
+        // Found by the hunt: watching cleared the departure without an
+        // address to show for it, so the real SessionEnd found nothing to
+        // detach and the watch was read, at 2¢ a time, until its deadline.
+        let mut watches = watching(State::Open);
+        ended(&mut watches, "s-1");
+        watches.watch(&pr(3), "s-1", forever(), now());
+        watches.detach("s-1");
+        assert!(watches.paused(&watches.watches["github.com/dpep/inkling#3"]));
+    }
+
+    #[test]
+    fn only_attaching_brings_an_ended_session_back() {
         let mut watches = watching(State::Open);
         ended(&mut watches, "s-1");
         watches.watch(&pr(4), "s-1", forever(), now());
+        assert!(watches.paused(&watches.watches["github.com/dpep/inkling#4"]));
+
+        watches.attach("s-1", address("/tmp/s"), now());
         assert!(!watches.paused(&watches.watches["github.com/dpep/inkling#3"]));
         assert!(!watches.paused(&watches.watches["github.com/dpep/inkling#4"]));
     }
