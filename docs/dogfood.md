@@ -6,6 +6,17 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Hunt 3 found that df35579's reply ownership decided what each watch stored. Another session's
+  later watch took my replies, a reply that arrived before a new watch's first read reached nobody,
+  and an expiring reply watch re-dumped its replies on the root. Fixed in 2500a05: every watch
+  stores all its replies, and ownership only picks, per reader, which of that reader's
+  already-read watches tells it.
+- The process-wide SIGNALLED flag, raised by `a_term_signal_ends_the_run`, silently stopped other
+  tests' Slack workers before their first round. The worker test still passed, because it only
+  asserted "did not hang". Fixed in 8ed94fb: the worker asks its own server's `Shutdown`.
+- Lanes that run `inkling hook …` from a subagent inherit the lead's messaging socket and token. A
+  hunter attached a scratch reader to the live session. Briefs now use
+  `env -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN`.
 - Reply ownership, live (fixed in df35579): two watched self-DM messages A and B, recorded as this
   session's own posts by feeding the post-tool hook by hand. One DM answer (12:32:44 PST) pushed
   once, on B, 156s later. A stayed quiet.

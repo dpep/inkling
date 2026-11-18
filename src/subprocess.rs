@@ -181,11 +181,15 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn a_command_can_prompt_on_the_terminal_it_was_run_from() {
         use std::io::Write;
-        const NAME: &str = "subprocess::tests::a_command_can_prompt_on_the_terminal_it_was_run_from";
+        const NAME: &str =
+            "subprocess::tests::a_command_can_prompt_on_the_terminal_it_was_run_from";
         if std::env::var_os("INKLING_TEST_IN_PTY").is_some() {
             let script = "printf 'passphrase: ' > /dev/tty; read x < /dev/tty; echo tok$x";
             let output = output_within(&mut sh(script), Duration::from_secs(3)).unwrap();
-            println!("answered {}", String::from_utf8_lossy(&output.stdout).trim());
+            println!(
+                "answered {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
             return;
         }
         let mut pty = Command::new("script")
@@ -201,7 +205,11 @@ mod tests {
         let mut typed = pty.stdin.take().unwrap();
         typed.write_all(b"x\n").unwrap();
         let mut seen = String::new();
-        pty.stdout.take().unwrap().read_to_string(&mut seen).unwrap();
+        pty.stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut seen)
+            .unwrap();
         drop(typed);
         pty.wait().unwrap();
         assert!(seen.contains("answered tokx"), "{seen}");
