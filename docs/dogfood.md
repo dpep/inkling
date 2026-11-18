@@ -6,6 +6,14 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- A hunter subagent ran `inkling hook post-tool` with a JSON payload naming
+  `gh pr view https://github.com/rust-lang/rust/pull/166160`. The lead session's own post-tool hook
+  saw that command text and auto-watched a rust-lang PR in the live store for 3 days. Subagent Bash
+  runs the parent's hooks, and detection matches `gh pr view <url>` anywhere in a command, quoted
+  payloads included. Expected: only a command that actually runs `gh pr view` counts.
+- The latency lane's scratch server stood down as "replaced" when `make check` rebuilt
+  `target/debug` under it. That's correct, but surprising: copy the binary before running a scratch
+  server from the build directory.
 - Own rule, live: a text reply from the phone to a watched self-DM message (09:09:18 PST) arrived
   mid-turn as `1 reply from @dpepper` 92s later, at the next 5-min read. It woke the session as
   intended, but the line doesn't carry the text, so acting on it took one `slack_read_channel`.
