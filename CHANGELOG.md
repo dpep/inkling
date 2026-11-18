@@ -44,7 +44,7 @@
   something has ended, Inkling stops reading it, so a session you closed stops paying for Slack
   reads (about 2¢ each). `claude --resume` makes those watches due at once, and the first reading
   reports the net change since you left. The deadline keeps running either way. Watches you own at
-  a terminal, or that belong to a session without the hooks, are never paused. `inkling watch`
+  a terminal, or that belong to a session without the hooks, are never paused, and neither is a whole-channel watch. `inkling watch`
   marks paused watches `(paused)`. `inkling status` counts them and lists their session as `ended`.
 - **New: a watched pull request reports new comments.** `github.com/you/repo#42 | 2 comments
   from @alice and coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)` — who and

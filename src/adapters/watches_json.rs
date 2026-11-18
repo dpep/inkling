@@ -503,8 +503,13 @@ impl Watches {
     /// Paused, not cancelled: the deadline still runs, the baseline is kept,
     /// and the session's return (`attach`) makes it due again — so a resumed
     /// session hears the net change, as it does for its cursor.
+    ///
+    /// A channel watch never pauses: it is a standing interest somebody asked
+    /// for by name, not something a session happened to touch.
     pub fn paused(&self, watch: &Watch) -> bool {
-        !watch.owners.is_empty() && watch.owners.iter().all(|owner| self.departed(owner))
+        !matches!(watch.reference, Reference::SlackChannel { .. })
+            && !watch.owners.is_empty()
+            && watch.owners.iter().all(|owner| self.departed(owner))
     }
 
     /// Whether the store has this reader as a session that ended.
@@ -2341,6 +2346,21 @@ mod tests {
         watches.watch(&pr(3), "s-1", forever(), now());
         watches.detach("s-1");
         assert!(watches.paused(&watches.watches["github.com/dpep/inkling#3"]));
+    }
+
+    #[test]
+    fn a_channel_watch_is_never_paused() {
+        // A deliberate standing interest, not something a session touched:
+        // its news keeps accruing for the owner to pull or resume into.
+        let channel = Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: Some("incidents".into()),
+        };
+        let mut watches = Watches::default();
+        watches.watch(&channel, "s-1", forever(), now());
+        ended(&mut watches, "s-1");
+        assert!(!watches.paused(&watches.watches[&channel.key()]));
+        assert_eq!(watches.due_now(now(), TimeDelta::zero()), [channel]);
     }
 
     #[test]

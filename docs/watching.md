@@ -626,7 +626,19 @@ session posts. So a closed session kept paying for news nobody could hear.
 
 > A watch is **paused** while every one of its owners is a session that was
 > attached and has since been detached. A paused watch isn't read, isn't due,
-> and isn't a reason for the server to wake or stay up.
+> and isn't a reason for the server to wake or stay up. A channel watch is
+> never paused.
+
+- **Channel watches are exempt** (decided 2026-11-18). Pausing exists for what
+  a session *touched* — every Slack message it posts, every PR it pushes to —
+  which nobody may still care about once it has gone. A channel is watched only
+  by asking for it by name, usually with a long `--ttl`: a standing interest
+  that outlives any one session. Its rounds keep being read and recorded,
+  addressed to the owner, so `events` or a resume reads what was said. It still
+  isn't a reason for the server to *stay up* on its own (`should_serve` counts
+  only attached readers), so with nobody attached it is read whenever
+  something else polls; a resume reads from the newest message seen, so
+  nothing is skipped either way.
 
 - **Pause, not cancel.** Cancelling (unwatching on detach) would break the
   promise `--resume` already makes for the cursor: the net change since you
@@ -1146,6 +1158,7 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
   (any humantime duration is accepted). There is no "forever": an expiry is
   the only cleanup there is, and a watch nobody remembers would cost money
   until someone noticed. Re-watching extends it.
+- **It never pauses.** See [A watch nobody can hear is paused](#a-watch-nobody-can-hear-is-paused).
 
 **Cost.** One `claude -p` per read, `read_channel` only, `oldest` = the newest
 ts seen, limit 100 (the tool's maximum). A baseline asks for `limit: 1`: it

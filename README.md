@@ -281,6 +281,9 @@ read, and not keeping the server up. Their deadlines still run. Resuming makes
 them due at once, and the first reading reports what moved while you were
 away. A watch that is also yours at a terminal (`cli`), or belongs to a session
 without the hooks, keeps being read: nothing tells Inkling those have gone.
+So does a whole-channel watch (`inkling watch '#incidents'`): you asked for it
+by name, so its messages keep accruing for you to read on your return, at one
+paid read per round while anything else keeps the server up.
 `inkling watch` marks paused watches `(paused)`, and `inkling status` counts
 them and lists their session as `ended`.
 
