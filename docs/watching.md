@@ -690,6 +690,12 @@ session posts. So a closed session kept paying for news nobody could hear.
   too, without an address for the next `detach` to take, so a session that
   ended after that never paused (found 2026-11-18). A live session that
   registers a watch while taken for ended gets attached by the same hook.
+- **Unsubscribing is not leaving.** `inkling unsubscribe` takes the address
+  and leaves `departed` clear: the session is still here, pulling through
+  `events` and the prompt hook, so its watches keep being read. Pausing them
+  made `events` print nothing while a watch moved (found 2026-11-18). Its
+  `SessionEnd` is the departure, and pauses them then. `status` lists it as
+  `unsubscribed`, not `ended`.
 - **A hook from an ended session attaches it again.** Only a live session
   fires hooks, and the probe can be wrong: macOS refuses a connection to a
   listener whose backlog is full exactly as it does to a dead one, so a live

@@ -2728,18 +2728,28 @@ fn subscribers_out(watches: &inkling::adapters::watches_json::Watches, now: Date
             .filter(|watch| watch.deadline > now && watch.owners.contains(id))
             .count();
         println!(
-            "  {:<8}  {:<8}  cursor {:<5}  watching {watching:<3}  last seen {}",
+            "  {:<8}  {:<12}  cursor {:<5}  watching {watching:<3}  last seen {}",
             short(id),
-            // "ended" is a session we saw go, which is what pauses watches;
-            // "detached" never attached, so nothing says it has gone.
-            match (subscriber.address.is_some(), subscriber.departed) {
-                (true, _) => "attached",
-                (false, true) => "ended",
-                (false, false) => "detached",
-            },
+            connection(subscriber),
             subscriber.cursor,
             humanize(now - subscriber.seen_at),
         );
+    }
+}
+
+/// Whether a reader can be pushed to, and if not, why not.
+fn connection(subscriber: &inkling::adapters::watches_json::Subscriber) -> &'static str {
+    // "ended" is a session we saw go, which is what pauses watches;
+    // "detached" never attached, so nothing says it has gone.
+    match (
+        subscriber.address.is_some(),
+        subscriber.departed,
+        subscriber.unsubscribed,
+    ) {
+        (true, _, _) => "attached",
+        (false, true, _) => "ended",
+        (false, false, true) => "unsubscribed",
+        (false, false, false) => "detached",
     }
 }
 
@@ -2956,6 +2966,25 @@ mod tests {
 
     fn hosts() -> Vec<String> {
         vec!["github.com".to_string()]
+    }
+
+    #[test]
+    fn status_tells_an_unsubscribed_session_from_one_that_ended() {
+        let now = chrono::Utc::now();
+        let mut watches = Watches::default();
+        let address = || {
+            inkling::adapters::session_socket::SessionAddress::new(
+                std::path::Path::new("/tmp/s"),
+                None,
+            )
+        };
+        let connection = |w: &Watches| super::connection(&w.subscribers["s-1"]);
+        watches.attach("s-1", address(), now);
+        assert_eq!(connection(&watches), "attached");
+        watches.unsubscribe("s-1");
+        assert_eq!(connection(&watches), "unsubscribed");
+        watches.detach("s-1");
+        assert_eq!(connection(&watches), "ended");
     }
 
     #[test]
