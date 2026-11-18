@@ -123,17 +123,24 @@ impl Poller<'_> {
         why: &str,
         between: &mut dyn FnMut(),
     ) -> Result<Polled, StoreError> {
-        self.read_due(floor, why, |_| true, None, &mut || {
+        self.read_due(floor, why, &|_| true, None, &mut || {
             between();
             true
         })
+    }
+
+    /// `poll`, of `these` only: what `inkling watch` just registered, without
+    /// paying for anything else that happens to be due.
+    pub fn poll_these(&self, these: &[Reference], why: &str) -> Result<Polled, StoreError> {
+        let given = |r: &Reference| these.contains(r);
+        self.read_due(TimeDelta::zero(), why, &given, None, &mut || true)
     }
 
     /// The server's Slack worker: each due Slack watch in turn, until `stop`.
     /// Takes no poll lock — the claim is what keeps two readers from paying
     /// for one reading — so GitHub and Jira never wait on the bridge.
     pub fn poll_slack(&self, why: &str, stop: &dyn Fn() -> bool) -> Result<Polled, StoreError> {
-        self.read_due(TimeDelta::zero(), why, is_slack, None, &mut || !stop())
+        self.read_due(TimeDelta::zero(), why, &is_slack, None, &mut || !stop())
     }
 
     /// What `which` picks of what is due, a source at a time. `lock` is let go
@@ -143,13 +150,13 @@ impl Poller<'_> {
         &self,
         floor: TimeDelta,
         why: &str,
-        which: fn(&Reference) -> bool,
+        which: &dyn Fn(&Reference) -> bool,
         lock: Option<FileLock>,
         go_on: &mut dyn FnMut() -> bool,
     ) -> Result<Polled, StoreError> {
         let observed_at = self.clock.now();
         let mut references = self.wanted(&self.store.read(), observed_at, floor);
-        references.retain(which);
+        references.retain(|r| which(r));
         if references.is_empty() {
             tracing::debug!(why, "nothing is due");
             return Ok(Polled {
@@ -282,7 +289,7 @@ impl Poller<'_> {
                 ..Polled::default()
             });
         };
-        self.read_due(floor, why, |_| true, Some(lock), &mut || {
+        self.read_due(floor, why, &|_| true, Some(lock), &mut || {
             between();
             true
         })
@@ -1312,6 +1319,24 @@ mod tests {
         assert_eq!(h.github.calls(), 0, "GitHub is the tick's");
         let due = h.store.read().due_now(h.clock.now(), TimeDelta::zero());
         assert_eq!(due.len(), 2, "the PR and the unread message: {due:?}");
+    }
+
+    #[test]
+    fn reading_what_was_just_watched_reads_nothing_else() {
+        // `inkling watch <pr>` waited on a paid Slack read it hadn't asked for.
+        let h = Harness::new("these");
+        h.github.set(&pr(3), State::Open);
+        h.github.set(&pr(4), State::Open);
+        h.slack.replied(&slack(), &[]);
+        h.watch(&pr(3));
+        h.watch(&pr(4));
+        h.watch(&slack());
+
+        let polled = h.poller().poll_these(&[pr(3)], "test").unwrap();
+
+        let read: Vec<_> = polled.sightings.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(read, vec![pr(3)]);
+        assert_eq!(h.slack.calls.get(), 0);
     }
 
     /// Issues that look at the store when asked, the way `Spy` does.

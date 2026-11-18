@@ -894,8 +894,11 @@ retried every tick. Two things follow:
 - **Only the server and the explicit commands read Slack.** The prompt hook
   gives a refresh 3s; a bridge call can't fit, and abandoning one mid-flight
   still pays for it. `Poller::slack` is `None` there, and Slack watches are
-  left for whoever has the time: the resident server, `inkling watch`, and
-  `inkling events` at a terminal (which can therefore take a minute).
+  left for whoever has the time: the resident server; `inkling watch`, which
+  reads only what it was just given (`Poller::poll_these`), so a PR's baseline
+  never waits on somebody else's Slack read; and `inkling events`, only when no
+  server holds the serve lock (which can then take a minute). A running server
+  reads Slack anyway, so `events` beside one would only pay to wait.
 - **One call per watched message, two tools inside it.** The thread tool reads
   one thread and the channel tool lists top-level messages only, so a read
   needs both — but both fit in one `claude -p`. Measured 2026-11-17 on the

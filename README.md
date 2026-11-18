@@ -188,8 +188,9 @@ isn't pushed; a deleted reply stays counted.
 Each reading is a `claude -p` call through Claude Code's Slack connector:
 about 2¢, and anywhere from a few seconds to a minute. So a Slack message is
 read at most every 5 minutes, whatever else the schedule says, and only by the
-resident server and by `watch` and `events` themselves — never by the prompt
-hook, which can't wait that long. `wait` doesn't take one.
+resident server, by `watch` for the messages it was just given, and by `events`
+when no server is running — never by the prompt hook, which can't wait that
+long. `wait` doesn't take one.
 
 ### Slack channels
 

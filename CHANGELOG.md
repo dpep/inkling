@@ -12,6 +12,9 @@
   the 2s, 5s or 180s limit; one that printed more than a pipe holds stalled until killed. Output
   is now read as it arrives, and a command that runs out of time is killed with everything it
   started.
+- **`inkling watch` reads only what it was given**, not every other watch that happened to be
+  due, and `inkling events` leaves Slack to a running server, so neither waits on a Slack read it
+  didn't ask for.
 <!-- /fix2-latency -->
 
 - **A watch on something that isn't there any more ends, once.** A Slack message that was

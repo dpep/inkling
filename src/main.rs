@@ -693,7 +693,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 // caller just asked not to happen.
                 if !references.is_empty() {
                     let slack = slack_threads(&config, store.path())?;
-                    match poll(&config, &watches, &clock, None, Some(&slack), "watch") {
+                    let these = Reading::These(&references);
+                    match poll(&config, &watches, &clock, these, Some(&slack), "watch") {
                         Ok(polled) => {
                             for line in finished_already(&references, &polled, &watches.read()) {
                                 println!("{line}");
@@ -797,13 +798,17 @@ fn run(cli: &Cli) -> Result<i32, String> {
             if watches.read().due(clock.now(), refresh) {
                 // A provider that can't be reached is a log line, not a
                 // failure — a blip must not cost an agent its turn.
-                let slack = slack_threads(&config, store.path())?;
+                let serving = serve_config(&config, &cli.common);
+                let slack = slack_unless_serving(&config, &serving, store.path())?;
+                let slack = slack
+                    .as_ref()
+                    .map(|s| s as &dyn inkling::ports::MessageProvider);
                 if let Err(error) = poll(
                     &config,
                     &watches,
                     &clock,
-                    Some(refresh),
-                    Some(&slack),
+                    Reading::Stale(refresh),
+                    slack,
                     "events",
                 ) {
                     tracing::warn!(%error, "could not refresh watches");
@@ -1595,7 +1600,14 @@ fn refresh_within(
     let path = path.to_path_buf();
     let polled = within(budget, move || {
         let store = inkling::adapters::watches_json::WatchStore::new(path);
-        poll(&config, &store, &SystemClock, Some(refresh), None, "prompt")
+        poll(
+            &config,
+            &store,
+            &SystemClock,
+            Reading::Stale(refresh),
+            None,
+            "prompt",
+        )
     });
     match polled {
         Some(Ok(_)) => {}
@@ -2103,14 +2115,21 @@ fn slack_channel<R: slack_claude::Runner>(
     })
 }
 
-/// Bring the watches up to date: whatever the schedule says is due, and with
-/// `refresh` nothing younger than it, under the poll lock. `None` is `watch`
-/// reading what it just registered, which must not lose to a lock.
+/// Which watches a `poll` reads.
+enum Reading<'a> {
+    /// Whatever the schedule says is due, and nothing younger than this,
+    /// under the poll lock.
+    Stale(TimeDelta),
+    /// What `watch` just registered, which must not lose to a lock.
+    These(&'a [inkling::domain::model::Reference]),
+}
+
+/// Bring the watches up to date.
 fn poll(
     config: &Config,
     store: &inkling::adapters::watches_json::WatchStore,
     clock: &SystemClock,
-    refresh: Option<TimeDelta>,
+    reading: Reading,
     slack: Option<&dyn inkling::ports::MessageProvider>,
     why: &str,
 ) -> Result<inkling::watch::Polled, String> {
@@ -2121,11 +2140,26 @@ fn poll(
         slack,
         clock,
     };
-    match refresh {
-        Some(refresh) => poller.poll_if_stale(refresh, why),
-        None => poller.poll(TimeDelta::zero(), why),
+    match reading {
+        Reading::Stale(refresh) => poller.poll_if_stale(refresh, why),
+        Reading::These(these) => poller.poll_these(these, why),
     }
     .map_err(|e| e.to_string())
+}
+
+/// What `events` reads Slack with: nothing while a server is serving. The
+/// server reads it anyway, and a bridge call would hold the command for a
+/// minute or more.
+fn slack_unless_serving(
+    config: &Config,
+    serving: &inkling::serve::Config,
+    state: &std::path::Path,
+) -> Result<Option<inkling::adapters::slack_thread::SlackThreads<slack_claude::ClaudeRunner>>, String>
+{
+    match inkling::serve::read_status(serving).running {
+        true => Ok(None),
+        false => slack_threads(config, state).map(Some),
+    }
 }
 
 /// GitHub, with the token resolved at each lookup: only a due pull request
@@ -3505,7 +3539,7 @@ mod tests {
             &config,
             &store,
             &super::SystemClock,
-            None,
+            super::Reading::Stale(chrono::TimeDelta::zero()),
             Some(&Quiet),
             "test",
         )
@@ -3519,6 +3553,31 @@ mod tests {
                 .any(|f| f.contains("INKLING_TEST_NO_SUCH_TOKEN")),
             "{:?}",
             polled.failures
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn events_leaves_slack_to_a_running_server() {
+        // `events` blocked on a bridge call the server was there to make.
+        let dir = std::env::temp_dir().join(format!("inkling-events-slack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = inkling::config::Config::parse(super::STARTER_CONFIG, "config.toml").unwrap();
+        let serving = inkling::serve::Config::in_dir(&dir);
+        let state = dir.join("state.json");
+
+        assert!(
+            super::slack_unless_serving(&config, &serving, &state)
+                .unwrap()
+                .is_some()
+        );
+        let held = inkling::adapters::lock::FileLock::try_acquire(&serving.lock).unwrap();
+        assert!(held.is_some());
+        assert!(
+            super::slack_unless_serving(&config, &serving, &state)
+                .unwrap()
+                .is_none()
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
