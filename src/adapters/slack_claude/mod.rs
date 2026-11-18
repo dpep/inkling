@@ -151,9 +151,10 @@ impl<R: Runner> SlackClaude<R> {
     }
 
     /// Run a prompt and interpret the reply, retrying when the reply doesn't
-    /// make sense. Transport errors are retried too; a typed refusal from
-    /// Slack — a missing emoji, a deleted message — is not, since repeating
-    /// it would just cost time.
+    /// make sense. Transport errors are retried too, except a timeout: a hang
+    /// costs the whole timeout again. A typed refusal from Slack — a missing
+    /// emoji, a deleted message — is not, since repeating it would just cost
+    /// time.
     fn attempt<T>(
         &self,
         prompt: &str,
@@ -179,6 +180,7 @@ impl<R: Runner> SlackClaude<R> {
                     Err(Retry::Fatal(error)) => return Err(error),
                     Err(Retry::Again(error)) => last = error,
                 },
+                Err(error @ RunnerError::TimedOut { .. }) => return Err(error.to_string()),
                 Err(error) => last = error.to_string(),
             }
             if attempt + 1 < ATTEMPTS {
@@ -806,6 +808,28 @@ mod tests {
             .add(&MessageId::new("C1", "1.0"), &ReactionName::new("nope"))
             .unwrap_err();
         assert!(matches!(error, SinkError::InvalidEmoji(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_bridge_timeout_is_not_retried() {
+        // Retries are for the hiccup that answers in seconds; a hang costs
+        // the whole timeout again on every try.
+        struct Hangs(RefCell<usize>);
+        impl Runner for Hangs {
+            fn run(&self, _: &str, _: &[&str], _: usize) -> Result<String, RunnerError> {
+                *self.0.borrow_mut() += 1;
+                Err(RunnerError::TimedOut {
+                    command: "claude".into(),
+                    timeout: Duration::from_secs(180),
+                })
+            }
+        }
+        let slack = SlackClaude::new(Hangs(RefCell::new(0))).without_delay();
+        let error = slack
+            .add(&MessageId::new("C1", "1.0"), &ReactionName::new("merged"))
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(*slack.runner.0.borrow(), 1);
     }
 
     #[test]
