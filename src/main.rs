@@ -1900,7 +1900,10 @@ fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String>
 /// wrong: macOS refuses a connection to a listener whose backlog is full
 /// exactly as it does to a dead one.
 fn revive(id: &str, config: &Config, common: &Common) {
-    if std::env::var_os(SOCKET_ENV).is_none() || !watch_store(common).read().lost_address(id) {
+    let Some(socket) = std::env::var_os(SOCKET_ENV) else {
+        return;
+    };
+    if !watch_store(common).lost_address(id, std::path::Path::new(&socket)) {
         return;
     }
     match subscribe(id, config, common) {

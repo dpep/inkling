@@ -1066,6 +1066,21 @@ impl WatchStore {
         self.read_current().unwrap_or_default()
     }
 
+    /// `Watches::lost_address` for a hook from a session listening on
+    /// `socket`. Every tool call asks, so a store that already names the
+    /// socket — the session is attached — answers without being parsed.
+    pub fn lost_address(&self, subscriber: &str, socket: &Path) -> bool {
+        let Ok(raw) = std::fs::read_to_string(&self.path) else {
+            return false;
+        };
+        if let Ok(quoted) = serde_json::to_string(socket)
+            && raw.contains(&quoted)
+        {
+            return false;
+        }
+        parse(&raw).is_ok_and(|watches| watches.lost_address(subscriber))
+    }
+
     /// `read`, except that a newer build's file is `FutureVersion` rather than
     /// empty: for a caller that reports what the store holds, where empty
     /// would tell someone to watch everything again.
@@ -2557,6 +2572,32 @@ mod tests {
             "s-2 watches nothing"
         );
         assert!(watches.reachable("s-1", now()), "but status still shows it");
+    }
+
+    #[test]
+    fn a_hook_asks_whether_to_attach_without_parsing_a_store_that_names_its_socket() {
+        let store = WatchStore::new(scratch("lost-address"));
+        let socket = Path::new("/tmp/s");
+        assert!(
+            !store.lost_address("s-1", socket),
+            "no store, nobody to attach"
+        );
+        store
+            .update(now(), |w| {
+                w.watch(&pr(3), "s-1", forever(), now());
+            })
+            .unwrap();
+        assert!(store.lost_address("s-1", socket));
+
+        // Parsed, s-1 has no address; but the socket is named, so the answer
+        // comes from the text alone.
+        store
+            .update(now(), |w| {
+                w.attach("s-2", address("/tmp/s"), now());
+            })
+            .unwrap();
+        assert!(store.read().lost_address("s-1"));
+        assert!(!store.lost_address("s-1", socket));
     }
 
     #[test]
