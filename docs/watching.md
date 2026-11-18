@@ -390,6 +390,11 @@ baseline, `departed`, `tried_at`, `own`).
   missing rule. `watches_json::tests::stored_shape` destructures every stored
   type and matches every stored enum without a wildcard, so a new field or
   variant stops the build until somebody looks at `VERSION`.
+- **Version 2 is everything up to the first release with this rule:** channel
+  watches, comment counts, `departed`, `tried_at`, per-reader `receipts`,
+  `receipt_for`, `lines`, `after`, and watches keyed by `Reference::key`
+  (older keys are rekeyed on read). The tripwire caught the last four landing
+  from two other lanes while this rule was being merged.
 - **Builds from before this rule still quarantine.** They parse everything
   before looking at the version. Nothing this build does can reach them;
   version 2 only parses for them if it holds nothing they lack.

@@ -6,6 +6,17 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- The watch-store version tripwire (`watches_json::tests::stored_shape`) refused to compile twice
+  while rebasing onto main, once for `lines`/`after`, once for `receipts`/`receipt_for`: exactly
+  the missed-bump case that wiped a store, caught at build time. Good surprise.
+- Live, scratch store: the installed build left a session `ended` after a hook fired from it with
+  its socket set; the new `revive` attached it again on its next prompt. Expected the old
+  behaviour, now confirmed as the bug the hunt described.
+- A push carrying the receipts it passes over (state hunt #5) was built, then dropped: once the
+  Slack lane made a receipt mean "this session posted it", riding along echoed the session's own
+  act and the tally merged its reaction into someone else's (`2 reactions :eyes:` for one new).
+  Passing over a receipt now loses only what the session did itself.
+
 - Naming a lookup on every Slack reply line found that the replies map forgets where a reply was
   found (thread, or the channel after the message), so a reply line has to name both reads,
   `slack_read_thread …; slack_read_channel …`. Expected one call per line. The fix is the reply
