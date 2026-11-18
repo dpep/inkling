@@ -705,9 +705,12 @@ session posts. So a closed session kept paying for news nobody could hear.
   probed, not one a resumed session attached meanwhile (both 2026-11-18).
   The same goes for any session whose record holds no address — one forgotten
   after a quiet week and met again, say — except one that ran `inkling
-  unsubscribe`: that choice holds until `SessionStart` or `subscribe`
-  attaches it (`Subscriber::unsubscribed`). `SessionEnd` is not a choice; a
-  session still firing hooks after one was resumed.
+  unsubscribe`: that choice holds until `subscribe`, or a `SessionStart`
+  whose `source` is `startup` or `resume`, attaches it
+  (`Subscriber::unsubscribed`). A compaction or `/clear` fires `SessionStart`
+  too, but it is the same session carrying on, and re-attaching there undid
+  the choice (found 2026-11-18). `SessionEnd` is not a choice; a session
+  still firing hooks after one was resumed.
 - **`cli` and readers that never attached are exempt.** Pausing is only safe
   when we *saw* the reader leave. The terminal has no session to end, and a
   session without the hooks gives no sign either way. Pausing their watches

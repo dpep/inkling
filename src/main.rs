@@ -1507,6 +1507,9 @@ fn ensure_serving(config: &Config, common: &Common, why: &str) {
 struct HookInput {
     #[serde(default)]
     session_id: String,
+    /// `SessionStart` only: startup, resume, clear, compact or fork.
+    #[serde(default)]
+    source: String,
     #[serde(default)]
     tool_name: String,
     #[serde(default)]
@@ -1654,7 +1657,9 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
     let watches = watch_store(common);
     match event {
         HookEvent::SessionStart => {
-            subscribe(&input.session_id, config, common)?;
+            if attaches_at_start(&input, &watches.read()) {
+                subscribe(&input.session_id, config, common)?;
+            }
             Ok(())
         }
         HookEvent::SessionEnd => {
@@ -1686,6 +1691,20 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             Ok(())
         }
     }
+}
+
+/// Whether `SessionStart` attaches. An unsubscribed session stays so through
+/// a compaction or `/clear`, which carry the same session on; only starting
+/// or resuming it comes back.
+fn attaches_at_start(
+    input: &HookInput,
+    watches: &inkling::adapters::watches_json::Watches,
+) -> bool {
+    matches!(input.source.as_str(), "startup" | "resume")
+        || !watches
+            .subscribers
+            .get(&input.session_id)
+            .is_some_and(|subscriber| subscriber.unsubscribed)
 }
 
 /// What a prompt owes the session, worded and grouped as a push is, so news
@@ -2985,6 +3004,33 @@ mod tests {
         assert_eq!(connection(&watches), "unsubscribed");
         watches.detach("s-1");
         assert_eq!(connection(&watches), "ended");
+    }
+
+    #[test]
+    fn only_a_return_to_the_session_undoes_an_unsubscribe() {
+        // Found by the hunt: a compaction's SessionStart re-attached it.
+        let mut watches = Watches::default();
+        let address = inkling::adapters::session_socket::SessionAddress::new(
+            std::path::Path::new("/tmp/s"),
+            None,
+        );
+        watches.attach("s-1", address, chrono::Utc::now());
+        watches.unsubscribe("s-1");
+        let start = |source: &str| {
+            let input = tool_call(serde_json::json!({"session_id": "s-1", "source": source}));
+            super::attaches_at_start(&input, &watches)
+        };
+        assert!(start("startup"));
+        assert!(start("resume"));
+        assert!(!start("compact"));
+        assert!(!start("clear"));
+        assert!(!start(""), "an older Claude Code says nothing");
+
+        let input = tool_call(serde_json::json!({"session_id": "s-2", "source": "compact"}));
+        assert!(
+            super::attaches_at_start(&input, &watches),
+            "any other session attaches"
+        );
     }
 
     #[test]

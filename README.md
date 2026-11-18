@@ -275,7 +275,10 @@ agent's turn.
 Push and pull share one cursor, so a transition arrives once either way.
 Subscribing attaches; it doesn't create. `unsubscribe` detaches the address
 and leaves your watches and your place alone, so `claude --resume` picks up
-the net change since you left rather than a replay or a silence.
+the net change since you left rather than a replay or a silence. Running it
+yourself stops pushes until you `subscribe` or start or resume the session;
+a compaction or `/clear` doesn't undo it. Your watches keep being read, and
+`events` and the prompt hook still show what moved.
 
 While you're gone, watches only your ended sessions hold are paused: not
 read, and not keeping the server up. Their deadlines still run. Resuming makes
