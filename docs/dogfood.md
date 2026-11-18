@@ -4,7 +4,22 @@ What using inkling on inkling's own work has taught us. One dated line per
 finding: what happened, what was expected. Newest first. When a finding is
 fixed, say where and leave the line.
 
-## 2026-11-17
+## 2026-11-18
+
+- First live Slack transition: a :dart: on the watched message arrived mid-turn as
+  `inkling: slack:D1MG8KWNR/1794976101.418449 | reactions 0 → 1 :dart:`, read on the first tick
+  after the 5-minute floor (7s bridge call) and pushed 0ms later. Actionable without a lookup,
+  except for who: the bridge can't name a reactor.
+- First real Slack MCP send: the result is `{"message_link": "https://…/archives/D…/p…",
+  "message_context": {"message_ts", "channel_id"}}`. Sent to a user id (`U…`), it names the DM
+  channel (`D…`) instead. The hook's guess held: fed that exact result, it watched the message
+  and started the server, and the first reading baselined 9.4s later.
+- A session started before the plugin update still matched only `Bash`: the plugin cache stayed
+  at 0.2.0 after the myclaude push, so its own send went unseen. Expected a matcher change to
+  need a fresh session; didn't expect the cache to need a refresh too.
+- The log shows bursts of subscribe → unsubscribe 3–5s apart from sessions nobody saw. Probably
+  short `claude -p` runs (other tools' bridges, `/login` checks); each leaves a dormant
+  subscriber, which is how `status` reached 76 dormant.
 
 - Building the Slack source: `slack_read_thread` (and `read_channel`) with
   `response_format: "detailed"` prints reactions as `low-priority (1)` — a
