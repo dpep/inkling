@@ -6,6 +6,11 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Reply ownership, live (fixed in df35579): two watched self-DM messages A and B, recorded as this
+  session's own posts by feeding the post-tool hook by hand. One DM answer (12:32:44 PST) pushed
+  once, on B, 156s later. A stayed quiet.
+- Two Slack watches left running for the two hours before the answer cost $0.62 in bridge calls
+  (most reads about $0.019). The Slack worker read them one per poll, beside an idle tick.
 - A hunter subagent ran `inkling hook post-tool` with a JSON payload naming
   `gh pr view https://github.com/rust-lang/rust/pull/166160`. The lead session's own post-tool hook
   saw that command text and auto-watched a rust-lang PR in the live store for 3 days. Subagent Bash
