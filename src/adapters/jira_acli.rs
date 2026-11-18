@@ -30,6 +30,8 @@ pub enum Failure {
     Refused(String),
     /// `acli` didn't run at all — not installed, not on PATH.
     Unavailable(String),
+    /// `acli` ran but didn't answer in time.
+    TimedOut(String),
 }
 
 pub struct AcliShell {
@@ -73,7 +75,13 @@ impl Shell for AcliShell {
             Command::new(&self.command).args(Self::args(key)),
             VIEW_TIMEOUT,
         )
-        .map_err(|e| Failure::Unavailable(format!("running `{}`: {e}", self.command)))?;
+        .map_err(|e| {
+            let message = format!("running `{}`: {e}", self.command);
+            match e.kind() {
+                std::io::ErrorKind::TimedOut => Failure::TimedOut(message),
+                _ => Failure::Unavailable(message),
+            }
+        })?;
 
         match output.status.success() {
             true => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
@@ -118,6 +126,7 @@ impl<S: Shell> IssueProvider for JiraProvider<S> {
                 let status = match self.shell.view(key) {
                     Ok(raw) => interpret(&raw),
                     Err(Failure::Refused(message)) => Err(refusal(&message)),
+                    Err(Failure::TimedOut(message)) => Err(RefError::Other(message)),
                     // Nothing else will work either, so this is the whole
                     // provider failing rather than one issue.
                     Err(Failure::Unavailable(message)) => {
@@ -325,6 +334,31 @@ mod tests {
         ))]));
         let error = provider.read(&["AI-1".to_string()]).unwrap_err();
         assert!(error.to_string().starts_with("jira "), "{error}");
+    }
+
+    #[test]
+    fn a_slow_issue_fails_alone_and_keeps_the_others() {
+        // A timeout says nothing about the next key, unlike a missing binary.
+        let provider = JiraProvider::with_shell(Canned::of(vec![
+            Ok(issue("To Do", "new")),
+            Err(Failure::TimedOut(
+                "running `acli`: no answer within 5s".into(),
+            )),
+            Ok(issue("Done", "done")),
+        ]));
+        let keys = ["AI-1", "AI-2", "AI-3"].map(String::from);
+        let read = provider
+            .read(&keys)
+            .expect("one slow issue is not the provider");
+
+        assert!(read[0].1.is_ok());
+        assert_eq!(
+            read[1].1,
+            Err(RefError::Other(
+                "running `acli`: no answer within 5s".into()
+            ))
+        );
+        assert!(read[2].1.is_ok());
     }
 
     #[test]
