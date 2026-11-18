@@ -982,7 +982,8 @@ same shared-identity flaw, unfixed here.
 
 `slack.user_id` (or `whoami`, cached in `state.json`) is still read, lazily:
 it is how a channel message that @mentions the reader is recognized as a
-reply.
+reply. A failed `whoami` is remembered there too, and not asked again by any
+process for five minutes: each try is paid.
 
 **The hook.** `post-tool` matches the Slack MCP send tool by name, built from
 `[slack.mcp]` (`ToolNames::send`, `mcp__claude_ai_Slack__slack_send_message` by
