@@ -56,6 +56,7 @@ pub fn looks_like_slack(arg: &str) -> bool {
 
 /// `C0123ABC/p1786596050245879?thread_ts=…` — what follows `/archives/`.
 fn permalink_tail(tail: &str) -> Option<Reference> {
+    let tail = tail.split('#').next().unwrap_or_default();
     let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
     let (channel, message) = path.trim_end_matches('/').split_once('/')?;
     let ts = ts_from_permalink(message)?;
@@ -242,9 +243,10 @@ fn tails(text: &str) -> Vec<&str> {
         .map(|(at, _)| {
             let tail = &text[at + ARCHIVES.len()..];
             let end = tail
-                .find(|c: char| c.is_whitespace() || "\"'<>()[]|,`".contains(c))
+                .find(|c: char| c.is_whitespace() || "\"'<>()[]|,`*#".contains(c))
                 .unwrap_or(tail.len());
-            &tail[..end]
+            // Prose ends a sentence after a link, and markdown wraps one.
+            tail[..end].trim_end_matches(['.', '_'])
         })
         .collect()
 }
@@ -419,6 +421,27 @@ mod tests {
         assert_eq!(
             posted_via_tool(&sent("C0123ABCD", "hello"), &response),
             Some(message("C0123ABCD", "1786596050.245879", None))
+        );
+    }
+
+    #[test]
+    fn a_permalink_in_prose_or_markdown_ends_where_the_link_does() {
+        let posted = Some(message("C0123ABCD", "1786596050.245879", None));
+        for text in [
+            "Message sent: https://acme.slack.com/archives/C0123ABCD/p1786596050245879.",
+            "Sent **https://acme.slack.com/archives/C0123ABCD/p1786596050245879**",
+            "Sent _https://acme.slack.com/archives/C0123ABCD/p1786596050245879_",
+        ] {
+            let response = json!([{"type": "text", "text": text}]);
+            assert_eq!(
+                posted_via_tool(&sent("C0123ABCD", "hello"), &response),
+                posted,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse_reference("https://acme.slack.com/archives/C0123ABCD/p1786596050245879#x"),
+            posted
         );
     }
 
