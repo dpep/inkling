@@ -272,9 +272,8 @@ pub struct Subscriber {
     /// one, and nothing will ever tell us it has gone. What pauses a watch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub departed: bool,
-    /// Detached because it asked to be. Unlike a probe or `SessionEnd`, that
-    /// is not undone by the session's next hook — only by attaching. Not a
-    /// departure: the session is still pulling until its `SessionEnd`.
+    /// Muted by `inkling unsubscribe`: still attached and probed, never
+    /// pushed to. Undone only by `unmute`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsubscribed: bool,
     /// Slack replies this reader has been told, or posted itself: channel ->
@@ -544,14 +543,14 @@ impl Watches {
             && watch.owners.iter().all(|owner| self.departed(owner))
     }
 
-    /// Whether this reader has no address, and not by its own choice: what a
-    /// hook from a live session attaches again.
+    /// Whether this reader has no address: what a hook from a live session
+    /// attaches again.
     pub fn lost_address(&self, subscriber: &str) -> bool {
         subscriber != TERMINAL
             && self
                 .subscribers
                 .get(subscriber)
-                .is_some_and(|entry| entry.address.is_none() && !entry.unsubscribed)
+                .is_some_and(|entry| entry.address.is_none())
     }
 
     fn departed(&self, owner: &str) -> bool {
@@ -855,6 +854,8 @@ impl Watches {
     ///
     /// The same goes for its watches: any it paused on leaving are stirred,
     /// due at once, and read against the baseline they kept.
+    ///
+    /// A muted session stays muted: only `unmute` undoes `unsubscribe`.
     pub fn attach(
         &mut self,
         subscriber: &str,
@@ -868,7 +869,6 @@ impl Watches {
             .collect();
         let entry = self.meet(subscriber, now);
         entry.departed = false;
-        entry.unsubscribed = false;
         let replaced = entry.address.replace(address).is_some();
         for key in paused {
             if let Some(watch) = self.watches.get_mut(&key) {
@@ -888,20 +888,26 @@ impl Watches {
             return false;
         };
         let had = entry.address.take().is_some();
-        // An unsubscribed session gave its address up while still here.
-        entry.departed |= had || entry.unsubscribed;
+        entry.departed |= had;
         had
     }
 
-    /// Stop pushing because the session asked to, which its own hooks won't
-    /// undo. The session is still here and pulling, so it hasn't departed.
+    /// Mute: stop pushing because the session asked to. It keeps its address,
+    /// so it is still probed and its end still noticed. Reports whether there
+    /// was an attached session to mute.
     pub fn unsubscribe(&mut self, subscriber: &str) -> bool {
         let Some(entry) = self.subscribers.get_mut(subscriber) else {
             return false;
         };
-        entry.unsubscribed = true;
-        entry.departed = false;
-        entry.address.take().is_some()
+        entry.unsubscribed |= entry.address.is_some();
+        entry.address.is_some()
+    }
+
+    /// Push to this session again.
+    pub fn unmute(&mut self, subscriber: &str) {
+        if let Some(entry) = self.subscribers.get_mut(subscriber) {
+            entry.unsubscribed = false;
+        }
     }
 
     /// Detach, but only from `address`: a session that resumed onto a new
@@ -2598,37 +2604,48 @@ mod tests {
     }
 
     #[test]
-    fn an_unsubscribed_session_stays_unsubscribed_until_it_attaches() {
-        // Found by the hunt: the PostToolUse hook of `inkling unsubscribe`
-        // itself attached the session again.
+    fn unsubscribing_mutes_and_nothing_else() {
+        // Found by the hunt: unsubscribe dropped the address, so a session
+        // that died afterwards was never probed and its watches never paused.
         let mut watches = watching(State::Open);
         watches.attach("s-1", address("/tmp/s"), now());
         assert!(watches.unsubscribe("s-1"));
+        assert_eq!(watches.attached().len(), 1, "still probed");
         assert!(!watches.lost_address("s-1"));
-
-        watches.attach("s-1", address("/tmp/s"), now());
-        watches.detach("s-1");
-        assert!(watches.lost_address("s-1"), "attaching ends the choice");
-    }
-
-    #[test]
-    fn unsubscribing_stops_pushes_and_nothing_else() {
-        // Found by the hunt: unsubscribe paused the session's watches, so a
-        // live session pulling with `events` heard nothing.
-        let mut watches = watching(State::Open);
-        watches.attach("s-1", address("/tmp/s"), now());
-        watches.unsubscribe("s-1");
-        assert!(watches.attached().is_empty());
-        assert!(
-            !watches.paused(&watches.watches[&pr(3).key()]),
-            "the session is still here, pulling"
-        );
+        assert!(!watches.paused(&watches.watches[&pr(3).key()]));
 
         watches.detach("s-1");
         assert!(
             watches.paused(&watches.watches[&pr(3).key()]),
             "until it ends"
         );
+    }
+
+    #[test]
+    fn a_hook_attaches_a_muted_session_again_still_muted() {
+        // A probe can take a live session for gone; its next hook must not
+        // undo the mute along with the mistake.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.unsubscribe("s-1");
+        watches.detach("s-1");
+        assert!(watches.lost_address("s-1"));
+
+        watches.attach("s-1", address("/tmp/s"), now());
+        assert!(watches.subscribers["s-1"].unsubscribed);
+        watches.unmute("s-1");
+        assert!(!watches.subscribers["s-1"].unsubscribed);
+    }
+
+    #[test]
+    fn unsubscribing_an_ended_session_changes_nothing() {
+        // Found by the hunt: it un-paused the ended session's watches.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.detach("s-1");
+        assert!(!watches.unsubscribe("s-1"));
+        assert!(!watches.subscribers["s-1"].unsubscribed);
+        assert!(watches.paused(&watches.watches[&pr(3).key()]));
     }
 
     #[test]

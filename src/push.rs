@@ -446,7 +446,9 @@ pub fn round(sessions: &dyn Sessions, watches: &Watches, clock: &dyn Clock) -> V
                     "withheld; the rest waits for a prompt"
                 );
             }
+            let muted = watches.subscribers[subscriber].unsubscribed;
             let due: Vec<&Event> = match allowance {
+                _ if muted => Vec::new(),
                 0 => Vec::new(),
                 _ => owed,
             };
@@ -1564,6 +1566,24 @@ mod tests {
             1,
             "and the transition survived the failed push"
         );
+    }
+
+    #[test]
+    fn an_unsubscribed_session_is_probed_not_pushed() {
+        let mut watches = watching();
+        watches.attach("s", address("/tmp/a"), now());
+        watches.unsubscribe("s");
+        moved(&mut watches, State::Approved);
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert!(sessions.texts().is_empty(), "{:?}", sessions.texts());
+        assert_eq!(sessions.probes.borrow().len(), 1);
+        assert!(
+            should_serve(&watches, now()),
+            "its watches still need reading"
+        );
+        assert_eq!(watches.take("s", now()).len(), 1, "the prompt shows it");
     }
 
     #[test]

@@ -699,12 +699,17 @@ session posts. So a closed session kept paying for news nobody could hear.
   too, without an address for the next `detach` to take, so a session that
   ended after that never paused (found 2026-11-18). A live session that
   registers a watch while taken for ended gets attached by the same hook.
-- **Unsubscribing is not leaving.** `inkling unsubscribe` takes the address
-  and leaves `departed` clear: the session is still here, pulling through
-  `events` and the prompt hook, so its watches keep being read. Pausing them
-  made `events` print nothing while a watch moved (found 2026-11-18). Its
-  `SessionEnd` is the departure, and pauses them then. `status` lists it as
-  `unsubscribed`, not `ended`.
+- **Unsubscribing is a mute.** `inkling unsubscribe` sets
+  `Subscriber::unsubscribed` and changes nothing else: the session keeps its
+  address, so the server still probes it, counts it in `should_serve` (so the
+  Slack worker runs and its prompt shows Slack news), and notices when it
+  dies; a round just doesn't push to it. Two earlier versions took the
+  address: one paused its watches, so `events` printed nothing while a watch
+  moved; the next kept them read, but a session that then died without a
+  `SessionEnd` was never probed, its Slack watches were never read for its
+  prompt, and unsubscribing an ended session un-paused it (all found
+  2026-11-18). On a session with no address it is a no-op. `status` lists a
+  muted session as `unsubscribed`.
 - **A hook from an ended session attaches it again.** Only a live session
   fires hooks, and the probe can be wrong: macOS refuses a connection to a
   listener whose backlog is full exactly as it does to a dead one, so a live
@@ -713,13 +718,12 @@ session posts. So a closed session kept paying for news nobody could hear.
   stale probe can't do it any more either: a tick detaches only the address it
   probed, not one a resumed session attached meanwhile (both 2026-11-18).
   The same goes for any session whose record holds no address — one forgotten
-  after a quiet week and met again, say — except one that ran `inkling
-  unsubscribe`: that choice holds until `subscribe`, or a `SessionStart`
-  whose `source` is `startup` or `resume`, attaches it
-  (`Subscriber::unsubscribed`). A compaction or `/clear` fires `SessionStart`
-  too, but it is the same session carrying on, and re-attaching there undid
-  the choice (found 2026-11-18). `SessionEnd` is not a choice; a session
-  still firing hooks after one was resumed.
+  after a quiet week and met again, say. Attaching leaves a mute alone; only
+  `subscribe`, or a `SessionStart` whose `source` is `startup` or `resume`,
+  undoes it. A compaction fires `SessionStart` too, but it is the same session
+  carrying on, and undoing the mute there was a bug (found 2026-11-18).
+  `/clear` needs no rule: Claude Code gives the cleared conversation a new
+  session id, so it is a new subscription.
 - **`cli` and readers that never attached are exempt.** Pausing is only safe
   when we *saw* the reader leave. The terminal has no session to end, and a
   session without the hooks gives no sign either way. Pausing their watches
@@ -1397,7 +1401,7 @@ so its is 250ms plus the process; so is `post-tool`'s, except after a push to
 a branch none of the session's watches knows, where it adds up to 10s of
 lookup and one more lock — off the session's clock, since that hook is async.
 
-**The prompt hook refreshes only when no server is serving** (decided
+**The prompt hook refreshes only when no server is ticking** (decided
 2026-11-18). Giving up at 3s abandons the refresh's thread, but not the
 `acli` children it started: their 5s timeout is enforced by a thread of the
 hook process, which has exited. Four at a time, a hung `acli` left four
@@ -1406,6 +1410,13 @@ process that lives to time them out, so the hook only reads beside one; with
 no server, the prompt is the only reader and keeps its refresh, orphans and
 all. Killing the children instead would mean threading a kill through every
 reader for a case a server already covers.
+
+"Ticking" is the lock held and a tick ended within two intervals
+(`serve::Status::ticking`), not the lock alone: a server winding down waits
+out a Slack read in flight, minutes at worst, holding the lock without
+ticking, and the prompt went quiet with it (found 2026-11-18). A healthy
+server reads a watch at its due time with no floor, before the prompt's 60s
+floor calls it due, so the check seldom fires while one is working.
 
 What that costs, plainly: a hook that gives up **skips a refresh, not a
 message**. The feed is complete either way — every transition is in the log for

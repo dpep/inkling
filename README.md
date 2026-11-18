@@ -48,7 +48,7 @@ instead.
 What each hook does:
 
 - `session-start` subscribes the session, so transitions are pushed into it.
-- `session-end` unsubscribes it.
+- `session-end` detaches it.
 - `prompt` prints anything the push didn't deliver. It is the safety net, not
   the main path.
 - `post-tool` watches whatever pull request or issue a command was about, and
@@ -251,7 +251,8 @@ inkling subscribe      # from inside a Claude Code session
 inkling unsubscribe
 ```
 
-The `session-start` and `session-end` hooks run these for you.
+The `session-start` hook subscribes for you, and `session-end` detaches the
+session when it ends.
 
 A subscribed session gets each transition pushed in as a line starting
 `inkling:`. Everything due at once arrives as one message, a line per change,
@@ -274,12 +275,15 @@ comment, or the Jira summary. That is prose somebody else wrote, and this lands 
 agent's turn.
 
 Push and pull share one cursor, so a transition arrives once either way.
-Subscribing attaches; it doesn't create. `unsubscribe` detaches the address
-and leaves your watches and your place alone, so `claude --resume` picks up
-the net change since you left rather than a replay or a silence. Running it
-yourself stops pushes until you `subscribe` or start or resume the session;
-a compaction or `/clear` doesn't undo it. Your watches keep being read, and
-`events` and the prompt hook still show what moved.
+Subscribing attaches; it doesn't create. Ending a session detaches it and
+leaves your watches and your place alone, so `claude --resume` picks up the
+net change since you left rather than a replay or a silence.
+
+`unsubscribe` mutes: nothing more is pushed, and everything else carries on.
+Your watches keep being read, Slack included, and the prompt hook and `events`
+still show what moved. It lasts until you `subscribe` or resume the session;
+a compaction doesn't undo it. `/clear` starts a new session, which subscribes
+as any new one does.
 
 While you're gone, watches only your ended sessions hold are paused: not
 read, and not keeping the server up. Their deadlines still run. Resuming makes
@@ -359,9 +363,9 @@ Something already merged, closed or Done is dropped at its first reading
 without a word.
 
 The prompt hook is cheap in the common case: a local file read, with no
-network unless the last reading is older than 60s and no server is running.
+network unless the last reading is older than 60s and no server is ticking.
 When it is, one process looks upstream and the rest read what it wrote. While
-a server runs, it keeps readings fresh and the prompt hook only reads.
+a server ticks, it keeps readings fresh and the prompt hook only reads.
 
 ## Status and logs
 
