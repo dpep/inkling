@@ -359,8 +359,9 @@ Something already merged, closed or Done is dropped at its first reading
 without a word.
 
 The prompt hook is cheap in the common case: a local file read, with no
-network unless the last reading is older than 60s. When it is, one process
-looks upstream and the rest read what it wrote.
+network unless the last reading is older than 60s and no server is running.
+When it is, one process looks upstream and the rest read what it wrote. While
+a server runs, it keeps readings fresh and the prompt hook only reads.
 
 ## Status and logs
 

@@ -1677,7 +1677,8 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             // The pull leg, and the reason push is allowed to be lossy: if a
             // message was held or refused, this is where it turns up.
             let refresh = TimeDelta::seconds(60);
-            if inkling::watch::due_without_bridge(&watches.read(), clock.now(), refresh) {
+            let serve = serve_config(config, common);
+            if refreshes_at_prompt(&serve, &watches.read(), clock.now(), refresh) {
                 refresh_within(REFRESH_BUDGET, config.clone(), watches.path(), refresh);
             }
             let due = watches
@@ -1691,6 +1692,20 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             Ok(())
         }
     }
+}
+
+/// Whether the prompt hook looks upstream itself: only when something is due
+/// and no server is serving. A server keeps readings fresh, and a refresh
+/// abandoned at its budget leaves its `acli` children running, since what
+/// times them out is a thread of this short-lived process.
+fn refreshes_at_prompt(
+    serve: &inkling::serve::Config,
+    watches: &inkling::adapters::watches_json::Watches,
+    now: DateTime<Utc>,
+    floor: TimeDelta,
+) -> bool {
+    inkling::watch::due_without_bridge(watches, now, floor)
+        && !inkling::serve::read_status(serve).running
 }
 
 /// Whether `SessionStart` attaches. An unsubscribed session stays so through
@@ -3030,6 +3045,29 @@ mod tests {
         assert!(
             super::attaches_at_start(&input, &watches),
             "any other session attaches"
+        );
+    }
+
+    #[test]
+    fn the_prompt_hook_leaves_refreshing_to_a_running_server() {
+        // Found by the hunt: a refresh abandoned at its budget left `acli`
+        // children running, four more on every prompt.
+        let dir = std::env::temp_dir().join(format!("inkling-prompt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let serve = inkling::serve::Config::in_dir(&dir);
+        let now = chrono::Utc::now();
+        let floor = chrono::TimeDelta::seconds(60);
+        let mut watches = Watches::default();
+        watches.watch(&pr(3), "s-1", now + chrono::TimeDelta::hours(1), now);
+
+        let server = inkling::adapters::lock::FileLock::try_acquire(&serve.lock)
+            .unwrap()
+            .unwrap();
+        assert!(!super::refreshes_at_prompt(&serve, &watches, now, floor));
+        drop(server);
+        assert!(
+            super::refreshes_at_prompt(&serve, &watches, now, floor),
+            "with no server, the prompt is all there is"
         );
     }
 

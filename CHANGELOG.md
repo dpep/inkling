@@ -7,6 +7,13 @@
   payload or a heredoc body. Now `gh pr …` and `acli jira workitem` must be run as a command, at the
   start of a shell segment.
 
+<!-- fix3-state -->
+- **A prompt no longer leaves `acli` processes behind.** A prompt hook that gave up refreshing
+  after 3s left the `acli` reads it had started running, past their own timeout. While a server is
+  running the prompt hook no longer looks upstream at all, since the server keeps readings fresh;
+  with no server it refreshes as before.
+<!-- /fix3-state -->
+
 <!-- fix2-github-jira -->
 - **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,
   so a pull request on an enterprise host was reported as the same number on github.com. List only

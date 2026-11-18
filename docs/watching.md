@@ -1367,6 +1367,16 @@ so its is 250ms plus the process; so is `post-tool`'s, except after a push to
 a branch none of the session's watches knows, where it adds up to 10s of
 lookup and one more lock — off the session's clock, since that hook is async.
 
+**The prompt hook refreshes only when no server is serving** (decided
+2026-11-18). Giving up at 3s abandons the refresh's thread, but not the
+`acli` children it started: their 5s timeout is enforced by a thread of the
+hook process, which has exited. Four at a time, a hung `acli` left four
+orphans per prompt, without limit. A running server keeps readings fresh in a
+process that lives to time them out, so the hook only reads beside one; with
+no server, the prompt is the only reader and keeps its refresh, orphans and
+all. Killing the children instead would mean threading a kill through every
+reader for a case a server already covers.
+
 What that costs, plainly: a hook that gives up **skips a refresh, not a
 message**. The feed is complete either way — every transition is in the log for
 72 hours addressed to its readers — so the next prompt, or the server's next
