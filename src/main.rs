@@ -589,44 +589,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
         Command::Status => {
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let now = Utc::now();
-            let window = inkling::domain::window::next_window(
-                &config.window,
-                snapshot.run.last_successful_discovery_at,
-                now,
-            );
-            let local = |t: DateTime<Utc>| {
-                t.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M %Z")
-                    .to_string()
-            };
-            println!(
-                "last run    {}",
-                match snapshot.run.last_run_outcome {
-                    Some(outcome) => format!("{outcome:?}").to_lowercase(),
-                    None => "never".into(),
-                }
-            );
-            println!(
-                "last search {}",
-                snapshot
-                    .run
-                    .last_successful_discovery_at
-                    .map_or("never".into(), local)
-            );
-
-            println!();
-            println!(
-                "next window {} .. {}",
-                local(window.start),
-                local(window.end)
-            );
-
-            println!();
-            let live = snapshot.tracked.values().filter(|t| !t.terminal).count();
-            println!("tracked     {}", snapshot.tracked.len());
-            println!("  live      {live}");
-            println!("  done      {}", snapshot.tracked.len() - live);
-
             let watched = watch_store(&cli.common).read();
             let live = watched
                 .watches
@@ -638,7 +600,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 .values()
                 .filter(|w| w.deadline > now && watched.paused(w))
                 .count();
-            println!();
             println!("watching    {live}");
             if paused > 0 {
                 println!("  paused    {paused} (every reader's session has ended)");
@@ -659,6 +620,13 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             println!();
             last_day_out(&log_directory(&cli.common), now);
+
+            // The parked Slack reactions (`run`): only for someone still
+            // running them, and after what everyone uses.
+            if snapshot.run.last_run_outcome.is_some() {
+                println!();
+                reactions_out(&snapshot, &config, now);
+            }
             Ok(0)
         }
         Command::Watch { targets, ttl, json } => {
@@ -823,20 +791,12 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let (owner, events) = match since {
                 Some(cursor) => {
                     let file = watches.read();
-                    if !file.knows(&cursor.owner) {
-                        return Err(format!(
-                            "{}: no such reader — its cursor was collected after \
-                             {} days of silence, so start again with --subscriber",
-                            cursor.owner,
-                            inkling::adapters::watches_json::SUBSCRIBER_RETENTION.num_days(),
-                        ));
-                    }
-                    let due =
-                        inkling::domain::watch::addressed(&file.events, cursor.seq, &cursor.owner)
-                            .into_iter()
-                            .cloned()
-                            .collect();
-                    (cursor.owner.clone(), due)
+                    let owner = reader_named(&file, &cursor.owner)?;
+                    let due = inkling::domain::watch::addressed(&file.events, cursor.seq, &owner)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    (owner, due)
                 }
                 None => {
                     let owner = reader(subscriber.as_deref(), TERMINAL, &watches.read());
@@ -1384,6 +1344,34 @@ fn session_id(explicit: Option<&str>) -> Result<String, String> {
 /// table needs. Never a token.
 fn short(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+/// The reader a cursor names: its whole id, or the start of one, which is
+/// what `inkling status` shows — so long as only one reader starts that way.
+fn reader_named(
+    watches: &inkling::adapters::watches_json::Watches,
+    name: &str,
+) -> Result<String, String> {
+    if watches.knows(name) {
+        return Ok(name.to_string());
+    }
+    let matching: Vec<&String> = watches
+        .subscribers
+        .keys()
+        .filter(|id| id.starts_with(name))
+        .collect();
+    match matching.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => Err(format!(
+            "{name}: no reader's id is or starts with that. One that never subscribed, \
+             or was silent for {} days, has no cursor; start again with --subscriber",
+            inkling::adapters::watches_json::SUBSCRIBER_RETENTION.num_days(),
+        )),
+        many => Err(format!(
+            "{name}: {} readers' ids start with that; give more of it",
+            many.len()
+        )),
+    }
 }
 
 /// Where the server keeps its lock and its status file.
@@ -2113,9 +2101,12 @@ fn slack_threads(
     ))
 }
 
-/// One line's worth of where a watched thing stands.
+/// One line's worth of where a watched thing stands, counted in the words a
+/// transition on it would use.
 fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
     use inkling::domain::watch::Standing;
+    use inkling::push::{COMMENT, MESSAGE, REACTION, REPLY, tally};
+    let counted = |count: u64, noun| tally(count, noun, false, &[], &[]);
     match standing {
         None => "unread".to_string(),
         Some(Standing::PullRequest {
@@ -2125,22 +2116,27 @@ fn standing(standing: Option<&inkling::domain::watch::Standing>) -> String {
         }) => {
             let mut said = vec![state.to_string()];
             said.extend(checks.map(|checks| format!("checks {checks}")));
-            said.extend(comments.as_ref().map(|c| match c.count {
-                1 => "1 comment".to_string(),
-                n => format!("{n} comments"),
-            }));
+            said.extend(comments.as_ref().map(|c| counted(c.count, COMMENT)));
             said.join(", ")
         }
         Some(Standing::Issue { status, .. }) => status.clone(),
         Some(Standing::Message { reactions, replies }) => {
-            let mut said = vec![format!("{} replies", replies.len())];
-            said.extend(reactions.iter().map(|(emoji, n)| format!(":{emoji}: {n}")));
+            let mut said = vec![counted(replies.len() as u64, REPLY)];
+            said.extend(reactions.iter().map(|(emoji, n)| {
+                tally(
+                    u64::from(*n),
+                    REACTION,
+                    false,
+                    &[],
+                    &[&format!(":{emoji}:")],
+                )
+            }));
             said.join(", ")
         }
-        Some(Standing::Channel { newest, .. }) => match newest {
-            Some(ts) => format!("newest message {ts}"),
-            None => "no messages".to_string(),
-        },
+        // Since the watch began: the running count, which no line says.
+        Some(Standing::Channel { count, .. }) => {
+            format!("{} since watched", counted(*count, MESSAGE))
+        }
     }
 }
 
@@ -2278,20 +2274,7 @@ fn events_out(
     if json || ndjson {
         let rows: Vec<_> = events
             .iter()
-            .map(|event| {
-                serde_json::json!({
-                    "seq": event.seq,
-                    "cursor": inkling::domain::watch::Cursor::new(owner, event.seq).to_string(),
-                    "at": event.at,
-                    "reference": event.reference.to_string(),
-                    "axis": event.axis.as_str(),
-                    "from": event.from,
-                    "to": event.to,
-                    "title": event.title,
-                    "detail": event.detail,
-                    "job": event.job,
-                })
-            })
+            .map(|event| event_json(owner, event))
             .collect();
         // Every row carries the cursor it leaves you at, so a self-managing
         // caller resumes from the last one it handled without building a
@@ -2309,21 +2292,56 @@ fn events_out(
         return Ok(());
     }
 
+    for line in event_lines(events, terminal_width()) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// One event for a machine: everything stored that says what it means, and
+/// the read that shows it, so a caller needn't rebuild either.
+fn event_json(owner: &str, event: &inkling::domain::watch::Event) -> serde_json::Value {
+    use inkling::domain::watch::Axis;
+    // Names on an accumulating axis, without the "by " older events carried.
+    let detail = match event.axis {
+        Axis::Comments | Axis::Replies | Axis::Messages if event.detail.is_some() => {
+            Some(inkling::push::names(event).join(", "))
+        }
+        _ => event.detail.clone(),
+    };
+    serde_json::json!({
+        "seq": event.seq,
+        "cursor": inkling::domain::watch::Cursor::new(owner, event.seq).to_string(),
+        "at": event.at,
+        "reference": event.reference.to_string(),
+        "axis": event.axis.as_str(),
+        "from": event.from,
+        "to": event.to,
+        "title": event.title,
+        "detail": detail,
+        "job": event.job,
+        "partial": event.partial,
+        "own": event.own,
+        "lookup": inkling::push::more(event),
+    })
+}
+
+/// The text table: what moved worded as a push words it, then the read that
+/// shows it where there is one, and otherwise the title.
+fn event_lines(events: &[inkling::domain::watch::Event], width: usize) -> Vec<String> {
     let rows: Vec<_> = events
         .iter()
-        .map(|event| match inkling::push::tallied(event) {
-            Some(tallied) => (
+        .map(|event| {
+            let tail = match inkling::push::more(event) {
+                Some(command) => format!("({command})"),
+                None => event.title.clone(),
+            };
+            (
                 event.reference.to_string(),
                 event.axis.to_string(),
-                tallied,
-                String::new(),
-            ),
-            None => (
-                event.reference.to_string(),
-                event.axis.to_string(),
-                format!("{} → {}", event.from, event.to),
-                event.detail.clone().unwrap_or_else(|| event.title.clone()),
-            ),
+                inkling::push::change(event),
+                tail,
+            )
         })
         .collect();
     let (name_width, axis_width) = widths(&rows);
@@ -2332,19 +2350,66 @@ fn events_out(
         .map(|row| row.2.chars().count())
         .max()
         .unwrap_or(0);
-    let budget = terminal_width()
+    let budget = width
         .saturating_sub(name_width + 2 + axis_width + 2 + move_width + 2)
         .max(24);
 
-    for (name, axis, moved, detail) in &rows {
-        // chars, not bytes: the arrow is three bytes wide and one column.
-        let pad = " ".repeat(move_width - moved.chars().count());
-        println!(
-            "{name:<name_width$}  {axis:<axis_width$}  {moved}{pad}  {}",
-            ellipsize(detail, budget)
-        );
-    }
-    Ok(())
+    rows.iter()
+        .zip(events)
+        .map(|((name, axis, moved, tail), event)| {
+            // chars, not bytes: the arrow is three bytes wide and one column.
+            let pad = " ".repeat(move_width - moved.chars().count());
+            // A command is never cut: half of one runs as something else.
+            let tail = match inkling::push::more(event) {
+                Some(_) => tail.clone(),
+                None => ellipsize(tail, budget),
+            };
+            format!("{name:<name_width$}  {axis:<axis_width$}  {moved}{pad}  {tail}")
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Where `run`, the parked Slack reactions, has got to.
+fn reactions_out(
+    snapshot: &inkling::adapters::store_json::Snapshot,
+    config: &Config,
+    now: DateTime<Utc>,
+) {
+    let window = inkling::domain::window::next_window(
+        &config.window,
+        snapshot.run.last_successful_discovery_at,
+        now,
+    );
+    let local = |t: DateTime<Utc>| {
+        t.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M %Z")
+            .to_string()
+    };
+    println!(
+        "last run    {}",
+        match snapshot.run.last_run_outcome {
+            Some(outcome) => format!("{outcome:?}").to_lowercase(),
+            None => "never".into(),
+        }
+    );
+    println!(
+        "last search {}",
+        snapshot
+            .run
+            .last_successful_discovery_at
+            .map_or("never".into(), local)
+    );
+    println!(
+        "next window {} .. {}",
+        local(window.start),
+        local(window.end)
+    );
+    let live = snapshot.tracked.values().filter(|t| !t.terminal).count();
+    println!("tracked     {}", snapshot.tracked.len());
+    println!("  live      {live}");
+    println!("  done      {}", snapshot.tracked.len() - live);
 }
 
 /// What the resident server is doing, if anything.
@@ -2401,6 +2466,29 @@ fn per_transition(reads: usize, transitions: usize) -> String {
     }
 }
 
+/// Every provider's reads, and the money Slack's cost, since a Slack read is
+/// the only one that costs any.
+fn upstream(tally: &obs::Tally) -> String {
+    let slack = match tally.slack_usd > 0.0 {
+        // Cents: the bridge reports more digits than a day's sum deserves.
+        true => format!(
+            "{} slack reads (${:.2})",
+            tally.slack_reads, tally.slack_usd
+        ),
+        false => format!("{} slack reads", tally.slack_reads),
+    };
+    format!(
+        "{} pull request reads in {} github queries, {} jira reads, {slack}{}",
+        tally.pull_requests_read,
+        tally.github_queries,
+        tally.issues_read,
+        per_transition(
+            tally.pull_requests_read + tally.issues_read + tally.slack_reads,
+            tally.transitions
+        )
+    )
+}
+
 fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
     let from = (now - TimeDelta::hours(24))
         .format("%Y-%m-%dT%H:%M:%S")
@@ -2417,16 +2505,7 @@ fn last_day_out(directory: &std::path::Path, now: DateTime<Utc>) {
         "  delivered {} pushed, {} withheld, {} pulled",
         tally.pushed, tally.withheld, tally.pulls
     );
-    println!(
-        "  upstream  {} pull request reads in {} github queries, {} jira reads{}",
-        tally.pull_requests_read,
-        tally.github_queries,
-        tally.issues_read,
-        per_transition(
-            tally.pull_requests_read + tally.issues_read,
-            tally.transitions
-        )
-    );
+    println!("  upstream  {}", upstream(&tally));
     println!(
         "  trouble   {} hook failures, {} references unread, {} errors",
         tally.hook_failures, tally.unread, tally.errors
@@ -2693,6 +2772,140 @@ mod tests {
     #[test]
     fn the_starter_config_is_a_config_inkling_accepts() {
         inkling::config::Config::parse(super::STARTER_CONFIG, "config.toml").unwrap();
+    }
+
+    fn event(
+        reference: inkling::domain::model::Reference,
+        axis: inkling::domain::watch::Axis,
+        from: &str,
+        to: &str,
+        detail: &str,
+    ) -> inkling::domain::watch::Event {
+        inkling::domain::watch::Event {
+            seq: 1,
+            at: "2026-11-17T12:00:00Z".parse().unwrap(),
+            reference,
+            axis,
+            from: from.into(),
+            to: to.into(),
+            title: "Fix the thing".into(),
+            detail: Some(detail.to_string()).filter(|d| !d.is_empty()),
+            job: None,
+            own: false,
+            partial: false,
+            lines: 0,
+            after: None,
+            audience: Default::default(),
+        }
+    }
+
+    fn pr42() -> inkling::domain::model::Reference {
+        inkling::domain::model::Reference::GitHubPullRequest {
+            host: "github.com".into(),
+            owner: "dpep".into(),
+            repo: "inkling".into(),
+            number: 42,
+        }
+    }
+
+    #[test]
+    fn events_text_says_what_a_push_says_and_the_read_that_shows_it() {
+        use inkling::domain::watch::Axis;
+        let events = [
+            inkling::domain::watch::Event {
+                partial: true,
+                ..event(pr42(), Axis::Comments, "1", "41", "@bob")
+            },
+            event(pr42(), Axis::State, "open", "merged", "by @alice"),
+        ];
+        let lines = super::event_lines(&events, 200);
+        assert_eq!(
+            lines,
+            [
+                "github.com/dpep/inkling#42  comments  at least 40 comments from @bob  \
+                 (gh pr view 42 --repo github.com/dpep/inkling --comments)",
+                "github.com/dpep/inkling#42  state     open → merged by @alice         \
+                 Fix the thing",
+            ]
+        );
+        let untitled = inkling::domain::watch::Event {
+            title: String::new(),
+            ..events[1].clone()
+        };
+        assert!(
+            super::event_lines(&[untitled], 200)
+                .iter()
+                .all(|line| !line.ends_with(' ')),
+            "no padding after the last column"
+        );
+    }
+
+    #[test]
+    fn events_json_carries_what_the_text_does() {
+        use inkling::domain::watch::Axis;
+        let floor = inkling::domain::watch::Event {
+            partial: true,
+            own: true,
+            ..event(pr42(), Axis::Replies, "1", "3", "by @alice, @bob")
+        };
+        let row = super::event_json("s", &floor);
+        assert_eq!(row["partial"], true, "a floor, not an exact count");
+        assert_eq!(row["own"], true);
+        assert_eq!(row["detail"], "@alice, @bob", "the old prefix is gone");
+        let state = super::event_json("s", &event(pr42(), Axis::State, "open", "merged", "by @x"));
+        assert_eq!(state["detail"], "by @x", "a state's detail is its own");
+        assert_eq!(state["lookup"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_standing_counts_in_the_words_a_line_would_use() {
+        let message = Standing::Message {
+            reactions: [("dart".to_string(), 1)].into(),
+            replies: [("1.000001".to_string(), "U1".to_string())].into(),
+        };
+        assert_eq!(
+            super::standing(Some(&message)),
+            "1 reply, 1 reaction :dart:"
+        );
+        let channel = Standing::Channel {
+            count: 3,
+            newest: Some("1786596050.245879".into()),
+            arrived: Default::default(),
+            more: false,
+        };
+        assert_eq!(super::standing(Some(&channel)), "3 messages since watched");
+    }
+
+    #[test]
+    fn a_cursor_may_name_its_reader_as_status_shows_it() {
+        let mut watches = Watches::default();
+        let now = "2026-11-17T12:00:00Z".parse().unwrap();
+        watches.take("4f2a91c0-aaaa", now);
+        watches.take("4f2a91c0-bbbb", now);
+        watches.take("9e1d0000-cccc", now);
+        assert_eq!(
+            super::reader_named(&watches, "9e1d0000"),
+            Ok("9e1d0000-cccc".into())
+        );
+        let ambiguous = super::reader_named(&watches, "4f2a91c0").unwrap_err();
+        assert!(ambiguous.contains("2 readers"), "{ambiguous}");
+        let unknown = super::reader_named(&watches, "deadbeef").unwrap_err();
+        assert!(!unknown.contains("was collected after"), "{unknown}");
+    }
+
+    #[test]
+    fn upstream_counts_slack_reads_and_what_they_cost() {
+        let tally = inkling::obs::Tally {
+            pull_requests_read: 4,
+            github_queries: 2,
+            slack_reads: 3,
+            slack_usd: 0.0234,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::upstream(&tally),
+            "4 pull request reads in 2 github queries, 0 jira reads, 3 slack reads ($0.02)"
+        );
     }
 
     #[test]

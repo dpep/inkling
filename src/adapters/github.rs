@@ -200,7 +200,7 @@ const PAGE: usize = 30;
 fn build_query(references: &[Reference]) -> String {
     // Who the reader is rides along: one field, in a request being made
     // anyway, so there is nothing to cache and nothing to go stale.
-    let mut query = String::from("query { viewer { login }");
+    let mut query = String::from("query { viewer { __typename login }");
     for (i, reference) in references.iter().enumerate() {
         // The alias carries the index, so skipping one can't shift the rest.
         let Reference::GitHubPullRequest {
@@ -284,11 +284,7 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
 
     // Spelled as a pull request's actors are, so a comment can be told apart
     // as the reader's own.
-    let me = response
-        .data
-        .viewer
-        .as_ref()
-        .map(|viewer| format!("@{}", viewer.login));
+    let me = response.data.viewer.as_ref().map(Viewer::display);
 
     references
         .iter()
@@ -351,7 +347,25 @@ impl Data {
 
 #[derive(Debug, Deserialize)]
 struct Viewer {
+    #[serde(default, rename = "__typename")]
+    kind: String,
     login: String,
+}
+
+impl Viewer {
+    /// Spelled as an author is. A Bot viewer's login is `name[bot]`, where
+    /// the same account as an author is `name`.
+    fn display(&self) -> String {
+        let (login, kind) = match self.login.strip_suffix("[bot]") {
+            Some(login) => (login, "Bot"),
+            None => (self.login.as_str(), self.kind.as_str()),
+        };
+        Reviewer {
+            kind: kind.to_string(),
+            login: login.to_string(),
+        }
+        .display()
+    }
 }
 
 impl Response {
@@ -882,33 +896,35 @@ impl PullRequest {
                         .author
                         .as_ref()
                         .map_or(GHOST.into(), Reviewer::display),
-                    weight: 1,
+                    lines: 0,
+                    body: true,
                     approval: false,
                 }
             }));
         }
         if let Some(reviews) = &self.reviews {
             horizons.extend(reviews.horizon(|r| r.submitted_at));
+            said.floor = reviews.total_count > reviews.nodes.len() as u64;
             for review in &reviews.nodes {
                 let Some(at) = review.submitted_at else {
                     continue;
                 };
-                let lines = review.comments.as_ref().map_or(0, |c| c.total_count);
-                let weight = lines + u64::from(review.body);
-                if weight == 0 {
-                    continue;
-                }
-                said.total += weight;
-                said.remarks.push(Remark {
+                let remark = Remark {
                     id: review.id.clone(),
                     at,
                     by: review
                         .author
                         .as_ref()
                         .map_or(GHOST.into(), Reviewer::display),
-                    weight,
+                    lines: review.comments.as_ref().map_or(0, |c| c.total_count),
+                    body: review.body,
                     approval: review.state == "APPROVED",
-                });
+                };
+                if remark.weight() == 0 {
+                    continue;
+                }
+                said.total += remark.weight();
+                said.remarks.push(remark);
             }
         }
         said.complete_after = horizons.into_iter().max();
@@ -1797,6 +1813,7 @@ mod tests {
         );
         assert_eq!(said.total, 8, "five comments and copilot's three reviews");
         assert_eq!(said.complete_after, None, "both pages held everything");
+        assert!(!said.floor);
         let who: Vec<&str> = said.remarks.iter().map(|r| r.by.as_str()).collect();
         assert_eq!(
             who,
@@ -1825,19 +1842,29 @@ mod tests {
         let (said, _) = discussion(CARE_FE);
         let weights: Vec<(&str, u64, bool)> = said.remarks[11..]
             .iter()
-            .map(|r| (r.by.as_str(), r.weight, r.approval))
+            .map(|r| (r.by.as_str(), r.lines, r.body))
             .collect();
         assert_eq!(
             weights,
             [
                 ("github-actions (bot)", 50, false),
-                ("copilot-pull-request-reviewer (bot)", 2, false),
-                ("copilot-pull-request-reviewer (bot)", 3, false),
-                ("copilot-pull-request-reviewer (bot)", 1, false),
-                ("@yash-learner", 4, false),
+                ("copilot-pull-request-reviewer (bot)", 1, true),
+                ("copilot-pull-request-reviewer (bot)", 2, true),
+                ("copilot-pull-request-reviewer (bot)", 0, true),
+                ("@yash-learner", 3, true),
             ]
         );
+        assert!(said.remarks[..11].iter().all(|r| r.lines == 0 && r.body));
         assert_eq!(said.total, 11 + 50 + 2 + 3 + 1 + 4);
+        assert!(said.floor, "125 reviews, and only a page of them summed");
+    }
+
+    #[test]
+    fn a_bot_token_knows_its_own_comments() {
+        // A Bot viewer's login carries `[bot]`; as an author it doesn't.
+        let json = r#"{"data":{"viewer":{"__typename":"Bot","login":"inkling-app[bot]"},
+            "r0":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":null}}}}"#;
+        assert_eq!(discussion(json).1.as_deref(), Some("inkling-app (bot)"));
     }
 
     #[test]
@@ -1853,7 +1880,11 @@ mod tests {
     #[test]
     fn the_query_asks_for_the_latest_comments_and_who_is_asking() {
         let query = build_query(&[pr("a", 1), pr("b", 2)]);
-        assert_eq!(query.matches("viewer { login }").count(), 1, "{query}");
+        assert_eq!(
+            query.matches("viewer { __typename login }").count(),
+            1,
+            "{query}"
+        );
         assert!(query.contains("comments(last: 30) { totalCount"), "{query}");
         assert!(
             query.contains("reviews(last: 30) { totalCount nodes { id state submittedAt body"),

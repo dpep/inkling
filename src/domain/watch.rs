@@ -236,11 +236,21 @@ pub struct Remark {
     pub at: DateTime<Utc>,
     /// `@login`, or `login (bot)`.
     pub by: String,
-    /// How many comments it is: one for a conversation comment; for a review,
-    /// its line comments, and one more if it has a body.
-    pub weight: u64,
-    /// An approval, which the state axis may already have said.
+    /// A review's line comments, published with it. Kept apart because
+    /// `gh pr view --comments` doesn't show them.
+    pub lines: u64,
+    /// Whether it says something beyond its line comments: a conversation
+    /// comment always does, a review when it has a body.
+    pub body: bool,
+    /// An approval, whose body the state axis may already have said.
     pub approval: bool,
+}
+
+impl Remark {
+    /// How many comments it is.
+    pub fn weight(&self) -> u64 {
+        self.lines + u64::from(self.body)
+    }
 }
 
 /// What one reading saw of a pull request's conversation.
@@ -254,6 +264,9 @@ pub struct Discussion {
     /// Every remark made at or after this is in `remarks`. `None` when all of
     /// them are; otherwise a burst bigger than a page may reach past it.
     pub complete_after: Option<DateTime<Utc>>,
+    /// `total` leaves out reviews beyond the page, so it is a floor. Without
+    /// that, a burst past the page still has an exact count.
+    pub floor: bool,
 }
 
 /// One reading of one reference, as a poll hands it over.
@@ -307,7 +320,9 @@ impl Actors {
     fn of(&self, was: State, now: State) -> Option<String> {
         let who = match now {
             State::Merged => self.merged.clone()?,
-            State::Approved if !self.approved.is_empty() => self.approved.join(" / "),
+            State::Approved if !self.approved.is_empty() => {
+                listed(&self.approved.iter().map(String::as_str).collect::<Vec<_>>())
+            }
             State::Draft => self.draft.clone()?,
             State::Open if was == State::Draft => self.draft.clone()?,
             _ => return None,
@@ -329,6 +344,41 @@ impl Actors {
     }
 }
 
+/// How many people a list names; past that it counts them.
+const NAMED: usize = 3;
+
+/// The one wording for a list of who: `@a`, `@a and b (bot)`, `@a, @b and
+/// @c`, and past three a count, `5 people and 2 bots`, since a bot isn't a
+/// person and the split is what a reader weighs.
+pub fn listed(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] if names.len() <= NAMED => format!("{} and {last}", rest.join(", ")),
+        _ => {
+            let bots = names.iter().filter(|n| n.ends_with(" (bot)")).count();
+            let people = names.len() - bots;
+            let counted = |n: usize, one: &str, many: &str| match n {
+                1 => format!("1 {one}"),
+                n => format!("{n} {many}"),
+            };
+            match (people, bots) {
+                (_, 0) => counted(people, "person", "people"),
+                (0, _) => counted(bots, "bot", "bots"),
+                _ => format!(
+                    "{} and {}",
+                    counted(people, "person", "people"),
+                    counted(bots, "bot", "bots")
+                ),
+            }
+        }
+    }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 /// A change worth telling somebody about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transition {
@@ -344,6 +394,12 @@ pub struct Transition {
     /// A count whose page didn't reach back to the last reading: at least
     /// this many, maybe more.
     pub partial: bool,
+    /// How many of the new comments are line comments, which need a
+    /// different command to read than the rest.
+    pub lines: u64,
+    /// The Slack ts the news came after: a channel read from it shows what
+    /// arrived.
+    pub after: Option<String>,
 }
 
 /// A transition, once it has a place in the sequence.
@@ -367,6 +423,10 @@ pub struct Event {
     pub own: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lines: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
     /// Who was watching this reference when it moved.
     ///
     /// Snapshotted rather than looked up later: a finished watch is removed,
@@ -466,6 +526,8 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                     job: None,
                     own: false,
                     partial: false,
+                    lines: 0,
+                    after: None,
                 });
             }
             if had != has {
@@ -477,6 +539,8 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                     job: after.failing.as_ref().and_then(|f| f.job),
                     own: false,
                     partial: false,
+                    lines: 0,
+                    after: None,
                 });
             }
             moved
@@ -492,6 +556,8 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                 job: None,
                 own: false,
                 partial: false,
+                lines: 0,
+                after: None,
             }]
         }
         (
@@ -534,39 +600,50 @@ fn commented(
     mark.advance(new.iter().copied());
     mark.count = mark
         .count
-        .saturating_add(new.iter().map(|r| r.weight).sum())
+        .saturating_add(new.iter().map(|r| r.weight()).sum())
         .max(said.total);
 
-    let told: Vec<&Remark> = new
-        .into_iter()
-        .filter(|remark| !(approved && remark.approval))
-        .collect();
-    if told.is_empty() {
-        return (Some(mark), None);
-    }
+    // What the state axis said is still counted, so it starts the line's
+    // count rather than being part of it.
+    let (mut unsaid, mut lines) = (0, 0);
     let mut names: Vec<&str> = Vec::new();
-    for remark in &told {
+    for remark in &new {
+        let told = match approved && remark.approval {
+            true => remark.lines,
+            false => remark.weight(),
+        };
+        unsaid += remark.weight() - told;
+        if told == 0 {
+            continue;
+        }
+        lines += remark.lines;
         if !names.contains(&remark.by.as_str()) {
             names.push(&remark.by);
         }
+    }
+    if names.is_empty() {
+        return (Some(mark), None);
     }
     let own = by
         .me
         .as_deref()
         .is_some_and(|me| names.iter().all(|name| *name == me));
     // The oldest of a full page is itself new, so the burst may reach further
-    // back than the page did.
-    let partial = said
-        .complete_after
-        .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
+    // back than the page did — which only GitHub's totals can make up for.
+    let partial = said.floor
+        && said
+            .complete_after
+            .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
     let moved = Transition {
         axis: Axis::Comments,
-        from: had.count.to_string(),
+        from: (had.count + unsaid).to_string(),
         to: mark.count.to_string(),
         detail: Some(names.join(", ")),
         job: None,
         own,
         partial,
+        lines,
+        after: None,
     };
     (Some(mark), Some(moved))
 }
@@ -599,6 +676,8 @@ fn conversation(
             job: None,
             own: by.only_me(&new),
             partial: false,
+            lines: 0,
+            after: None,
         });
     }
     let emoji: BTreeSet<&String> = had.keys().chain(has.keys()).collect();
@@ -616,6 +695,8 @@ fn conversation(
                 job: None,
                 own: false,
                 partial: false,
+                lines: 0,
+                after: None,
             });
         }
     }
@@ -655,6 +736,8 @@ fn arrivals(
         job: None,
         own: by.only_me(&authors.into_iter().collect()),
         partial: more,
+        lines: 0,
+        after: was.map(String::from),
     };
     (total, Some(moved))
 }
@@ -792,7 +875,7 @@ mod tests {
         let of = |was, now| by.of(was, now);
         assert_eq!(
             of(State::Draft, State::Approved),
-            Some("by @alice / buildsworth (bot)".into()),
+            Some("by @alice and buildsworth (bot)".into()),
             "who approved, not who readied it on the way"
         );
         assert_eq!(of(State::Draft, State::Merged), Some("by @carol".into()));
@@ -1090,6 +1173,11 @@ mod tests {
         assert_eq!(labels(&read.moved), [("messages", "4", "7")]);
         assert_eq!(read.moved[0].detail.as_deref(), Some("@alice, @bob"));
         assert!(!read.moved[0].own && !read.moved[0].partial);
+        assert_eq!(
+            read.moved[0].after.as_deref(),
+            Some("1.000001"),
+            "where a read that shows them starts"
+        );
         assert!(
             matches!(read.standing, Standing::Channel { count: 7, .. }),
             "the running count is kept: {:?}",
@@ -1219,7 +1307,8 @@ mod tests {
             id: id.into(),
             at: format!("2026-11-17T{at}Z").parse().unwrap(),
             by: by.into(),
-            weight: 1,
+            lines: 0,
+            body: true,
             approval: false,
         }
     }
@@ -1230,7 +1319,7 @@ mod tests {
             discussion: Some(Discussion {
                 remarks: remarks.to_vec(),
                 total,
-                complete_after: None,
+                ..Discussion::default()
             }),
             by: Actors {
                 me: Some("@dpep".into()),
@@ -1361,6 +1450,8 @@ mod tests {
                 remarks: page.clone(),
                 total: 41,
                 complete_after: Some(page[0].at),
+                // More reviews than a page: what wasn't read wasn't summed.
+                floor: true,
             }),
             ..commenting(State::Open, &[], 0)
         };
@@ -1370,6 +1461,100 @@ mod tests {
         assert!(
             moved[0].partial,
             "the page didn't reach back to the last one counted"
+        );
+    }
+
+    fn approving(lines: u64) -> Remark {
+        Remark {
+            approval: true,
+            lines,
+            ..remark("r", "10:00:00", "@alice")
+        }
+    }
+
+    #[test]
+    fn an_approval_beside_another_comment_counts_only_what_is_told() {
+        // @alice approves with three line comments; @bob comments once.
+        let base = reading(None, &commenting(State::Open, &[], 0)).standing;
+        let both = [approving(3), remark("b", "10:01:00", "@bob")];
+        let moved = changed(Some(&base), &commenting(State::Approved, &both, 5));
+        assert_eq!(
+            labels(&moved),
+            [("state", "open", "approved"), ("comments", "1", "5")],
+            "the approval's body is the state change; four comments are left"
+        );
+        assert_eq!(moved[1].detail.as_deref(), Some("@alice, @bob"));
+        assert_eq!(moved[1].lines, 3, "which command shows them depends on it");
+    }
+
+    #[test]
+    fn line_comments_left_with_an_approval_get_a_line() {
+        let base = reading(None, &commenting(State::Open, &[], 0)).standing;
+        let moved = changed(
+            Some(&base),
+            &commenting(State::Approved, &[approving(3)], 4),
+        );
+        assert_eq!(
+            labels(&moved),
+            [("state", "open", "approved"), ("comments", "1", "4")]
+        );
+        assert_eq!(moved[1].lines, 3);
+    }
+
+    #[test]
+    fn a_burst_past_the_page_is_exact_when_github_counted_all_of_it() {
+        // Conversation comments past the page: totalCount says how many, so
+        // only the names are the page's.
+        let base = reading(
+            None,
+            &commenting(State::Open, &[remark("a", "10:00:00", "@alice")], 1),
+        )
+        .standing;
+        let page: Vec<Remark> = (1..=3)
+            .map(|i| remark(&format!("n{i}"), &format!("11:0{i}:00"), "@bob"))
+            .collect();
+        let burst = Sighting {
+            discussion: Some(Discussion {
+                remarks: page.clone(),
+                total: 31,
+                complete_after: Some(page[0].at),
+                floor: false,
+            }),
+            ..commenting(State::Open, &[], 0)
+        };
+        let moved = changed(Some(&base), &burst);
+        assert_eq!(labels(&moved), [("comments", "1", "31")]);
+        assert!(!moved[0].partial, "the count is GitHub's, not a floor");
+    }
+
+    #[test]
+    fn approvers_are_listed_like_any_other_names() {
+        let by = |approved: &[&str]| Actors {
+            approved: approved.iter().map(|a| a.to_string()).collect(),
+            ..Actors::default()
+        };
+        assert_eq!(
+            by(&["@alice", "review-bot (bot)"]).of(State::Open, State::Approved),
+            Some("by @alice and review-bot (bot)".into())
+        );
+        assert_eq!(
+            by(&["@a", "@b", "@c", "x (bot)"]).of(State::Open, State::Approved),
+            Some("by 3 people and 1 bot".into())
+        );
+    }
+
+    #[test]
+    fn past_three_names_people_and_bots_are_counted_apart() {
+        assert_eq!(listed(&["@a"]), "@a");
+        assert_eq!(listed(&["@a", "b (bot)", "@c"]), "@a, b (bot) and @c");
+        assert_eq!(
+            listed(&["a (bot)", "b (bot)", "c (bot)", "@d"]),
+            "1 person and 3 bots"
+        );
+        assert_eq!(listed(&["@a", "@b", "@c", "@d", "@e"]), "5 people");
+        assert_eq!(
+            listed(&["a (bot)", "b (bot)", "c (bot)", "d (bot)"]),
+            "4 bots"
         );
     }
 
@@ -1402,6 +1587,8 @@ mod tests {
                 job: None,
                 own: false,
                 partial: false,
+                lines: 0,
+                after: None,
                 audience: BTreeSet::new(),
             })
             .collect()

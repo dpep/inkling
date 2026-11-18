@@ -108,20 +108,21 @@ inkling events                      # what's moved, and nothing when nothing has
 
 One line per transition: from what, to what, and who caused it or which check
 went red. What only accumulates — comments, replies, reactions, a channel's
-messages — says how many
-and from whom instead:
+messages — says how many and from whom instead. Each line is worded as its
+push is, and ends in the read that shows what it announced, or else the title:
 
 ```
-github.com/dpep/inkling#3  checks    pending → failure  test / build
-github.com/dpep/inkling#3  comments  2 comments from @alice and coderabbitai (bot)
-github.com/dpep/inkling#3  state     open → merged      by @dpep
-AI-123                     status    To Do → In Progress
-slack:C0123ABCD/1786596050.245879  replies    2 replies from @alice and @bob
-slack:C0123ABCD/1786596050.245879  reactions  1 reaction :white_check_mark:
-slack:#incidents                   messages   3 messages from @john and @jane
+github.com/dpep/inkling#3  checks    pending → failure: test / build  (gh pr checks 3 --repo github.com/dpep/inkling)
+github.com/dpep/inkling#3  comments  2 comments from @alice and coderabbitai (bot)  (gh pr view 3 --repo github.com/dpep/inkling --comments)
+github.com/dpep/inkling#3  state     open → merged by @dpep  Fix the thing
+AI-123                     status    To Do → In Progress  Ship the widget
+slack:C0123ABCD/1786596050.245879  replies    2 replies from @alice and @bob  (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879)
+slack:#incidents                   messages   3 messages from @john and @jane  (slack_read_channel channel_id=C0E48AHSN oldest=1794976101.418449)
 ```
 
-Up to three people are named; past that, `12 comments from 7 people`.
+Up to three people are named; past that they are counted, bots apart:
+`12 comments from 5 people and 2 bots`. `inkling watch` counts in the same
+words: `open, checks success, 3 comments`, `1 reply, 2 reactions :dart:`.
 
 An event is a transition, never a snapshot. A watch's first reading sets a
 baseline and reports nothing: you just asked about it, so where it sits is not
@@ -166,6 +167,10 @@ A Slack message is its permalink (Slack's *Copy link*), always in full:
 `slack:<channel>/<ts>`, which `unwatch` also takes and Slack's own tools read.
 
 It reports new replies and who wrote them, and each emoji whose count changes.
+Each line ends in the Slack MCP call that shows it, written
+`(tool key=value …)`: a reaction in `slack_read_thread` on the message, a
+reply in that and `slack_read_channel` from the message's ts, since a reply
+can be in either.
 A reply is a message in its thread — after it, if it is itself a reply — or a
 later message in the same conversation: any at all in a DM, where the next
 message is the answer, and one that @mentions you in a channel. Never what
@@ -190,7 +195,9 @@ first time and is remembered; the watch is then `slack:#incidents`, which
 `unwatch` takes back.
 
 The news is who posted and how many — `slack:#incidents | 3 messages from
-@john and @jane`, or `12 messages from 7 people` — never what they wrote. A
+@john and @jane (slack_read_channel channel_id=C0E48AHSN oldest=…)`, or `12
+messages from 7 people` — never what they wrote. The read names the channel
+by id, from the newest message seen before, so it shows exactly the round. A
 round where only you posted is in `events` but isn't pushed. Replies inside a
 thread don't count: watch that message for them. A stretch busier than one
 page (100 messages) says `at least 100`.
@@ -217,8 +224,8 @@ somebody else's:
 ```sh
 inkling events                          # what's new for me
 inkling events --subscriber abc-123     # ...for that session; Inkling keeps the place
-inkling events --since abc-123:12       # ...from a place you kept
-inkling events --json                   # every row carries the cursor it leaves you at
+inkling events --since abc-123:12       # ...from a place you kept; the id as `status` shows it will do
+inkling events --json                   # every row carries the cursor it leaves you at, and `lookup`
 inkling events --ndjson                 # one object per line
 ```
 
@@ -247,8 +254,10 @@ A red Actions job ends in the command for its log, which GitHub serves as soon
 as that job ends (`gh run view --log-failed` waits for the whole run). A check
 from any other app ends in `gh pr checks` instead. New comments end in
 `gh pr view <n> --repo <host>/<owner>/<repo> --comments`, which shows
-conversation comments and review bodies but not line comments; those are in
-`gh api repos/<owner>/<repo>/pulls/<n>/comments`.
+conversation comments and review bodies but not line comments. When some are
+line comments, the line names `gh api --hostname <host> --paginate
+repos/<owner>/<repo>/pulls/<n>/comments` too (oldest first), or only that when
+all of them are. Slack lines end in the MCP call that shows them.
 
 The line is built only from what Inkling decided: the reference, what moved,
 who caused it, and which check went red. Never the pull request's title, a
@@ -280,7 +289,7 @@ is moving, hourly once it has sat still for a day. It goes back to every
 minute the moment a session touches it again (`gh pr …`, a `git push` to its
 branch). A Slack message is never read more often than every 5 minutes. The server sleeps until the next watch is due, and registering one
 wakes it. `inkling status` counts upstream reads beside the transitions they
-caught.
+caught, Slack's with what they cost.
 
 Two caveats:
 

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Every line that counts something ends in the read that shows it.** Slack lines end in the MCP
+  call to make, with the channel's id even when the line says `#name`:
+  `slack:#incidents | 3 messages from @john and @jane (slack_read_channel channel_id=C0E48AHSN
+  oldest=1794976101.418449)`. Pull request comments that include line comments name
+  `gh api --hostname <host> --paginate repos/<o>/<r>/pulls/<n>/comments`, which `gh pr view
+  --comments` doesn't cover. `inkling events --json` carries the same as `lookup`, plus `partial`
+  and `own`.
+- **`inkling events` and `inkling watch` word things as the push does.** `events` text reads
+  `open → merged by @x`, `at least 40 comments from @bob`, then the read or the title; `watch`
+  says `1 reply, 2 reactions :dart:` and a channel's `12 messages since watched`. Past three
+  names, bots are counted apart from people: `from 5 people and 2 bots`.
+- **`inkling status` leads with watches, the server and who is subscribed**, and counts Slack
+  reads in `upstream`. The parked reactions' `last run` lines appear only if `run` has ever run,
+  last.
+- **`inkling events --since <id>:<n>` takes the id as `status` shows it**, the first eight
+  characters, when only one reader starts that way. An unknown id no longer claims its cursor was
+  collected.
+
 - **An ended session's watches are paused until it comes back.** Once every session watching
   something has ended, Inkling stops reading it, so a session you closed stops paying for Slack
   reads (about 2¢ each). `claude --resume` makes those watches due at once, and the first reading
@@ -45,7 +63,7 @@
   the event feed for agents now; the reactions are parked (docs/deferred.md). Nothing changes for
   anyone still running `run` or `slackmcp`.
 - **A state change says who made it**: `github.com/you/repo#26 | state draft → merged by @you`,
-  `open → approved by @alice / review-bot (bot)`. It names whoever caused the state it ended in —
+  `open → approved by @alice and review-bot (bot)`. It names whoever caused the state it ended in —
   a collapsed `draft → merged` names the merger, not who marked it ready on the way. A pull
   request reads `approved` only once GitHub's review requirement is met, so a bot named alone
   there is a bot that satisfied it.

@@ -258,7 +258,7 @@ pub fn since(directory: &Path, from: &str) -> Vec<String> {
 /// the daily file is the only place those meet. Counted by the message each
 /// line carries, so renaming a message means updating a marker here; the tests
 /// pin the pairs against real lines.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Tally {
     pub subscribed: usize,
     pub watches: usize,
@@ -273,6 +273,11 @@ pub struct Tally {
     pub github_queries: usize,
     pub pull_requests_read: usize,
     pub issues_read: usize,
+    /// One bridge call apiece.
+    pub slack_reads: usize,
+    /// What those calls cost, from `total_cost_usd=` on the bridge's own log
+    /// line. Zero until a build logs it.
+    pub slack_usd: f64,
 }
 
 /// The number after ` name=` on a line, or 0.
@@ -311,6 +316,11 @@ impl Tally {
                 tally.github_queries += usize::from(pulls > 0);
                 tally.pull_requests_read += pulls;
                 tally.issues_read += count(line, "jira");
+                tally.slack_reads += count(line, "slack");
+            }
+            if let Some((_, rest)) = line.split_once(" total_cost_usd=") {
+                let usd = rest.split(' ').next().unwrap_or_default();
+                tally.slack_usd += usd.parse::<f64>().unwrap_or(0.0);
             }
         }
         tally
@@ -500,7 +510,27 @@ mod tests {
                 github_queries: 1,
                 pull_requests_read: 2,
                 issues_read: 2,
+                slack_reads: 0,
+                slack_usd: 0.0,
             }
+        );
+    }
+
+    #[test]
+    fn slack_reads_and_what_they_cost_are_counted() {
+        // The cost line's shape is the bridge's to choose; only the field is
+        // relied on.
+        let lines = [
+            "2026-11-17T00:38:03.000Z  INFO inkling::watch: polled watches why=\"serve\" watched=3 github=1 jira=0 slack=2 read=3 events=0 failures=0 elapsed_ms=9000",
+            "2026-11-17T00:38:04.000Z  INFO inkling::adapters::slack_claude: bridge read total_cost_usd=0.021 elapsed_ms=8000",
+            "2026-11-17T00:38:05.000Z  INFO inkling::adapters::slack_claude: bridge read total_cost_usd=0.004 elapsed_ms=7000",
+        ];
+        let tally = Tally::of(lines);
+        assert_eq!(tally.slack_reads, 2);
+        assert!(
+            (tally.slack_usd - 0.025).abs() < 1e-9,
+            "{}",
+            tally.slack_usd
         );
     }
 

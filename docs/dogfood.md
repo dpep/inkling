@@ -6,6 +6,13 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Naming a lookup on every Slack reply line found that the replies map forgets where a reply was
+  found (thread, or the channel after the message), so a reply line has to name both reads,
+  `slack_read_thread …; slack_read_channel …`. Expected one call per line. The fix is the reply
+  map keeping its source; until then the line is long but right.
+- No one `gh` command shows a pull request's conversation comments and its line comments:
+  `gh pr view --comments` skips line comments and `pulls/<n>/comments` has only them. A comments
+  line with both now names both. Expected one command, as the brief hoped.
 - After the DM rule landed, the user's earlier top-level DM message arrived at the next prompt as
   `slack:D1MG8KWNR/1794976101.418449 | replies 0 → 1 by @dpepper`: not pushed (own), shown by the
   prompt hook. Right on both counts: "own" on Slack means the user's identity, which covers a

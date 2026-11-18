@@ -522,7 +522,7 @@ say: the second `merge` in the measurement above answered `already merged`.
 
 **Who did it is now said, and still decides nothing.** Since 2026-10-06 a
 state transition names whoever caused the state it ended in: `draft → merged
-by @dpep`, `open → approved by @alice / review-bot (bot)`. Only the end state:
+by @dpep`, `open → approved by @alice and review-bot (bot)`. Only the end state:
 naming who readied a PR on its way to merged answered a question nobody asked.
 The actors come from `mergedBy`, each reviewer's latest review and the last
 ready/draft toggle — free in the same query, measured at one rate-limit point
@@ -718,16 +718,32 @@ posted.
 the replies after it, as ts → who wrote it. Two axes, like a pull request's:
 
 ```
-slack:C0123ABCD/1786596050.245879 | 2 replies from @alice and @bob
-slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark:
+slack:C0123ABCD/1786596050.245879 | 2 replies from @alice and @bob (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879)
+slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark: (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879)
 ```
 
 The event keeps both counts (`from: "2"`, `to: "4"`, in `--json` too); the
-line says the difference, since every line is news. What one reading added to
-several emoji is one line, `3 reactions :dart: :+1:`. A shrink — a deleted
-reply, a removed reaction — isn't more of anything, and reads `reactions 1 → 0
-:eyes:`. One helper, `push::tally`, words every axis that accumulates, so the
-next one reads the same.
+line says the difference, since every line is news. What one push carries for
+a message's emoji is one line, `3 reactions :dart: :+1:`, each emoji once
+however many readings it grew in. A shrink — a deleted reply, a removed
+reaction — isn't more of anything, and reads `reactions 1 → 0 :eyes:`. A
+reply deleted while another is posted, in one reading, leaves the count where
+it was but names the new author; that reads `at least 1 reply from @alice`,
+since each author named wrote at least one. One helper, `push::tally`, words
+every axis that accumulates, so the next one reads the same — in the push, in
+`inkling events`, and in the `inkling watch` listing (`1 reply, 2 reactions
+:dart:`).
+
+**Every accumulating line names the read that shows it**, as the Slack MCP
+call an agent makes, written `(tool key=value; tool key=value)`: compact, and
+each key is the tool's own parameter name. A reaction is read with
+`slack_read_thread` on the message's root, which prints the counts. A reply
+can be in the thread or a later message in the conversation (the rules
+below), and the event doesn't keep which, so its line names both reads: the
+thread (from the watched ts, when the message is itself a reply) and
+`slack_read_channel` from the watched ts. Carrying the kind onto the event
+would cut that to one; it needs the reply map to remember where each reply
+was found.
 
 - **Who replied is the news, so authors are kept and counts derived.** A new
   ts in the map is a new reply and names its author; the count alone couldn't
@@ -884,11 +900,13 @@ replication lag between the two pages of one response.
 **A burst bigger than the page.** Each page reports `totalCount`; when it held
 fewer than that, the adapter hands over the oldest time on the page
 (`Discussion::complete_after`). If even that is newer than `latest`, the
-reading may not reach back to the last one counted, and the line says so:
-`at least 40 comments from @bob`, with `partial` set on the event. The count comes from GitHub's
-totals, so it is right for conversation comments however many came; reviews
-beyond the page aren't summed, so for a pull request with more than 30 reviews
-the count is a floor (care_fe#16618 has 125). The names are the page's.
+reading may not reach back to the last one counted. The count comes from
+GitHub's totals, so it is right for conversation comments however many came,
+and the line says the number. Reviews beyond the page aren't summed, so for a
+pull request with more than 30 reviews the total is a floor (care_fe#16618 has
+125; `Discussion::floor`), and only then does a burst past the page say `at
+least 40 comments from @bob`, with `partial` set on the event. Either way the
+names are the page's.
 
 **Who you are** is the authenticated viewer, `viewer { login }`, asked in the
 same batched query every time rather than cached. It is one field in a request
@@ -896,17 +914,23 @@ already being made — measured, the cost stays at one rate-limit point — so
 there is nothing to store and nothing to go stale when the token changes. A
 transition whose new comments are all `@<viewer>` is `own`: recorded, shown at
 the next prompt, not pushed, exactly as Slack replies. Logins are compared as
-spelled, `@login`, the same form actors already use.
+spelled, `@login`, the same form actors already use. A GitHub App's token is a
+Bot viewer whose login is `name[bot]`, where the same account as an author is
+`name`; so the viewer is spelled as an author is, `name (bot)`. Unverified: no
+App token has been run against it.
 
 **An approval is said once.** An approval moves `state` (`open → approved by
 @alice`), and an approval with a body is also a review with a body. When the
 same reading moves the state into `approved`, approvals are left out of that
 reading's comments line — still counted, so the next line's numbers are
-right. When the state doesn't move — the repository wants two approvals, or
-it was already approved — an approval with a body is a comment, since nothing
-else would report it. Changes requested always counts: inkling reads it as
-`open`, so the state axis says nothing. Line comments left with an approval
-are their own comments and do get a line; they are what there is to read.
+right — and the line's count starts after them, so `from → to` is what the
+line names. When the state doesn't move — the repository wants two approvals,
+or it was already approved — an approval with a body is a comment, since
+nothing else would report it. Changes requested always counts: inkling reads
+it as `open`, so the state axis says nothing. Line comments left with an
+approval are their own comments and do get a line; they are what there is to
+read. So a review is kept as its line comments and whether it has a body
+(`Remark { lines, body }`), and only the body is left to the state axis.
 
 **No prose.** The review body is fetched only to know whether it is empty —
 `SubmittedReview::body` deserializes to a `bool`, so the text never outlives
@@ -929,15 +953,20 @@ had anything to say. If the bytes start to matter, the measured alternative is
 the middle row, with a review counting its line comments, or one when it has
 none.
 
-**The command doesn't show line comments.** `gh pr view --comments` lists
+**Line comments need their own command.** `gh pr view --comments` lists
 conversation comments and reviews with a body. Checked on rippled#6493, where
 one author has 29 reviews, 27 of them a single line comment and no body: gh
-prints 7 entries for them. So a push for a reply in a review thread names who
-and how many, and the command it ends in won't show it; the line comments are
-in `gh api repos/<owner>/<repo>/pulls/<n>/comments`, oldest first. Not fixed
-here: telling the two apart needs the kind carried onto the event, to pick a
-command per line. What would change this: a session told of a comment it then
-couldn't find.
+prints 7 entries for them. So the event carries how many of its comments are
+line comments (`lines`), and the line ends in the command that shows them:
+
+| new comments | the line ends in |
+| --- | --- |
+| none are line comments | `gh pr view <n> --repo <host>/<o>/<r> --comments` |
+| all are | `gh api --hostname <host> --paginate repos/<o>/<r>/pulls/<n>/comments` |
+| some are | both, `;`-separated |
+
+No one command shows both kinds. The API lists line comments oldest first, so
+the new ones are at the end; `--paginate` is what gets there on a long review.
 
 **Out of scope.** Comments after a pull request merges or closes: the watch ends
 at its last event, as before.
@@ -963,11 +992,11 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
   same `push::tally` as comments and replies: how many and from whom, never a
   running total, which for a channel is noise. Underneath, `from`/`to` are
   the count of messages since the watch began, as for comments — `--json`
-  carries them, the line never says them. An earlier draft stored the newest
-  ts either side instead (the range `slack_read_channel` would take to read
-  them); it was dropped because `tally` reads growth from `from`/`to`, and
-  one rendering for every accumulating axis is worth more than the range,
-  which a read from the reported time recovers.
+  carries them, the line never says them. The newest ts before the round
+  rides beside them (`after`), so the line ends in the read that shows the
+  round: `(slack_read_channel channel_id=C0123ABCD oldest=1794976101.418449)`.
+  The channel id, not `#name`, since the tool takes the id. The `inkling
+  watch` listing says the running count, `12 messages since watched`.
 - **Names, then a count.** Up to three authors are named (`@a, @b and @c`);
   more becomes `12 messages from 7 people`. Names come with the read.
 - **The standing is the count, the newest ts seen, and what the last read

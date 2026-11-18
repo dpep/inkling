@@ -28,7 +28,7 @@ use crate::adapters::session_socket::{DeliverError, SessionAddress, Written};
 use crate::adapters::watches_json::Watches;
 use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
-use crate::domain::watch::{Axis, Event, addressed};
+use crate::domain::watch::{Axis, Event, addressed, listed};
 use crate::ports::Clock;
 use crate::serve::{Beat, Pulse, Ticked, Work};
 use crate::watch::Poller;
@@ -59,39 +59,41 @@ fn digest(events: &[&Event]) -> String {
     }
 }
 
-/// One line per change, with what one reading added to a message's emoji —
-/// one event per emoji — said once: `3 new reactions :dart: :+1:`.
+/// One line per change, with the emoji a message gained — one event per
+/// emoji, per reading — said once, where the first of them was:
+/// `3 reactions :dart: :+1:`.
 fn lines(events: &[&Event]) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut run: Vec<&Event> = Vec::new();
+    let gained = |event: &Event| event.axis == Axis::Reactions && growth(event).is_some();
+    let mut groups: Vec<Vec<&Event>> = Vec::new();
     for event in events {
-        let joins = run.last().is_some_and(|last| {
-            last.reference == event.reference
-                && last.axis == Axis::Reactions
-                && event.axis == Axis::Reactions
-                && growth(last).is_some()
-                && growth(event).is_some()
-        });
-        if !joins && !run.is_empty() {
-            lines.push(line(&run));
-            run.clear();
+        let joins = gained(event)
+            .then(|| {
+                groups
+                    .iter_mut()
+                    .find(|group| gained(group[0]) && group[0].reference == event.reference)
+            })
+            .flatten();
+        match joins {
+            Some(group) => group.push(event),
+            None => groups.push(vec![event]),
         }
-        run.push(event);
     }
-    if !run.is_empty() {
-        lines.push(line(&run));
-    }
-    lines
+    groups.iter().map(|group| line(group)).collect()
 }
 
-/// `run` is one event, or several reactions on one reference that grew.
-fn line(run: &[&Event]) -> String {
-    let event = run[0];
-    let moved = match run {
+/// `group` is one event, or the reactions one reference gained.
+fn line(group: &[&Event]) -> String {
+    let event = group[0];
+    let moved = match group {
         [_] => said(event),
         _ => {
-            let count = run.iter().filter_map(|e| growth(e)).sum();
-            let emoji: Vec<&str> = run.iter().filter_map(|e| e.detail.as_deref()).collect();
+            let count = group.iter().filter_map(|e| growth(e)).sum();
+            let mut emoji: Vec<&str> = Vec::new();
+            for tag in group.iter().filter_map(|e| e.detail.as_deref()) {
+                if !emoji.contains(&tag) {
+                    emoji.push(tag);
+                }
+            }
             tally(count, REACTION, false, &[], &emoji)
         }
     };
@@ -106,10 +108,21 @@ fn line(run: &[&Event]) -> String {
 /// that moves between standings, `2 comments from @alice` for one that
 /// accumulates.
 pub fn said(event: &Event) -> String {
-    if let Some(tallied) = tallied(event) {
-        return tallied;
+    match tallied(event) {
+        Some(tallied) => tallied,
+        None => format!("{} {}", event.axis, moved(event)),
     }
-    let mut text = format!("{} {} → {}", event.axis, event.from, event.to);
+}
+
+/// What moved, without the axis, for a table that has a column for it:
+/// `open → merged by @x`, `2 comments from @alice`.
+pub fn change(event: &Event) -> String {
+    tallied(event).unwrap_or_else(|| moved(event))
+}
+
+/// `from → to` and its detail.
+fn moved(event: &Event) -> String {
+    let mut text = format!("{} → {}", event.from, event.to);
     // A state's detail is who caused it ("by @x"), a check's its name; an
     // accumulating axis only lands here when it shrank.
     match (&event.detail, event.axis) {
@@ -120,26 +133,34 @@ pub fn said(event: &Event) -> String {
     text
 }
 
-/// `2 comments from @alice`, when the event is an accumulating axis that
-/// grew. A shrink — a deleted Slack reply, a removed reaction — isn't news
-/// of more, and reads as `from → to`.
+/// `2 comments from @alice`, when the event is news of more on an
+/// accumulating axis. A shrink — a deleted Slack reply, a removed reaction —
+/// isn't, and reads as `from → to`.
 pub fn tallied(event: &Event) -> Option<String> {
-    let count = growth(event)?;
     let detail = event.detail.as_deref().unwrap_or_default();
-    Some(match event.axis {
-        Axis::Reactions => tally(count, REACTION, false, &[], &[detail]),
-        axis => {
-            let noun = match axis {
-                Axis::Comments => COMMENT,
-                Axis::Messages => MESSAGE,
-                _ => REPLY,
-            };
-            // Events stored before this wording carried "by …".
-            let names = detail.strip_prefix("by ").unwrap_or(detail);
-            let names: Vec<&str> = names.split(", ").filter(|n| !n.is_empty()).collect();
-            tally(count, noun, event.partial, &names, &[])
-        }
+    let noun = match event.axis {
+        Axis::Reactions => return Some(tally(growth(event)?, REACTION, false, &[], &[detail])),
+        Axis::Comments => COMMENT,
+        Axis::Messages => MESSAGE,
+        Axis::Replies => REPLY,
+        Axis::State | Axis::Checks | Axis::Status => return None,
+    };
+    let names = names(event);
+    Some(match growth(event) {
+        Some(count) => tally(count, noun, event.partial, &names, &[]),
+        // A reply deleted as another arrived, in one reading: the counts
+        // can't say how many are new, but each author named wrote one.
+        None if !names.is_empty() => tally(names.len() as u64, noun, true, &names, &[]),
+        None => return None,
     })
+}
+
+/// Who an accumulating event names. Events stored before this wording
+/// carried "by …".
+pub fn names(event: &Event) -> Vec<&str> {
+    let detail = event.detail.as_deref().unwrap_or_default();
+    let names = detail.strip_prefix("by ").unwrap_or(detail);
+    names.split(", ").filter(|n| !n.is_empty()).collect()
 }
 
 /// How much an accumulating axis grew by, or `None` for any other axis and
@@ -165,9 +186,6 @@ pub const REPLY: Noun = ("reply", "replies");
 pub const REACTION: Noun = ("reaction", "reactions");
 pub const MESSAGE: Noun = ("message", "messages");
 
-/// How many people a line names; past that it counts them.
-const NAMED: usize = 3;
-
 /// The one wording for anything that accumulates: `2 comments from @alice
 /// and coderabbitai (bot)`, `1 reaction :dart:`, `at least 40 comments from
 /// 7 people`. `partial` when the count is a floor. Every line is news, so
@@ -176,13 +194,8 @@ pub fn tally(count: u64, noun: Noun, partial: bool, from: &[&str], tags: &[&str]
     let word = if count == 1 { noun.0 } else { noun.1 };
     let at_least = if partial { "at least " } else { "" };
     let mut text = format!("{at_least}{count} {word}");
-    match from {
-        [] => {}
-        [one] => text.push_str(&format!(" from {one}")),
-        [rest @ .., last] if from.len() <= NAMED => {
-            text.push_str(&format!(" from {} and {last}", rest.join(", ")))
-        }
-        _ => text.push_str(&format!(" from {} people", from.len())),
+    if !from.is_empty() {
+        text.push_str(&format!(" from {}", listed(from)));
     }
     for tag in tags.iter().filter(|t| !t.is_empty()) {
         text.push_str(&format!(" {tag}"));
@@ -190,38 +203,80 @@ pub fn tally(count: u64, noun: Noun, partial: bool, from: &[&str], tags: &[&str]
     text
 }
 
-/// The one command that says more, in the cases where there obviously is
-/// one: checks went red, and the next question is always why; somebody
-/// commented, and the next step is reading it, which the push never carries.
-///
-/// For an Actions job that is its log, which GitHub serves the moment the job
-/// ends. Not `gh run view --log-failed`: it refuses until every job in the run
-/// has finished, so it can't answer at the moment this is pushed. Anything
-/// else gets the list of checks, which is the most that can be said for it.
-fn more(event: &Event) -> Option<String> {
-    let Reference::GitHubPullRequest {
-        host,
-        owner,
-        repo,
-        number,
-    } = &event.reference
-    else {
-        return None;
-    };
-    if event.axis == Axis::Comments {
-        return Some(format!(
-            "gh pr view {number} --repo {host}/{owner}/{repo} --comments"
-        ));
+/// The read that shows what a line announced, where the next question is
+/// obviously one: checks went red, and the next question is always why;
+/// something accumulated, and the next step is reading it, which the push
+/// never carries. Slack's is the MCP tool call an agent would make.
+pub fn more(event: &Event) -> Option<String> {
+    match &event.reference {
+        Reference::GitHubPullRequest {
+            host,
+            owner,
+            repo,
+            number,
+        } => match event.axis {
+            Axis::Comments => Some(comments(event, host, owner, repo, *number)),
+            Axis::Checks if event.to == CheckState::Failure.as_str() => {
+                Some(red(event.job, host, owner, repo, *number))
+            }
+            _ => None,
+        },
+        Reference::SlackMessage {
+            channel,
+            ts,
+            thread,
+        } => {
+            let root = thread.as_deref().unwrap_or(ts);
+            let read = format!("slack_read_thread channel_id={channel} message_ts={root}");
+            match event.axis {
+                Axis::Reactions => Some(read),
+                // A reply is in the thread, or a later message in the
+                // conversation, and the event doesn't say which. A reply's
+                // replies are the ones after it.
+                Axis::Replies => Some(format!(
+                    "{read}{}; slack_read_channel channel_id={channel} oldest={ts}",
+                    match thread {
+                        Some(_) => format!(" oldest={ts}"),
+                        None => String::new(),
+                    }
+                )),
+                _ => None,
+            }
+        }
+        Reference::SlackChannel { channel, .. } if event.axis == Axis::Messages => {
+            Some(match &event.after {
+                Some(ts) => format!("slack_read_channel channel_id={channel} oldest={ts}"),
+                None => format!("slack_read_channel channel_id={channel}"),
+            })
+        }
+        _ => None,
     }
-    if event.axis != Axis::Checks || event.to != CheckState::Failure.as_str() {
-        return None;
+}
+
+/// `gh pr view --comments` shows conversation comments and reviews with a
+/// body, but not line comments; those are the API's, oldest first.
+fn comments(event: &Event, host: &str, owner: &str, repo: &str, number: u64) -> String {
+    let view = format!("gh pr view {number} --repo {host}/{owner}/{repo} --comments");
+    let lines =
+        format!("gh api --hostname {host} --paginate repos/{owner}/{repo}/pulls/{number}/comments");
+    match event.lines {
+        0 => view,
+        n if n >= growth(event).unwrap_or(0) => lines,
+        _ => format!("{view}; {lines}"),
     }
-    Some(match event.job {
+}
+
+/// For an Actions job its log, which GitHub serves the moment the job ends.
+/// Not `gh run view --log-failed`: it refuses until every job in the run has
+/// finished, so it can't answer at the moment this is pushed. Anything else
+/// gets the list of checks, which is the most that can be said for it.
+fn red(job: Option<u64>, host: &str, owner: &str, repo: &str, number: u64) -> String {
+    match job {
         Some(job) => {
             format!("gh api --hostname {host} repos/{owner}/{repo}/actions/jobs/{job}/logs")
         }
         None => format!("gh pr checks {number} --repo {host}/{owner}/{repo}"),
-    })
+    }
 }
 
 /// How long red must last before it is pushed: one later reading at least
@@ -761,8 +816,11 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             ["inkling: 2 changes\n\
-              - slack:C0123ABCD/1786596050.245879 | 1 reply from @alice\n\
-              - slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark:"]
+              - slack:C0123ABCD/1786596050.245879 | 1 reply from @alice \
+              (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; \
+              slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879)\n\
+              - slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark: \
+              (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879)"]
         );
     }
 
@@ -777,7 +835,10 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert_eq!(
             sessions.texts(),
-            ["inkling: slack:C0123ABCD/1786596050.245879 | 3 reactions :+1: :dart:"]
+            [
+                "inkling: slack:C0123ABCD/1786596050.245879 | 3 reactions :+1: :dart: \
+              (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879)"
+            ]
         );
     }
 
@@ -794,8 +855,133 @@ mod tests {
             job: None,
             own: false,
             partial: false,
+            lines: 0,
+            after: None,
             audience: Default::default(),
         }
+    }
+
+    fn on(reference: Reference, event: Event) -> Event {
+        Event { reference, ..event }
+    }
+
+    #[test]
+    fn emoji_from_several_readings_are_one_line_without_repeats() {
+        let dart = |seq, from: &str, to: &str| Event {
+            seq,
+            ..event(Axis::Reactions, from, to, ":dart:")
+        };
+        let other = on(pr(1), event(Axis::State, "open", "merged", ""));
+        let eyes_gone = event(Axis::Reactions, "1", "0", ":eyes:");
+        let tada = event(Axis::Reactions, "0", "1", ":tada:");
+        let events = [
+            &dart(1, "0", "1"),
+            &other,
+            &dart(2, "1", "2"),
+            &eyes_gone,
+            &tada,
+        ];
+        let lines = super::lines(&events);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| l.split(" (").next().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "slack:C0123ABCD/1786596050.245879 | 3 reactions :dart: :tada:",
+                "github.com/dpep/inkling#1 | state open → merged",
+                "slack:C0123ABCD/1786596050.245879 | reactions 1 → 0 :eyes:",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_deleted_as_another_arrives_still_says_who() {
+        // One reading: a reply gone, another from @alice. The counts can't
+        // say how many are new; each author named is at least one.
+        assert_eq!(
+            said(&event(Axis::Replies, "3", "3", "@alice")),
+            "at least 1 reply from @alice"
+        );
+        assert_eq!(
+            said(&event(Axis::Replies, "3", "2", "@alice, @bob")),
+            "at least 2 replies from @alice and @bob"
+        );
+        assert_eq!(said(&event(Axis::Replies, "3", "2", "")), "replies 3 → 2");
+    }
+
+    #[test]
+    fn past_three_names_bots_are_not_people() {
+        assert_eq!(
+            said(&event(
+                Axis::Comments,
+                "0",
+                "4",
+                "a (bot), b (bot), c (bot), @d"
+            )),
+            "4 comments from 1 person and 3 bots"
+        );
+    }
+
+    #[test]
+    fn every_accumulating_line_names_the_read_that_shows_it() {
+        let lookup = |event: &Event| super::more(event).unwrap_or_default();
+
+        let comments = on(pr(42), event(Axis::Comments, "0", "3", "@a"));
+        let view = "gh pr view 42 --repo github.com/dpep/inkling --comments";
+        let lines = "gh api --hostname github.com --paginate repos/dpep/inkling/pulls/42/comments";
+        assert_eq!(lookup(&comments), view);
+        assert_eq!(
+            lookup(&Event {
+                lines: 3,
+                ..comments.clone()
+            }),
+            lines
+        );
+        assert_eq!(
+            lookup(&Event {
+                lines: 2,
+                ..comments
+            }),
+            format!("{view}; {lines}"),
+            "no one command shows both"
+        );
+
+        // A reply is in the thread, or a later message in the conversation.
+        assert_eq!(
+            lookup(&event(Axis::Replies, "0", "1", "@a")),
+            "slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; \
+             slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879"
+        );
+        let reply = Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            thread: Some("1786596000.000001".into()),
+        };
+        assert_eq!(
+            lookup(&on(reply.clone(), event(Axis::Replies, "0", "1", "@a"))),
+            "slack_read_thread channel_id=C0123ABCD message_ts=1786596000.000001 \
+             oldest=1786596050.245879; \
+             slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879"
+        );
+        assert_eq!(
+            lookup(&on(reply, event(Axis::Reactions, "0", "1", ":dart:"))),
+            "slack_read_thread channel_id=C0123ABCD message_ts=1786596000.000001"
+        );
+
+        // A channel shows `#name`; the read needs its id.
+        let incidents = Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: Some("incidents".into()),
+        };
+        let posted = Event {
+            after: Some("1794976101.418449".into()),
+            ..on(incidents, event(Axis::Messages, "0", "2", "@a"))
+        };
+        assert_eq!(
+            lookup(&posted),
+            "slack_read_channel channel_id=C0E48AHSN oldest=1794976101.418449"
+        );
     }
 
     #[test]
@@ -859,7 +1045,8 @@ mod tests {
                 id: format!("c{i}"),
                 at: now() + chrono::TimeDelta::seconds(i as i64),
                 by: who.to_string(),
-                weight: 1,
+                lines: 0,
+                body: true,
                 approval: false,
             })
             .collect();
@@ -867,7 +1054,7 @@ mod tests {
             discussion: Some(crate::domain::watch::Discussion {
                 remarks,
                 total: by.len() as u64,
-                complete_after: None,
+                ..Default::default()
             }),
             by: Actors {
                 me: Some("@dpep".into()),
@@ -960,7 +1147,11 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert_eq!(
             sessions.texts(),
-            ["inkling: slack:#incidents | 2 messages from @alice and @dpepper"]
+            [
+                "inkling: slack:#incidents | 2 messages from @alice and @dpepper \
+              (slack_read_channel channel_id=C0123ABCD oldest=1.000002)"
+            ],
+            "the read that shows them names the channel by id"
         );
     }
 
@@ -1348,7 +1539,7 @@ mod tests {
         );
         assert_eq!(
             message(&watches.events[0]),
-            "inkling: github.com/dpep/inkling#3 | state open → approved by @alice / buildsworth (bot)"
+            "inkling: github.com/dpep/inkling#3 | state open → approved by @alice and buildsworth (bot)"
         );
     }
 
