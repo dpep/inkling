@@ -19,7 +19,7 @@ use crate::adapters::lock::FileLock;
 use crate::adapters::session_socket::SessionAddress;
 use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
-use crate::domain::watch::{Event, Head, Sighting, Standing, reading};
+use crate::domain::watch::{Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading};
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -161,6 +161,10 @@ pub struct Watch {
     /// with an attempt floor looks at it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tried_at: Option<DateTime<Utc>>,
+    /// What each reader put into this conversation itself, as the hook saw
+    /// it. Kept on the watch so it goes when the watch does.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub receipts: BTreeMap<String, Receipts>,
 }
 
 impl Watch {
@@ -281,6 +285,7 @@ impl Watches {
                 stirred_at: None,
                 head: None,
                 tried_at: None,
+                receipts: BTreeMap::new(),
             });
         entry.deadline = entry.deadline.max(deadline);
         entry.owners.insert(owner.to_string());
@@ -340,6 +345,46 @@ impl Watches {
             }
         }
         (stirred, unknown)
+    }
+
+    /// Note what `owner` itself put into Slack, on each of its watches it
+    /// could turn up in: a post on any watch of that conversation, a reaction
+    /// on the watched message it was added to.
+    pub fn receipt(&mut self, owner: &str, receipt: &Receipt, at: DateTime<Utc>) {
+        for watch in self.watches.values_mut() {
+            if !watch.owners.contains(owner) {
+                continue;
+            }
+            let lands = match (receipt, &watch.reference) {
+                (
+                    Receipt::Posted { channel, .. },
+                    Reference::SlackMessage { channel: on, .. }
+                    | Reference::SlackChannel { channel: on, .. },
+                ) => on == channel,
+                (
+                    Receipt::Reacted { channel, ts, .. },
+                    Reference::SlackMessage {
+                        channel: on,
+                        ts: message,
+                        ..
+                    },
+                ) => on == channel && message == ts,
+                _ => false,
+            };
+            if !lands {
+                continue;
+            }
+            let mine = watch.receipts.entry(owner.to_string()).or_default();
+            match receipt {
+                Receipt::Posted { ts, .. } => {
+                    mine.posted.insert(ts.clone());
+                }
+                Receipt::Reacted { emoji, .. } => mine.reacted.push(Reacted {
+                    emoji: emoji.clone(),
+                    at,
+                }),
+            }
+        }
     }
 
     /// Note that these were asked about at `at`, whatever came back.
@@ -561,6 +606,11 @@ impl Watches {
                     audience = audience.len(),
                     "transition"
                 );
+                let receipt_for = audience
+                    .iter()
+                    .filter(|reader| moved.made.by(watch.receipts.get_mut(*reader)))
+                    .cloned()
+                    .collect();
                 fresh.push(Event {
                     seq: self.last_seq,
                     at: observed_at,
@@ -571,13 +621,17 @@ impl Watches {
                     title: sighting.title.clone(),
                     detail: moved.detail,
                     job: moved.job,
-                    own: moved.own,
+                    receipt_for,
                     partial: moved.partial,
                     lines: moved.lines,
                     after: moved.after,
                     audience: audience.clone(),
                 });
             }
+            for mine in watch.receipts.values_mut() {
+                mine.settle(observed_at);
+            }
+            watch.receipts.retain(|_, mine| !mine.is_empty());
             if sighting.head.is_some() {
                 watch.head = sighting.head.clone();
             }

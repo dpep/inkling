@@ -211,10 +211,6 @@ pub type MessageLookup = (Reference, Result<MessageStatus, RefError>);
 pub trait MessageProvider {
     fn read(&self, messages: &[Reference]) -> Result<Vec<MessageLookup>, ProviderError>;
 
-    /// The Slack user the credentials belong to, so what the reader did
-    /// themself can be told apart. `None` when it can't be found out.
-    fn me(&self) -> Option<String>;
-
     /// A channel's top-level messages after `oldest` (exclusive), or with
     /// `None` just its newest, for a baseline.
     fn channel(&self, _channel: &str, _oldest: Option<&str>) -> Result<ChannelStatus, RefError> {

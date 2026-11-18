@@ -268,7 +268,6 @@ impl Poller<'_> {
         if let Some(slack) = self.slack.filter(|_| !messages.is_empty()) {
             match slack.read(&messages) {
                 Ok(lookups) => {
-                    let me = slack.me();
                     for (reference, status) in lookups {
                         match status {
                             Ok(status) => seen.push((
@@ -283,7 +282,6 @@ impl Poller<'_> {
                                     head: None,
                                     by: Actors {
                                         names: status.names,
-                                        me: me.clone(),
                                         ..Actors::default()
                                     },
                                     discussion: None,
@@ -366,7 +364,6 @@ impl Poller<'_> {
                             head: None,
                             by: Actors {
                                 names: status.names,
-                                me: slack.me(),
                                 ..Actors::default()
                             },
                         },
@@ -474,10 +471,6 @@ mod tests {
                     )
                 })
                 .collect())
-        }
-
-        fn me(&self) -> Option<String> {
-            Some("U9".into())
         }
 
         fn channel(&self, _: &str, oldest: Option<&str>) -> Result<ChannelStatus, RefError> {
@@ -641,7 +634,7 @@ mod tests {
         assert_eq!(polled.events.len(), 1);
         assert_eq!(polled.events[0].axis, Axis::Replies);
         assert_eq!(polled.events[0].detail.as_deref(), Some("@alice"));
-        assert!(!polled.events[0].own);
+        assert!(polled.events[0].receipt_for.is_empty());
     }
 
     #[test]

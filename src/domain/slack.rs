@@ -6,7 +6,8 @@
 //! from prose. A message's text is the session's own words or somebody else's,
 //! and a permalink inside it points at a different message.
 
-use crate::domain::model::Reference;
+use crate::domain::model::{ReactionName, Reference};
+use crate::domain::watch::Receipt;
 use serde_json::Value;
 
 /// The tail every Slack permalink shares, whatever the workspace.
@@ -202,6 +203,31 @@ pub fn posted_via_tool(input: &Value, response: &Value) -> Option<Reference> {
         [one] => Some(one.clone()),
         _ => None,
     }
+}
+
+/// A message the session posted, as the receipt that makes a later reading
+/// of it the session's own.
+pub fn receipt(posted: &Reference) -> Option<Receipt> {
+    match posted {
+        Reference::SlackMessage { channel, ts, .. } => Some(Receipt::Posted {
+            channel: channel.clone(),
+            ts: ts.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// The reaction a Slack MCP react tool just added. The call names all three
+/// parts, so nothing is read from its result.
+pub fn reacted_via_tool(input: &Value) -> Option<Receipt> {
+    let field = |name| input.get(name).and_then(Value::as_str);
+    let (channel, ts) = (field("channel_id")?, field("message_ts")?);
+    let emoji = ReactionName::new(field("emoji")?);
+    (is_channel(channel) && is_ts(ts) && !emoji.as_str().is_empty()).then(|| Receipt::Reacted {
+        channel: channel.to_string(),
+        ts: ts.to_string(),
+        emoji: emoji.as_str().to_string(),
+    })
 }
 
 /// Every permalink tail in `text`, cut where a URL can't continue.

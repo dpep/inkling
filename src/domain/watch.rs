@@ -296,8 +296,8 @@ pub struct Sighting {
 /// Who moved a pull request, as `@login`, or `login (bot)` for an app: a
 /// review bot satisfying the requirement, or automation sending a pull
 /// request back to draft, is different news from a person. For a Slack
-/// message, how to name the people in it; for either, which of them is the
-/// reader.
+/// message, how to name the people in it; for a pull request, which of them
+/// is the reader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Actors {
     /// Whose approvals stand.
@@ -308,8 +308,10 @@ pub struct Actors {
     pub merged: Option<String>,
     /// Slack user id → the name a push says, for whoever a reading met.
     pub names: BTreeMap<String, String>,
-    /// Who the credentials belong to, when known: a Slack user id, or a
-    /// GitHub `@login` as a pull request's actors are spelled.
+    /// The GitHub `@login` the credentials belong to, spelled as a pull
+    /// request's actors are. Slack has no equivalent: the Slack MCP posts as
+    /// the user, so who wrote a message can't say whether the session did —
+    /// see `Receipts`.
     pub me: Option<String>,
 }
 
@@ -334,14 +336,20 @@ impl Actors {
     fn named(&self, id: &str) -> String {
         format!("@{}", self.names.get(id).map_or(id, String::as_str))
     }
+}
 
-    /// Whether everyone in `ids` is the reader: what they did themselves is
-    /// in the feed, and not worth a turn. Nobody at all is not the reader.
-    fn only_me(&self, ids: &BTreeSet<&String>) -> bool {
-        self.me
-            .as_ref()
-            .is_some_and(|me| !ids.is_empty() && ids.iter().all(|id| *id == me))
-    }
+/// Something a session itself put into Slack, as the `post-tool` hook saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Receipt {
+    Posted {
+        channel: String,
+        ts: String,
+    },
+    Reacted {
+        channel: String,
+        ts: String,
+        emoji: String,
+    },
 }
 
 /// How many people a list names; past that it counts them.
@@ -389,8 +397,9 @@ pub struct Transition {
     pub detail: Option<String>,
     /// The Actions job behind that check, so its log is one command away.
     pub job: Option<u64>,
-    /// Made only by the reader themself: recorded, but not worth a turn.
-    pub own: bool,
+    /// Who made it, as far as the reading can say. Whether that was a given
+    /// reader is settled against its receipts when the event is recorded.
+    pub made: Made,
     /// A count whose page didn't reach back to the last reading: at least
     /// this many, maybe more.
     pub partial: bool,
@@ -400,6 +409,76 @@ pub struct Transition {
     /// The Slack ts the news came after: a channel read from it shows what
     /// arrived.
     pub after: Option<String>,
+}
+
+/// Who made a transition, as far as one reading can say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Made {
+    #[default]
+    Others,
+    /// The account the credentials belong to, which every reader shares.
+    Viewer,
+    /// These new Slack messages, by ts.
+    Posted(BTreeSet<String>),
+    /// This many more of one emoji on the watched message.
+    Reacted { emoji: String, added: u32 },
+}
+
+impl Made {
+    /// Whether this was the reader itself, judged by what it is on record as
+    /// having done. Spends the reactions it accounts for, so the next one of
+    /// the same emoji is somebody else's.
+    pub fn by(&self, receipts: Option<&mut Receipts>) -> bool {
+        match (self, receipts) {
+            (Made::Others, _) => false,
+            (Made::Viewer, _) => true,
+            (_, None) => false,
+            (Made::Posted(ts), Some(mine)) => !ts.is_empty() && ts.is_subset(&mine.posted),
+            (Made::Reacted { emoji, added }, Some(mine)) => {
+                let had = mine.reacted.iter().filter(|r| r.emoji == *emoji).count();
+                let mut spend = had.min(*added as usize);
+                mine.reacted.retain(|r| {
+                    let spent = spend > 0 && r.emoji == *emoji;
+                    spend -= usize::from(spent);
+                    !spent
+                });
+                *added as usize <= had
+            }
+        }
+    }
+}
+
+/// What one reader put into a watched Slack conversation itself — the only
+/// evidence a message or reaction was the session's, since the Slack MCP
+/// posts as the user and a reply from their phone has the same author.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Receipts {
+    /// Messages it posted, by ts. A ts is unique, so these never need
+    /// spending; they go when the watch does.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub posted: BTreeSet<String>,
+    /// Reactions it added to the watched message, not yet seen by a reading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reacted: Vec<Reacted>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reacted {
+    pub emoji: String,
+    pub at: DateTime<Utc>,
+}
+
+impl Receipts {
+    /// Forget reactions a reading taken at `at` already reflects. One that
+    /// moved no count was a duplicate Slack ignored, and must not claim the
+    /// next person's.
+    pub fn settle(&mut self, at: DateTime<Utc>) {
+        self.reacted.retain(|r| r.at > at);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.posted.is_empty() && self.reacted.is_empty()
+    }
 }
 
 /// A transition, once it has a place in the sequence.
@@ -419,8 +498,11 @@ pub struct Event {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<u64>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub own: bool,
+    /// The readers this is a receipt for — what each did itself, recorded
+    /// but not worth a turn. Per reader, because two sessions share one Slack
+    /// identity and only the one that posted a reply has a receipt for it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub receipt_for: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -524,7 +606,7 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                     to: now.as_str().into(),
                     detail: after.by.of(*was, *now),
                     job: None,
-                    own: false,
+                    made: Made::Others,
                     partial: false,
                     lines: 0,
                     after: None,
@@ -537,7 +619,7 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                     to: checks_label(*has).into(),
                     detail: after.failing.as_ref().map(|f| f.name.clone()),
                     job: after.failing.as_ref().and_then(|f| f.job),
-                    own: false,
+                    made: Made::Others,
                     partial: false,
                     lines: 0,
                     after: None,
@@ -554,7 +636,7 @@ fn compared(before: &Standing, standing: &Standing, after: &Sighting) -> Vec<Tra
                 to: now.clone(),
                 detail: None,
                 job: None,
-                own: false,
+                made: Made::Others,
                 partial: false,
                 lines: 0,
                 after: None,
@@ -624,10 +706,10 @@ fn commented(
     if names.is_empty() {
         return (Some(mark), None);
     }
-    let own = by
-        .me
-        .as_deref()
-        .is_some_and(|me| names.iter().all(|name| *name == me));
+    let made = match by.me.as_deref() {
+        Some(me) if names.iter().all(|name| *name == me) => Made::Viewer,
+        _ => Made::Others,
+    };
     // The oldest of a full page is itself new, so the burst may reach further
     // back than the page did — which only GitHub's totals can make up for.
     let partial = said.floor
@@ -640,7 +722,7 @@ fn commented(
         to: mark.count.to_string(),
         detail: Some(names.join(", ")),
         job: None,
-        own,
+        made,
         partial,
         lines,
         after: None,
@@ -652,7 +734,7 @@ fn commented(
 /// wrote the new ones, and one per emoji whose count changed.
 ///
 /// Nobody is named for a reaction, because the bridge reads a count and not
-/// who reacted — so a reaction is never known to be the reader's own.
+/// who reacted.
 fn conversation(
     had: &BTreeMap<String, u32>,
     were: &BTreeMap<String, String>,
@@ -661,20 +743,20 @@ fn conversation(
     by: &Actors,
 ) -> Vec<Transition> {
     let mut moved = Vec::new();
-    let new: BTreeSet<&String> = are
+    let new: BTreeMap<&String, &String> = are
         .iter()
         .filter(|(ts, _)| !were.contains_key(*ts))
-        .map(|(_, who)| who)
         .collect();
     if !new.is_empty() || were.len() != are.len() {
-        let names: Vec<String> = new.iter().map(|id| by.named(id)).collect();
+        let authors: BTreeSet<&String> = new.values().copied().collect();
+        let names: Vec<String> = authors.iter().map(|id| by.named(id)).collect();
         moved.push(Transition {
             axis: Axis::Replies,
             from: were.len().to_string(),
             to: are.len().to_string(),
             detail: (!names.is_empty()).then(|| names.join(", ")),
             job: None,
-            own: by.only_me(&new),
+            made: posted(new.into_keys()),
             partial: false,
             lines: 0,
             after: None,
@@ -693,7 +775,13 @@ fn conversation(
                 to: now.to_string(),
                 detail: Some(format!(":{name}:")),
                 job: None,
-                own: false,
+                made: match now > was {
+                    true => Made::Reacted {
+                        emoji: name.clone(),
+                        added: now - was,
+                    },
+                    false => Made::Others,
+                },
                 partial: false,
                 lines: 0,
                 after: None,
@@ -701,6 +789,15 @@ fn conversation(
         }
     }
     moved
+}
+
+/// New Slack messages, which a reader made if it posted every one of them.
+fn posted<'a>(ts: impl IntoIterator<Item = &'a String>) -> Made {
+    let ts: BTreeSet<String> = ts.into_iter().cloned().collect();
+    match ts.is_empty() {
+        true => Made::Others,
+        false => Made::Posted(ts),
+    }
 }
 
 /// What arrived in a channel since its newest message before, and the
@@ -712,18 +809,17 @@ fn arrivals(
     more: bool,
     by: &Actors,
 ) -> (u64, Option<Transition>) {
-    let new: Vec<&String> = arrived
+    let new: Vec<(&String, &String)> = arrived
         .iter()
         .filter(|(ts, _)| was.is_none_or(|was| crate::domain::slack::later(ts, was)))
-        .map(|(_, who)| who)
         .collect();
     if new.is_empty() {
         return (had, None);
     }
     let total = had + new.len() as u64;
     let mut authors: Vec<&String> = Vec::new();
-    for who in new {
-        if !authors.contains(&who) {
+    for (_, who) in &new {
+        if !authors.contains(who) {
             authors.push(who);
         }
     }
@@ -734,7 +830,7 @@ fn arrivals(
         to: total.to_string(),
         detail: Some(names.join(", ")),
         job: None,
-        own: by.only_me(&authors.into_iter().collect()),
+        made: posted(new.into_iter().map(|(ts, _)| ts)),
         partial: more,
         lines: 0,
         after: was.map(String::from),
@@ -1172,7 +1268,7 @@ mod tests {
         let read = reading(Some(&before), &after);
         assert_eq!(labels(&read.moved), [("messages", "4", "7")]);
         assert_eq!(read.moved[0].detail.as_deref(), Some("@alice, @bob"));
-        assert!(!read.moved[0].own && !read.moved[0].partial);
+        assert!(!read.moved[0].partial);
         assert_eq!(
             read.moved[0].after.as_deref(),
             Some("1.000001"),
@@ -1212,12 +1308,16 @@ mod tests {
     }
 
     #[test]
-    fn channel_messages_only_the_reader_wrote_are_their_own() {
+    fn channel_messages_are_made_by_whoever_posted_them() {
         let before = channel(0, Some("1.000001"), &[], false);
         let after = seen_message(channel(0, Some("1.000002"), &[("1.000002", "U9")], false));
         let moved = changed(Some(&before), &after);
         assert_eq!(moved[0].detail.as_deref(), Some("@dpepper"));
-        assert!(moved[0].own);
+        assert_eq!(moved[0].made, Made::Posted(ts(&["1.000002"])));
+    }
+
+    fn ts(all: &[&str]) -> BTreeSet<String> {
+        all.iter().map(|ts| ts.to_string()).collect()
     }
 
     fn message(reactions: &[(&str, u32)], replies: &[(&str, &str)]) -> Standing {
@@ -1242,7 +1342,6 @@ mod tests {
                     .iter()
                     .map(|(id, name)| (id.to_string(), name.to_string()))
                     .collect(),
-                me: Some("U9".into()),
                 ..Actors::default()
             },
         }
@@ -1263,22 +1362,51 @@ mod tests {
         let moved = changed(Some(&before), &after);
         assert_eq!(labels(&moved), [("replies", "2", "4")]);
         assert_eq!(moved[0].detail.as_deref(), Some("@alice, @bob"));
-        assert!(!moved[0].own);
+        assert_eq!(moved[0].made, Made::Posted(ts(&["1.000003", "1.000004"])));
     }
 
     #[test]
-    fn a_reply_only_the_reader_wrote_is_their_own() {
-        let before = message(&[], &[]);
-        let after = seen_message(message(&[], &[("1.000001", "U9")]));
-        let moved = changed(Some(&before), &after);
-        assert_eq!(moved[0].detail.as_deref(), Some("@dpepper"));
-        assert!(moved[0].own, "recorded, not worth a turn");
-
-        let with_others = seen_message(message(&[], &[("1.000001", "U9"), ("1.000002", "U1")]));
+    fn a_reader_made_only_messages_it_posted_every_one_of() {
+        let mut mine = Receipts {
+            posted: ts(&["1.000001"]),
+            ..Receipts::default()
+        };
+        assert!(Made::Posted(ts(&["1.000001"])).by(Some(&mut mine)));
         assert!(
-            !changed(Some(&before), &with_others)[0].own,
-            "anybody else in it makes it news"
+            !Made::Posted(ts(&["1.000001", "1.000002"])).by(Some(&mut mine)),
+            "anything it didn't post makes it news"
         );
+        assert!(!Made::Posted(ts(&["1.000001"])).by(None), "posted nothing");
+        assert!(Made::Viewer.by(None), "the account every reader shares");
+    }
+
+    #[test]
+    fn a_reaction_receipt_is_spent_once_and_settled_by_the_next_reading() {
+        let at = |m: i64| {
+            "2026-11-17T12:00:00Z".parse::<DateTime<Utc>>().unwrap() + chrono::TimeDelta::minutes(m)
+        };
+        let eyes = |added| Made::Reacted {
+            emoji: "eyes".into(),
+            added,
+        };
+        let added = |m| Reacted {
+            emoji: "eyes".into(),
+            at: at(m),
+        };
+        let mut mine = Receipts {
+            reacted: vec![added(0)],
+            ..Receipts::default()
+        };
+        assert!(!eyes(2).by(Some(&mut mine)), "somebody else added one too");
+        assert!(mine.reacted.is_empty(), "but it spent the reader's");
+
+        // Slack ignores a duplicate, so a receipt that moved no count is
+        // gone once a reading after it has been taken.
+        mine.reacted.push(added(1));
+        mine.settle(at(0));
+        assert_eq!(mine.reacted.len(), 1, "a reading from before it");
+        mine.settle(at(2));
+        assert!(mine.reacted.is_empty());
     }
 
     #[test]
@@ -1292,7 +1420,18 @@ mod tests {
         );
         assert_eq!(moved[0].detail.as_deref(), Some(":eyes:"));
         assert_eq!(moved[1].detail.as_deref(), Some(":white_check_mark:"));
-        assert!(moved.iter().all(|t| !t.own), "who reacted can't be read");
+        assert_eq!(
+            moved[0].made,
+            Made::Others,
+            "a removal is nobody's to claim"
+        );
+        assert_eq!(
+            moved[1].made,
+            Made::Reacted {
+                emoji: "white_check_mark".into(),
+                added: 1
+            }
+        );
     }
 
     #[test]
@@ -1356,7 +1495,7 @@ mod tests {
             moved[0].detail.as_deref(),
             Some("coderabbitai (bot), @alice")
         );
-        assert!(!moved[0].own);
+        assert_eq!(moved[0].made, Made::Others);
     }
 
     #[test]
@@ -1405,13 +1544,16 @@ mod tests {
         let base = reading(None, &commenting(State::Open, &[], 0)).standing;
         let mine = [remark("a", "10:00:00", "@dpep")];
         let moved = changed(Some(&base), &commenting(State::Open, &mine, 1));
-        assert!(moved[0].own, "recorded, not worth a turn");
+        assert_eq!(moved[0].made, Made::Viewer, "recorded, not worth a turn");
 
         let with_a_bot = [
             mine[0].clone(),
             remark("b", "10:01:00", "coderabbitai (bot)"),
         ];
-        assert!(!changed(Some(&base), &commenting(State::Open, &with_a_bot, 2))[0].own);
+        assert_eq!(
+            changed(Some(&base), &commenting(State::Open, &with_a_bot, 2))[0].made,
+            Made::Others
+        );
     }
 
     #[test]
@@ -1585,7 +1727,7 @@ mod tests {
                 title: String::new(),
                 detail: None,
                 job: None,
-                own: false,
+                receipt_for: BTreeSet::new(),
                 partial: false,
                 lines: 0,
                 after: None,

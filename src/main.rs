@@ -1630,38 +1630,48 @@ const PUSH_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1
 type Noticed = (
     Vec<(inkling::domain::model::Reference, &'static str)>,
     Vec<inkling::domain::detect::Pushed>,
+    Vec<inkling::domain::watch::Receipt>,
 );
 
 /// What a tool call was about: from Bash, a pull request named by URL, an
 /// issue named to `acli`, a branch `git push` updated, or a message
 /// `chat.postMessage` posted; from the Slack MCP send tool, the message it
-/// posted.
+/// posted. A post, or a reaction added through the MCP react tool, is also a
+/// receipt: what the session did itself.
 ///
 /// Cheapest checks first, and in this order: this runs after every tool call,
 /// and the overwhelming majority of them have nothing to do with any of it.
 fn noticed(input: &HookInput, config: &Config) -> Noticed {
     use inkling::domain::{detect, slack};
     if input.tool_name != "Bash" {
-        let send = slack_claude::ToolNames::new(config.slack.mcp.as_ref()).send;
-        let posted = match input.tool_name == send {
+        let tools = slack_claude::ToolNames::new(config.slack.mcp.as_ref());
+        if input.tool_name == tools.react {
+            let reacted = slack::reacted_via_tool(&input.tool_input);
+            return (Vec::new(), Vec::new(), reacted.into_iter().collect());
+        }
+        let posted = match input.tool_name == tools.send {
             true => slack::posted_via_tool(&input.tool_input, &input.tool_response),
             false => None,
         };
+        let receipts = posted.iter().filter_map(slack::receipt).collect();
         return (
             posted.map(|r| (r, "slack send")).into_iter().collect(),
             Vec::new(),
+            receipts,
         );
     }
     let command = field(&input.tool_input, "command");
     if !detect::worth_reading(command) && !command.contains(slack::POST_METHOD) {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
     let stdout = field(&input.tool_response, "stdout");
     let output = format!("{stdout}\n{}", field(&input.tool_response, "stderr"));
     let mut touched = detect::touched(command, &output, &config.github.hosts);
-    touched.extend(slack::posted_via_api(command, stdout).map(|r| (r, slack::POST_METHOD)));
+    let posted = slack::posted_via_api(command, stdout);
+    let receipts = posted.iter().filter_map(slack::receipt).collect();
+    touched.extend(posted.map(|r| (r, slack::POST_METHOD)));
     let pushed = detect::pushed(command, &output, &config.github.hosts);
-    (touched, pushed)
+    (touched, pushed, receipts)
 }
 
 /// Watch what a tool call was about — see `noticed`.
@@ -1672,8 +1682,8 @@ fn noticed(input: &HookInput, config: &Config) -> Noticed {
 /// request for, is looked up.
 fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), String> {
     use inkling::domain::detect;
-    let (touched, pushed) = noticed(input, config);
-    if touched.is_empty() && pushed.is_empty() {
+    let (touched, pushed, receipts) = noticed(input, config);
+    if touched.is_empty() && pushed.is_empty() && receipts.is_empty() {
         return Ok(());
     }
 
@@ -1696,6 +1706,9 @@ fn post_tool(input: &HookInput, config: &Config, common: &Common) -> Result<(), 
                 if !known {
                     fresh.push((reference.clone(), *why));
                 }
+            }
+            for receipt in &receipts {
+                file.receipt(&owner, receipt, clock.now());
             }
             let (stirred, unknown) = file.stir_pushed(&pushed, &owner, deadline, clock.now());
             (fresh, stirred, unknown)
@@ -2093,7 +2106,7 @@ fn slack_threads(
                 .map_err(|error| {
                     tracing::warn!(
                         error,
-                        "could not find out who you are in slack; your own replies will be pushed"
+                        "could not find out who you are in slack; a channel message mentioning you will not count as a reply"
                     )
                 })
                 .ok()
@@ -2321,7 +2334,7 @@ fn event_json(owner: &str, event: &inkling::domain::watch::Event) -> serde_json:
         "detail": detail,
         "job": event.job,
         "partial": event.partial,
-        "own": event.own,
+        "own": event.receipt_for.contains(owner),
         "lookup": inkling::push::more(event),
     })
 }
@@ -2762,7 +2775,7 @@ mod tests {
     };
     use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
-    use inkling::domain::watch::{Sighting, Standing};
+    use inkling::domain::watch::{Receipt, Sighting, Standing};
     use inkling::watch::Polled;
 
     fn hosts() -> Vec<String> {
@@ -2791,7 +2804,7 @@ mod tests {
             title: "Fix the thing".into(),
             detail: Some(detail.to_string()).filter(|d| !d.is_empty()),
             job: None,
-            own: false,
+            receipt_for: Default::default(),
             partial: false,
             lines: 0,
             after: None,
@@ -2845,7 +2858,7 @@ mod tests {
         use inkling::domain::watch::Axis;
         let floor = inkling::domain::watch::Event {
             partial: true,
-            own: true,
+            receipt_for: ["s".to_string()].into(),
             ..event(pr42(), Axis::Replies, "1", "3", "by @alice, @bob")
         };
         let row = super::event_json("s", &floor);
@@ -3199,7 +3212,7 @@ mod tests {
             "tool_input": {"channel_id": "C0123ABCD", "message": "ready for review?"},
             "tool_response": [{"type": "text", "text": "Message sent: https://acme.slack.com/archives/C0123ABCD/p1786596050245879"}]
         }));
-        let (touched, pushed) = noticed(&input, &Config::default());
+        let (touched, pushed, receipts) = noticed(&input, &Config::default());
         assert_eq!(
             touched,
             [(
@@ -3208,6 +3221,34 @@ mod tests {
             )]
         );
         assert!(pushed.is_empty());
+        assert_eq!(
+            receipts,
+            [Receipt::Posted {
+                channel: "C0123ABCD".into(),
+                ts: "1786596050.245879".into()
+            }],
+            "what the session posted is its own"
+        );
+    }
+
+    #[test]
+    fn a_reaction_the_session_added_is_a_receipt_and_watches_nothing() {
+        let input = tool_call(serde_json::json!({
+            "session_id": "s",
+            "tool_name": "mcp__claude_ai_Slack__slack_add_reaction",
+            "tool_input": {"channel_id": "C0123ABCD", "message_ts": "1786596050.245879", "emoji": ":Eyes:"},
+            "tool_response": [{"type": "text", "text": "ok"}]
+        }));
+        let (touched, _, receipts) = noticed(&input, &Config::default());
+        assert!(touched.is_empty());
+        assert_eq!(
+            receipts,
+            [Receipt::Reacted {
+                channel: "C0123ABCD".into(),
+                ts: "1786596050.245879".into(),
+                emoji: "eyes".into()
+            }]
+        );
     }
 
     #[test]

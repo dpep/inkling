@@ -31,7 +31,7 @@ hooks expect to find it on `PATH`. Then wire them up in Claude Code's
     "SessionStart":     [{ "hooks": [{ "type": "command", "command": "inkling hook session-start" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "inkling hook session-end" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "inkling hook prompt" }] }],
-    "PostToolUse":      [{ "matcher": "Bash|mcp__claude_ai_Slack__slack_send_message", "hooks": [{ "type": "command", "command": "inkling hook post-tool", "async": true }] }]
+    "PostToolUse":      [{ "matcher": "Bash|mcp__claude_ai_Slack__slack_send_message|mcp__claude_ai_Slack__slack_add_reaction", "hooks": [{ "type": "command", "command": "inkling hook post-tool", "async": true }] }]
   }
 }
 ```
@@ -41,7 +41,8 @@ transition arrives in the session on its own. No config file is needed: GitHub
 credentials come from `gh auth token`, Jira goes through `acli`, and Slack goes
 through Claude Code's own Slack connector, so Claude Code must be logged in with
 it. The `PostToolUse` matcher names the Slack send tool so that posting a
-message watches it; with a different `[slack.mcp]` server, name its tool
+message watches it, and the react tool so that the session's own reactions
+don't wake it; with a different `[slack.mcp]` server, name its tools
 instead.
 
 What each hook does:
@@ -175,8 +176,14 @@ A reply is a message in its thread — after it, if it is itself a reply — or 
 later message in the same conversation: any at all in a DM, where the next
 message is the answer, and one that @mentions you in a channel. Never what
 anybody wrote: that is somebody else's prose, and to read it you use Slack.
-Reactions are counts, so they can't say who reacted. A reply only you wrote is
-in `events` but isn't pushed; reactions can't be told apart, so yours are.
+Reactions are counts, so they can't say who reacted.
+
+What the session posted or reacted with itself is in `events` but isn't
+pushed. That is judged by what the `post-tool` hook saw the session do, not by
+author: the Slack connector posts as you, so your reply from your phone has
+the same author as the agent's and is pushed, as it should be. A reply another
+session posted is news to this one. A removed reaction or a deleted reply is in
+`events` but isn't pushed either.
 
 Each reading is a `claude -p` call through Claude Code's Slack connector:
 about 2¢, and anywhere from a few seconds to a minute. So a Slack message is
@@ -198,7 +205,7 @@ The news is who posted and how many — `slack:#incidents | 3 messages from
 @john and @jane (slack_read_channel channel_id=C0E48AHSN oldest=…)`, or `12
 messages from 7 people` — never what they wrote. The read names the channel
 by id, from the newest message seen before, so it shows exactly the round. A
-round where only you posted is in `events` but isn't pushed. Replies inside a
+round where only this session posted is in `events` but isn't pushed. Replies inside a
 thread don't count: watch that message for them. A stretch busier than one
 page (100 messages) says `at least 100`.
 
@@ -319,6 +326,12 @@ nobody asked for.
   doesn't count.
 - `curl … chat.postMessage`: the `channel` and `ts` of the Web API's JSON reply,
   when it says `"ok": true`. The `slack` CLI isn't recognized.
+- Either way, the post is also recorded on the session's other watches of that
+  conversation, so a reply it posts into a thread it watches isn't pushed back
+  to it.
+- The Slack react tool (`mcp__claude_ai_Slack__slack_add_reaction`): watches
+  nothing, but records the reaction, so the next reading of that message
+  doesn't push the session its own emoji.
 - `git push`: every open pull request whose head is exactly the repository and
   branch git reports it pushed to. A fork's pull request upstream counts; a
   stranger's branch of the same name never does.

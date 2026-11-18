@@ -329,15 +329,20 @@ fn ripe(event: &Event, watches: &Watches) -> Ripe {
 /// feed for the next prompt, and the verdict that follows passes over it. One
 /// rule rather than a setting — see docs/watching.md for what would change
 /// that, and for why who caused a transition is not part of it.
-fn worth_a_turn(event: &Event) -> bool {
-    let started = match event.axis {
+fn worth_a_turn(event: &Event, reader: &str) -> bool {
+    let idle = match event.axis {
         Axis::Checks => event.to == CheckState::Pending.as_str(),
         Axis::State => event.from == State::Draft.as_str() && event.to == State::Open.as_str(),
-        Axis::Status | Axis::Replies | Axis::Reactions | Axis::Comments | Axis::Messages => false,
+        Axis::Status => false,
+        // Only more is news: a deleted reply or a removed reaction leaves
+        // nothing to answer.
+        Axis::Replies | Axis::Reactions | Axis::Comments | Axis::Messages => {
+            growth(event).is_none()
+        }
     };
-    // What the reader did themself — a reply or a comment only they wrote —
-    // is a receipt.
-    !started && !event.own
+    // What the reader did itself — a reply it posted, a comment only its
+    // account wrote — is a receipt.
+    !idle && !event.receipt_for.contains(reader)
 }
 
 /// Where a session's inbox is reached. A seam rather than an abstraction: it
@@ -408,7 +413,7 @@ pub fn round(sessions: &dyn Sessions, watches: &Watches, clock: &dyn Clock) -> V
             // running on this machine.
             let mut owed: Vec<&Event> = Vec::new();
             for event in addressed(&watches.events, cursor, subscriber) {
-                if !worth_a_turn(event) {
+                if !worth_a_turn(event, subscriber) {
                     continue;
                 }
                 match ripe(event, watches) {
@@ -575,7 +580,7 @@ mod tests {
     use super::*;
     use crate::adapters::watches_json::{PUSH_BUDGET, PUSH_WINDOW, RETENTION};
 
-    use crate::domain::watch::{Actors, FailedCheck, Sighting, Standing};
+    use crate::domain::watch::{Actors, FailedCheck, Receipt, Sighting, Standing};
     use crate::secret::Secret;
     use crate::testing::FixedClock;
     use std::cell::RefCell;
@@ -853,7 +858,7 @@ mod tests {
             title: String::new(),
             detail: Some(detail.into()).filter(|d: &String| !d.is_empty()),
             job: None,
-            own: false,
+            receipt_for: Default::default(),
             partial: false,
             lines: 0,
             after: None,
@@ -1024,9 +1029,44 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_only_the_reader_wrote_waits_in_the_feed() {
+    fn a_reply_from_the_reader_s_slack_id_that_the_session_never_posted_is_pushed() {
+        // The Slack MCP posts as the user, so a person answering from their
+        // phone and the agent share one id. Only a post the hook saw is a
+        // receipt — and only one into this conversation.
+        let mut watches = talking();
+        let elsewhere = Receipt::Posted {
+            channel: "C0OTHER000".into(),
+            ts: "1.000001".into(),
+        };
+        watches.receipt("s", &elsewhere, now());
+        watches.record(
+            &[(slack(), conversation(&[], &[("1.000001", "U9")]))],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        let texts = sessions.texts();
+        assert_eq!(texts.len(), 1);
+        assert!(
+            texts[0].starts_with(
+                "inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @dpepper ("
+            ),
+            "{texts:?}"
+        );
+    }
+
+    fn sent(ts: &str) -> Receipt {
+        Receipt::Posted {
+            channel: "C0123ABCD".into(),
+            ts: ts.into(),
+        }
+    }
+
+    #[test]
+    fn a_reply_the_session_posted_waits_in_the_feed() {
         // Recorded, so a prompt still shows it, but not worth a turn.
         let mut watches = talking();
+        watches.receipt("s", &sent("1.000001"), now());
         watches.record(
             &[(slack(), conversation(&[], &[("1.000001", "U9")]))],
             now(),
@@ -1035,6 +1075,75 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert!(sessions.texts().is_empty());
         assert_eq!(watches.take("s", now()).len(), 1);
+
+        // Anything it didn't post in the same reading makes it news.
+        watches.record(
+            &[(
+                slack(),
+                conversation(&[], &[("1.000001", "U9"), ("1.000002", "U9")]),
+            )],
+            now(),
+        );
+        deliver(&sessions, &mut watches);
+        assert_eq!(sessions.texts().len(), 1);
+    }
+
+    #[test]
+    fn a_reply_is_a_receipt_only_for_the_session_that_posted_it() {
+        let mut watches = talking();
+        watches.watch(&slack(), "t", forever(), now());
+        watches.attach("t", address("/tmp/b"), now());
+        watches.receipt("s", &sent("1.000001"), now());
+        watches.record(
+            &[(slack(), conversation(&[], &[("1.000001", "U9")]))],
+            now(),
+        );
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        let sent = sessions.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, PathBuf::from("/tmp/b"));
+    }
+
+    #[test]
+    fn a_removed_reaction_waits_in_the_feed() {
+        let mut watches = talking();
+        watches.record(&[(slack(), conversation(&[("eyes", 1)], &[]))], now());
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert_eq!(sessions.texts().len(), 1);
+
+        watches.record(&[(slack(), conversation(&[], &[]))], now());
+        deliver(&sessions, &mut watches);
+        assert_eq!(sessions.texts().len(), 1, "a shrink is not worth a turn");
+        assert_eq!(watches.take("s", now()).len(), 1, "but it is recorded");
+    }
+
+    #[test]
+    fn a_reaction_the_session_added_waits_in_the_feed_and_only_once() {
+        let mut watches = talking();
+        let reacted = Receipt::Reacted {
+            channel: "C0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            emoji: "eyes".into(),
+        };
+        watches.receipt("s", &reacted, now());
+        watches.record(&[(slack(), conversation(&[("eyes", 1)], &[]))], now());
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        assert!(sessions.texts().is_empty());
+
+        // The receipt is spent: the next :eyes: is somebody else's.
+        let later = now() + chrono::TimeDelta::minutes(5);
+        watches.record(&[(slack(), conversation(&[("eyes", 2)], &[]))], later);
+        deliver(&sessions, &mut watches);
+        let texts = sessions.texts();
+        assert_eq!(texts.len(), 1);
+        assert!(
+            texts[0]
+                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reaction :eyes: ("),
+            "{texts:?}"
+        );
     }
 
     fn commented(by: &[&str]) -> Sighting {
@@ -1119,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_says_who_posted_and_how_many_and_skips_the_reader_alone() {
+    fn a_channel_says_who_posted_and_how_many_and_skips_what_the_session_posted() {
         let incidents = Reference::SlackChannel {
             channel: "C0123ABCD".into(),
             name: Some("incidents".into()),
@@ -1129,13 +1238,14 @@ mod tests {
         watches.record(&[(incidents.clone(), posted("1.000001", &[]))], now());
         watches.attach("s", address("/tmp/a"), now());
 
+        watches.receipt("s", &sent("1.000002"), now());
         watches.record(
             &[(incidents.clone(), posted("1.000002", &[("1.000002", "U9")]))],
             now(),
         );
         let sessions = FakeSessions::default();
         deliver(&sessions, &mut watches);
-        assert!(sessions.texts().is_empty(), "only the reader posted");
+        assert!(sessions.texts().is_empty(), "only the session posted");
 
         watches.record(
             &[(

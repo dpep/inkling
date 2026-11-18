@@ -37,20 +37,22 @@
 - **New: watch a whole Slack channel.** `inkling watch '#incidents' --ttl 7d` (or the channel's
   id, or its link) reports each round of new top-level messages as `3 messages from @john and
   @jane` — who and how many, never what. Explicit only: the `post-tool` hook never watches a
-  channel. Thread replies don't count; a round only you posted in isn't pushed; more than a page
+  channel. Thread replies don't count; a round only the session posted in isn't pushed; more than a page
   (100) since the last read says `at least 100`. One `claude -p` per read (about 0.2–2¢), at most
   every 5 minutes. A channel never finishes, so give it a longer `--ttl` than the 72h default.
 - **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
   `2 replies from @alice and @bob` and `1 reaction :white_check_mark:` — who and how many,
   never what anybody wrote. A reply is a message in its thread, or a later one in the same
-  conversation: any in a DM, one that @mentions you in a channel. A reply only you wrote stays in
-  `events` without a push. Reads go
+  conversation: any in a DM, one that @mentions you in a channel. A reply or reaction the session
+  posted itself stays in `events` without a push — judged by what the hook saw it post, not by
+  author, since the Slack connector posts as you and your own reply from your phone must still
+  wake it. A removed reaction or deleted reply isn't pushed either. Reads go
   through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read
   at most every 5 minutes, and only by the resident server, `watch` and `events`. **To have
-  posting a message watch it, add the Slack send tool to the `PostToolUse` matcher:**
-  `"matcher": "Bash|mcp__claude_ai_Slack__slack_send_message"` (the myclaude plugin's
-  `hooks.json` needs the same change). A `curl` to `chat.postMessage` is watched through the
-  existing `Bash` matcher.
+  posting a message watch it, add the Slack send and react tools to the `PostToolUse` matcher:**
+  `"matcher": "Bash|mcp__claude_ai_Slack__slack_send_message|mcp__claude_ai_Slack__slack_add_reaction"`
+  (the myclaude plugin's `hooks.json` needs the same change). A `curl` to `chat.postMessage` is
+  watched through the existing `Bash` matcher.
 - **Inkling's hooks do nothing inside its own Slack bridge.** The bridge's `claude -p` child ran
   the user's hooks, inkling's included; it now carries `INKLING_BRIDGE=1` and they return at once.
   The bridge's call is also bounded by its timeout now, rather than waited on indefinitely.

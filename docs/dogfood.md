@@ -13,6 +13,11 @@ fixed, say where and leave the line.
 - No one `gh` command shows a pull request's conversation comments and its line comments:
   `gh pr view --comments` skips line comments and `pulls/<n>/comments` has only them. A comments
   line with both now names both. Expected one command, as the brief hoped.
+- Reversed the line below with the user: a phone reply being "own" meant it never woke the session,
+  which is the case push exists for, and an emoji was the only way to reach the agent from a phone.
+  "Own" is now what the hook saw this session post or react with (docs/watching.md, "Your own
+  replies are receipts"). Surprise while doing it: watching.md had already argued, for GitHub,
+  against exactly this per-reader record; Slack's exact ts is what makes it cheap here.
 - After the DM rule landed, the user's earlier top-level DM message arrived at the next prompt as
   `slack:D1MG8KWNR/1794976101.418449 | replies 0 → 1 by @dpepper`: not pushed (own), shown by the
   prompt hook. Right on both counts: "own" on Slack means the user's identity, which covers a

@@ -757,12 +757,12 @@ was found.
   dogfooding found the gap: a watched DM message was answered with a plain
   message in the DM, and a thread-only read saw nothing. So the channel after
   the message is read too, and its messages join the same `replies` map — same
-  wording, same names, same `own` — by one rule per kind of conversation:
+  wording, same names, same receipts — by one rule per kind of conversation:
   - **In a DM, every later message.** There the next message *is* the answer.
     A DM is a `D` id, which Slack gives every IM and nothing else.
   - **In a channel, a later message that @mentions the reader.** The bridge
     reports each channel message's `mentions` as user ids, and the reader is
-    the same `me` that marks replies `own`. No window beyond the watch itself:
+    `slack.user_id`, or `whoami` once. No window beyond the watch itself:
     after the message, while watched. A channel message that mentions nobody
     is someone else's conversation.
   - **A group DM is a channel here.** Its id is `G…` or `C…`, so nothing local
@@ -822,13 +822,56 @@ to include it, and `ThreadEntry` has no field to hold it if the model adds some
 anyway), and a push says who, how many, which emoji, and the reference. To read
 what was said, the agent uses Slack itself — a step it chooses.
 
-**Your own replies are receipts.** A reply transition made only by the Slack
-user the credentials belong to is recorded with `own` and `push::worth_a_turn`
-passes it over; it still shows at the next prompt. Anyone else in the same
-transition makes it news, and they are named. Who you are is
-`slack.user_id`, or found out once with `whoami` and cached in `state.json` —
-lazily, on the first read. Reactions can't be told apart, per above, so your
-own reactions push.
+**Your own replies are receipts — "own" is what this session posted.** Changed
+2026-11-17. The first rule was by author: a reply whose author was the user the
+credentials belong to was a receipt. But the Slack MCP posts *as the user*, so
+the agent and the person share one identity, and the person answering the
+agent from their phone — the exact case push exists for — was a receipt and
+never woke the session. The only way left to reach it from a phone was an
+emoji. So who wrote a message no longer decides anything; what the session is
+on record as having done does:
+
+- **The record is the hook's.** `post-tool` already sees every post it can
+  watch (the send tool's channel + ts, `chat.postMessage`'s reply). Each one is
+  also a `Receipt::Posted`, written onto every watch *that reader* owns in that
+  conversation (`Watch::receipts`, keyed by reader). A reading's new replies
+  or channel messages are `Made::Posted(ts…)`, and a reader made them only
+  when it posted every one. Anything else in the same round makes it news.
+- **Per reader, because the identity is shared.** An event carries
+  `receipt_for`, the readers it is a receipt for, settled when it is recorded
+  — like `audience`, from who was watching and what they had done. Two
+  sessions in one thread: the one that posted isn't pushed, the other is.
+- **Only what this reader posted.** A reply posted by another session, or by
+  the person at the desktop, is news — the hook didn't see it here, and only
+  a post this reader made is a receipt for it.
+- **Bounded by the watch.** Receipts live on the watch and go with it. A
+  ts is unique, so a posted receipt never needs spending.
+- **Reactions too, through the react tool.** Its input names channel, ts and
+  emoji, so `slack_add_reaction` on a watched message is a
+  `Receipt::Reacted`. A count that grew by no more than the reader's
+  receipts for that emoji is the reader's; matching spends them, so the next
+  `:eyes:` is someone else's. A receipt is forgotten once a reading taken
+  after it has been recorded, matched or not: Slack ignores a duplicate
+  reaction, and a receipt that moved nothing must not claim the next
+  person's. Needs the react tool in the `PostToolUse` matcher. *Unverified:*
+  Slack canonicalizes some names (`thumbsup` reads back as `+1`), and such a
+  reaction isn't matched, so it pushes, as before.
+- **A shrink isn't worth a turn.** A removed reaction or a deleted reply is
+  in `events` and never pushed: there is nothing to answer.
+
+This departs from "withholding a push from the session that caused the
+transition was considered and rejected" (above) for Slack only. Two of its
+reasons don't hold here: the hook names the Slack target exactly (channel and
+ts from the call and its result, not from how a command was spelled), and a
+post never fails silently into a later real transition, because a ts that was
+never posted never appears. The subagent objection does: a subagent shares
+its parent's session id, so a reply a subagent posted is a receipt for the
+parent too. GitHub comments keep the author rule (`@<viewer>`), with the
+same shared-identity flaw, unfixed here.
+
+`slack.user_id` (or `whoami`, cached in `state.json`) is still read, lazily:
+it is how a channel message that @mentions the reader is recognized as a
+reply.
 
 **The hook.** `post-tool` matches the Slack MCP send tool by name, built from
 `[slack.mcp]` (`ToolNames::send`, `mcp__claude_ai_Slack__slack_send_message` by
@@ -845,6 +888,11 @@ default), and Bash `curl`s to `chat.postMessage`:
   "channel", "ts", "message": {"thread_ts"}}`, read as JSON from stdout or not
   at all. The `slack` CLI isn't recognized: nothing here could say what it
   prints. `domain::slack::posted_via_api` is the seam for it.
+- **The react tool** (`ToolNames::react`, `slack_add_reaction`): watches
+  nothing; its `channel_id`, `message_ts` and `emoji` are a receipt.
+
+The matcher has to name both MCP tools; the myclaude plugin's `hooks.json`
+needs the react tool added as well.
 
 **The bridge's own hooks.** The `claude -p` child is a Claude Code session and
 runs the user's hooks, inkling's included — measured: a `SessionStart` hook in
@@ -912,8 +960,9 @@ names are the page's.
 same batched query every time rather than cached. It is one field in a request
 already being made — measured, the cost stays at one rate-limit point — so
 there is nothing to store and nothing to go stale when the token changes. A
-transition whose new comments are all `@<viewer>` is `own`: recorded, shown at
-the next prompt, not pushed, exactly as Slack replies. Logins are compared as
+transition whose new comments are all `@<viewer>` is a receipt for every reader:
+recorded, shown at the next prompt, not pushed. (Slack moved off this author
+rule; see Slack messages.) Logins are compared as
 spelled, `@login`, the same form actors already use. A GitHub App's token is a
 Bot viewer whose login is `name[bot]`, where the same account as an author is
 `name`; so the viewer is spelled as an author is, `name (bot)`. Unverified: no
@@ -1012,8 +1061,8 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
   only, and a thread reply is that thread's news — watch the message for it. A
   reply also sent to the channel (`reply_broadcast`) is top-level and does
   count. Not seen live: this workspace has no threads to look at.
-- **Your own posts are receipts.** A round whose new messages are all yours is
-  recorded with `own` and not pushed, as for replies.
+- **What the session posted is a receipt.** A round whose new messages the
+  session posted, as the hook saw, is recorded and not pushed, as for replies.
 - **It never finishes.** It lives until its `--ttl`. The default 72h suits a
   message; a standing channel watch usually wants `--ttl 7d` or `--ttl 30d`
   (any humantime duration is accepted). There is no "forever": an expiry is

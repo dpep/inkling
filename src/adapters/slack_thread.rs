@@ -38,6 +38,12 @@ impl<R: Runner> SlackThreads<R> {
         }
     }
 
+    /// The reader's Slack user id, which is how a channel message that
+    /// @mentions them is recognized as a reply.
+    fn me(&self) -> Option<String> {
+        self.me.get_or_init(|| (self.identify)()).clone()
+    }
+
     fn read_one(&self, reference: &Reference) -> Result<MessageStatus, RefError> {
         let Reference::SlackMessage {
             channel,
@@ -92,10 +98,6 @@ impl<R: Runner> MessageProvider for SlackThreads<R> {
             .iter()
             .map(|reference| (reference.clone(), self.read_one(reference)))
             .collect())
-    }
-
-    fn me(&self) -> Option<String> {
-        self.me.get_or_init(|| (self.identify)()).clone()
     }
 
     /// One `read_channel`, no thread reads: a reply in a thread is that
