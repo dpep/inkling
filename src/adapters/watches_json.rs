@@ -720,8 +720,8 @@ impl Watches {
             fresh.push(Event {
                 seq: self.last_seq,
                 at: observed_at,
+                axis: Axis::of(&watch.reference),
                 reference: watch.reference,
-                axis: Axis::State,
                 from: "watched".into(),
                 to: "gone".into(),
                 title: watch.seen.map(|seen| seen.title).unwrap_or_default(),

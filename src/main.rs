@@ -1168,12 +1168,9 @@ fn complete(
 ) -> Result<inkling::domain::model::Reference, String> {
     match (owner, repo) {
         (Some(owner), Some(repo)) => match hosts.first() {
-            Some(host) => Ok(inkling::domain::model::Reference::GitHubPullRequest {
-                host: host.clone(),
-                owner,
-                repo,
-                number,
-            }),
+            Some(host) => Ok(inkling::domain::model::Reference::pull_request(
+                host, &owner, &repo, number,
+            )),
             None => Err(format!(
                 "{owner}/{repo}#{number}: no github host is configured — give the full reference"
             )),
@@ -1636,16 +1633,20 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
                     file.take(&input.session_id, clock.now())
                 })
                 .map_err(|e| e.to_string())?;
-            // Nothing to say means nothing printed: this runs on every
-            // prompt, and the common case must add nothing to it. The same
-            // wording a push uses, so news reads the same whichever way it
-            // arrived.
-            for event in &due {
-                println!("{}", inkling::push::message(event));
+            if let Some(news) = news(&due) {
+                println!("{news}");
             }
             Ok(())
         }
     }
+}
+
+/// What a prompt owes the session, worded and grouped as a push is, so news
+/// reads the same whichever way it arrived. `None` when nothing is owed: this
+/// runs on every prompt, and the common case must add nothing to it.
+fn news(due: &[inkling::domain::watch::Event]) -> Option<String> {
+    let due: Vec<_> = due.iter().collect();
+    (!due.is_empty()).then(|| inkling::push::digest(&due))
 }
 
 /// How long the `post-tool` hook will wait on GitHub to say which pull
@@ -2245,21 +2246,38 @@ fn finished_already(
 }
 
 /// Why the references just asked for couldn't be read, if they couldn't —
-/// not the other watches the same poll happened to read.
-fn unread<'a>(
+/// not the other watches the same poll happened to read. One that has no line
+/// of its own and wasn't read fell with its whole provider, whose line it gets.
+fn unread(
     asked: &[inkling::domain::model::Reference],
-    polled: &'a inkling::watch::Polled,
-) -> Vec<&'a str> {
-    polled
-        .failures
-        .iter()
-        .filter(|line| {
-            asked
-                .iter()
-                .any(|reference| line.starts_with(&format!("{reference}: ")))
-        })
-        .map(String::as_str)
-        .collect()
+    polled: &inkling::watch::Polled,
+) -> Vec<String> {
+    let mut own = Vec::new();
+    let mut whole: Vec<(&str, Vec<String>)> = Vec::new();
+    for reference in asked {
+        let mine = format!("{reference}: ");
+        if let Some(line) = polled.failures.iter().find(|l| l.starts_with(&mine)) {
+            own.push(line.clone());
+            continue;
+        }
+        if polled.sightings.iter().any(|(seen, _)| seen == reference) {
+            continue;
+        }
+        let prefix = inkling::ports::ProviderError::prefix(reference);
+        let Some(line) = polled.failures.iter().find(|l| l.starts_with(prefix)) else {
+            continue;
+        };
+        match whole.iter_mut().find(|(l, _)| *l == line.as_str()) {
+            Some((_, references)) => references.push(reference.to_string()),
+            None => whole.push((line, vec![reference.to_string()])),
+        }
+    }
+    own.extend(
+        whole
+            .into_iter()
+            .map(|(line, references)| format!("{}: {line}", references.join(", "))),
+    );
+    own
 }
 
 fn watch_out(
@@ -2849,7 +2867,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge,
+        Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge, news,
         noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
     };
     use inkling::adapters::store_json::Snapshot;
@@ -3105,6 +3123,25 @@ mod tests {
     }
 
     #[test]
+    fn one_pull_request_typed_in_any_case_is_one_reference() {
+        // GitHub ignores case in owner and repo; two keys would be two
+        // watches reporting every transition twice.
+        for target in [
+            "https://GitHub.com/DPep/Inkling/pull/3",
+            "github.com/dpep/INKLING#3",
+            "DPEP/inkling#3",
+        ] {
+            for (command, resolved) in each_command(target, &[]) {
+                assert_eq!(
+                    resolved.as_deref(),
+                    Ok("github.com/dpep/inkling#3"),
+                    "{command} {target}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_shorter_form_still_needs_something_watched_to_match() {
         // The other half of the one rule, and the reason it isn't "accept
         // everything": `inkling#3` leaves out the owner, and guessing one
@@ -3209,6 +3246,52 @@ mod tests {
             unread(&[pr(7)], &polled),
             ["github.com/dpep/inkling#7: not found or not visible"]
         );
+    }
+
+    #[test]
+    fn watching_something_whose_whole_provider_failed_says_why() {
+        let jira = |key: &str| inkling::domain::model::Reference::JiraIssue { key: key.into() };
+        let polled = Polled {
+            sightings: vec![merged(7)],
+            failures: vec![
+                "github request failed: HTTP 401".into(),
+                "jira request failed: running `acli`: no answer within 5s".into(),
+            ],
+            ..Polled::default()
+        };
+        assert_eq!(
+            unread(&[jira("AI-1"), jira("AI-2"), pr(7)], &polled),
+            ["AI-1, AI-2: jira request failed: running `acli`: no answer within 5s"]
+        );
+    }
+
+    #[test]
+    fn news_pulled_at_a_prompt_reads_as_one_push() {
+        use inkling::domain::watch::{Axis, Event};
+        let reaction = |seq: u64, emoji: &str| Event {
+            seq,
+            at: chrono::Utc::now(),
+            reference: inkling::domain::model::Reference::SlackMessage {
+                channel: "C1".into(),
+                ts: "1.000001".into(),
+                thread: None,
+            },
+            axis: Axis::Reactions,
+            from: "0".into(),
+            to: "1".into(),
+            title: String::new(),
+            detail: Some(format!(":{emoji}:")),
+            job: None,
+            receipt_for: Default::default(),
+            partial: false,
+            lines: 0,
+            after: None,
+            audience: Default::default(),
+        };
+        assert_eq!(news(&[]), None, "nothing owed prints nothing");
+        let said = news(&[reaction(1, "dart"), reaction(2, "+1")]).unwrap();
+        assert_eq!(said.lines().count(), 1, "{said}");
+        assert!(said.contains("2 reactions :dart: :+1:"), "{said}");
     }
 
     #[test]

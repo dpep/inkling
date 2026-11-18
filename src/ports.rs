@@ -90,10 +90,28 @@ pub trait MessageSource {
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
-    #[error("github request failed: {0}")]
+    #[error("{GITHUB_FAILED}{0}")]
     Transport(String),
-    #[error("slack read failed: {0}")]
+    #[error("{JIRA_FAILED}{0}")]
+    Jira(String),
+    #[error("{SLACK_FAILED}{0}")]
     Slack(String),
+}
+
+const GITHUB_FAILED: &str = "github request failed: ";
+const JIRA_FAILED: &str = "jira request failed: ";
+const SLACK_FAILED: &str = "slack read failed: ";
+
+impl ProviderError {
+    /// How a failure of the provider that reads `reference` begins, so a
+    /// caller holding only its text can tell whose it was.
+    pub fn prefix(reference: &Reference) -> &'static str {
+        match reference {
+            Reference::GitHubPullRequest { .. } => GITHUB_FAILED,
+            Reference::JiraIssue { .. } => JIRA_FAILED,
+            Reference::SlackMessage { .. } | Reference::SlackChannel { .. } => SLACK_FAILED,
+        }
+    }
 }
 
 /// Why one reference couldn't be resolved, while its siblings could.

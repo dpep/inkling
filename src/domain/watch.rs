@@ -124,6 +124,15 @@ pub enum Axis {
 }
 
 impl Axis {
+    /// The axis a reference's own standing moves on, which is where its end
+    /// (`watched → gone`) is said too.
+    pub fn of(reference: &Reference) -> Axis {
+        match reference {
+            Reference::JiraIssue { .. } => Axis::Status,
+            _ => Axis::State,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Axis::State => "state",
@@ -264,9 +273,6 @@ pub struct Discussion {
     /// Every remark made at or after this is in `remarks`. `None` when all of
     /// them are; otherwise a burst bigger than a page may reach past it.
     pub complete_after: Option<DateTime<Utc>>,
-    /// `total` leaves out reviews beyond the page, so it is a floor. Without
-    /// that, a burst past the page still has an exact count.
-    pub floor: bool,
 }
 
 /// One reading of one reference, as a poll hands it over.
@@ -678,12 +684,22 @@ fn commented(
     };
     let mut new: Vec<&Remark> = said.remarks.iter().filter(|r| had.is_new(r)).collect();
     new.sort_by_key(|remark| remark.at);
+    // The oldest of a full page is itself new, so the burst may reach further
+    // back than the page did. GitHub's totals make up the number, but not for
+    // a comment deleted meanwhile, so it is a floor.
+    let partial = said
+        .complete_after
+        .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
     let mut mark = had.clone();
     mark.advance(new.iter().copied());
     mark.count = mark
         .count
-        .saturating_add(new.iter().map(|r| r.weight()).sum())
-        .max(said.total);
+        .saturating_add(new.iter().map(|r| r.weight()).sum());
+    // Only a burst past the page needs the total: otherwise the page held
+    // everything new, and the total also grows by a body edited into a review.
+    if partial {
+        mark.count = mark.count.max(said.total);
+    }
 
     // What the state axis said is still counted, so it starts the line's
     // count rather than being part of it.
@@ -710,12 +726,6 @@ fn commented(
         Some(me) if names.iter().all(|name| *name == me) => Made::Viewer,
         _ => Made::Others,
     };
-    // The oldest of a full page is itself new, so the burst may reach further
-    // back than the page did — which only GitHub's totals can make up for.
-    let partial = said.floor
-        && said
-            .complete_after
-            .is_some_and(|after| had.latest.is_none_or(|latest| after > latest));
     let moved = Transition {
         axis: Axis::Comments,
         from: (had.count + unsaid).to_string(),
@@ -973,6 +983,17 @@ impl std::str::FromStr for Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_jira_issue_stands_on_its_status_and_the_rest_on_their_state() {
+        let jira = Reference::JiraIssue { key: "AI-7".into() };
+        assert_eq!(Axis::of(&jira), Axis::Status);
+        let channel = Reference::SlackChannel {
+            channel: "C1".into(),
+            name: None,
+        };
+        assert_eq!(Axis::of(&channel), Axis::State);
+    }
 
     #[test]
     fn a_state_change_says_who_caused_it() {
@@ -1620,8 +1641,6 @@ mod tests {
                 remarks: page.clone(),
                 total: 41,
                 complete_after: Some(page[0].at),
-                // More reviews than a page: what wasn't read wasn't summed.
-                floor: true,
             }),
             ..commenting(State::Open, &[], 0)
         };
@@ -1640,6 +1659,29 @@ mod tests {
             lines,
             ..remark("r", "10:00:00", "@alice")
         }
+    }
+
+    #[test]
+    fn a_body_edited_into_an_old_review_is_not_counted_as_the_new_comment() {
+        // An edit isn't news, so GitHub's total growing by it mustn't be
+        // credited to whoever did write something new.
+        let lines_only = Remark {
+            lines: 2,
+            body: false,
+            ..remark("r1", "09:00:00", "@carol")
+        };
+        let base = reading(
+            None,
+            &commenting(State::Open, std::slice::from_ref(&lines_only), 2),
+        )
+        .standing;
+        let edited = Remark {
+            body: true,
+            ..lines_only
+        };
+        let both = [edited, remark("b", "10:01:00", "@bob")];
+        let moved = changed(Some(&base), &commenting(State::Open, &both, 4));
+        assert_eq!(labels(&moved), [("comments", "2", "3")], "bob wrote one");
     }
 
     #[test]
@@ -1672,9 +1714,11 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_past_the_page_is_exact_when_github_counted_all_of_it() {
-        // Conversation comments past the page: totalCount says how many, so
-        // only the names are the page's.
+    fn a_burst_past_the_page_is_at_least_what_github_counted() {
+        // Conversation comments past the page: totalCount gives the number,
+        // but a comment deleted since the last reading hides one new one, and
+        // nothing the page shows can tell. Recorded as a hunt repro: one of
+        // ten deleted, then 31 new, read as exactly 30.
         let base = reading(
             None,
             &commenting(State::Open, &[remark("a", "10:00:00", "@alice")], 1),
@@ -1688,13 +1732,12 @@ mod tests {
                 remarks: page.clone(),
                 total: 31,
                 complete_after: Some(page[0].at),
-                floor: false,
             }),
             ..commenting(State::Open, &[], 0)
         };
         let moved = changed(Some(&base), &burst);
         assert_eq!(labels(&moved), [("comments", "1", "31")]);
-        assert!(!moved[0].partial, "the count is GitHub's, not a floor");
+        assert!(moved[0].partial, "the count is GitHub's less any deletions");
     }
 
     #[test]

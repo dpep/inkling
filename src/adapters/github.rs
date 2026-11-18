@@ -119,12 +119,7 @@ fn pushed_pulls(pushes: &[Pushed], response: &PushResponse) -> Vec<(usize, Refer
                 if !head.is(&push.repository(), &push.branch) {
                     continue;
                 }
-                let reference = Reference::GitHubPullRequest {
-                    host: push.host.clone(),
-                    owner: owner.to_string(),
-                    repo: repo.to_string(),
-                    number: pull.number,
-                };
+                let reference = Reference::pull_request(&push.host, owner, repo, pull.number);
                 found.push((i, reference, head));
             }
         }
@@ -286,6 +281,14 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
     // as the reader's own.
     let me = response.data.viewer.as_ref().map(Viewer::display);
 
+    // Gone ends a watch for good, so an error says gone only when it is
+    // GitHub positively saying "not there"; a timeout that nulled it is not.
+    let unread = |alias: &str| match errors.get(alias).copied().or(whole_batch) {
+        Some(message) if message.contains("Could not resolve") => RefError::NotFound,
+        Some(message) => RefError::Other(message.to_string()),
+        None => RefError::NotFound,
+    };
+
     references
         .iter()
         .enumerate()
@@ -308,14 +311,10 @@ fn interpret(references: &[Reference], response: &Response) -> Vec<Lookup> {
                         },
                         discussion: Some(pr.discussion()),
                     }),
-                    None => Err(RefError::NotFound),
+                    None => Err(unread(&alias)),
                 },
                 // Null data with an error is the normal unreadable-repo shape.
-                _ => Err(match errors.get(alias.as_str()).copied().or(whole_batch) {
-                    Some(message) if message.contains("Could not resolve") => RefError::NotFound,
-                    Some(message) => RefError::Other(message.to_string()),
-                    None => RefError::NotFound,
-                }),
+                _ => Err(unread(&alias)),
             };
             (reference.clone(), state)
         })
@@ -904,7 +903,6 @@ impl PullRequest {
         }
         if let Some(reviews) = &self.reviews {
             horizons.extend(reviews.horizon(|r| r.submitted_at));
-            said.floor = reviews.total_count > reviews.nodes.len() as u64;
             for review in &reviews.nodes {
                 let Some(at) = review.submitted_at else {
                     continue;
@@ -1112,6 +1110,28 @@ mod tests {
         let json = r#"{"data":{"r0":{"pullRequest":null}}}"#;
         assert_eq!(
             interpret(&[pr("gqls", 999)], &parse(json))[0].1,
+            Err(RefError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_pull_request_nulled_by_an_error_is_a_failed_read_not_a_missing_one() {
+        // Gone ends a watch for good, so only a positive "not there" says so.
+        let json = r#"{
+            "data": {"r0": {"pullRequest": null}},
+            "errors": [{"path": ["r0", "pullRequest", "commits"], "message": "Timeout on validation of query"}]
+        }"#;
+        assert_eq!(
+            interpret(&[pr("x", 1)], &parse(json))[0].1,
+            Err(RefError::Other("Timeout on validation of query".into()))
+        );
+
+        let missing = r#"{
+            "data": {"r0": {"pullRequest": null}},
+            "errors": [{"type": "NOT_FOUND", "path": ["r0", "pullRequest"], "message": "Could not resolve to a PullRequest with the number of 999."}]
+        }"#;
+        assert_eq!(
+            interpret(&[pr("x", 999)], &parse(missing))[0].1,
             Err(RefError::NotFound)
         );
     }
@@ -1813,7 +1833,6 @@ mod tests {
         );
         assert_eq!(said.total, 8, "five comments and copilot's three reviews");
         assert_eq!(said.complete_after, None, "both pages held everything");
-        assert!(!said.floor);
         let who: Vec<&str> = said.remarks.iter().map(|r| r.by.as_str()).collect();
         assert_eq!(
             who,
@@ -1856,7 +1875,6 @@ mod tests {
         );
         assert!(said.remarks[..11].iter().all(|r| r.lines == 0 && r.body));
         assert_eq!(said.total, 11 + 50 + 2 + 3 + 1 + 4);
-        assert!(said.floor, "125 reviews, and only a page of them summed");
     }
 
     #[test]

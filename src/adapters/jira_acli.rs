@@ -15,10 +15,11 @@ use crate::domain::watch::Category;
 use crate::ports::{IssueLookup, IssueProvider, IssueStatus, ProviderError, RefError};
 use serde::Deserialize;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// One `acli` invocation. Behind a trait so tests replay recorded output
 /// instead of needing a Jira site.
-pub trait Shell {
+pub trait Shell: Sync {
     /// Stdout on success; stderr on failure, which is where `acli` puts the
     /// reason and where it exits 1 (recorded 2026-09-20, acli 1.3.19).
     fn view(&self, key: &str) -> Result<String, Failure>;
@@ -30,6 +31,8 @@ pub enum Failure {
     Refused(String),
     /// `acli` didn't run at all — not installed, not on PATH.
     Unavailable(String),
+    /// `acli` ran but didn't answer in time.
+    TimedOut(String),
 }
 
 pub struct AcliShell {
@@ -67,13 +70,24 @@ impl AcliShell {
 /// an unbounded one is an unbounded tick.
 const VIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How many `acli` calls run at once. One at a time, a handful of watched
+/// issues held a whole poll — and the pull requests read beside them — for
+/// several seconds; more at once only loads the Jira site.
+const CONCURRENCY: usize = 4;
+
 impl Shell for AcliShell {
     fn view(&self, key: &str) -> Result<String, Failure> {
         let output = crate::subprocess::output_within(
             Command::new(&self.command).args(Self::args(key)),
             VIEW_TIMEOUT,
         )
-        .map_err(|e| Failure::Unavailable(format!("running `{}`: {e}", self.command)))?;
+        .map_err(|e| {
+            let message = format!("running `{}`: {e}", self.command);
+            match e.kind() {
+                std::io::ErrorKind::TimedOut => Failure::TimedOut(message),
+                _ => Failure::Unavailable(message),
+            }
+        })?;
 
         match output.status.success() {
             true => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
@@ -108,20 +122,50 @@ impl<S: Shell> JiraProvider<S> {
     }
 }
 
+impl<S: Shell> JiraProvider<S> {
+    /// Every key's answer, in the order given, `CONCURRENCY` at a time.
+    fn views(&self, keys: &[String]) -> Vec<Result<String, Failure>> {
+        let next = AtomicUsize::new(0);
+        let mut views: Vec<(usize, Result<String, Failure>)> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..CONCURRENCY.min(keys.len()))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut done = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(key) = keys.get(i) else { break };
+                            done.push((i, self.shell.view(key)));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("an acli read panicked"))
+                .collect()
+        });
+        views.sort_by_key(|(i, _)| *i);
+        views.into_iter().map(|(_, view)| view).collect()
+    }
+}
+
 impl<S: Shell> IssueProvider for JiraProvider<S> {
     /// One call per key: `acli`'s `view` takes a single key on the command
     /// line, and batching would mean writing a temp file for it. At a handful
     /// of watched issues that trade isn't close.
     fn read(&self, keys: &[String]) -> Result<Vec<IssueLookup>, ProviderError> {
         keys.iter()
-            .map(|key| {
-                let status = match self.shell.view(key) {
+            .zip(self.views(keys))
+            .map(|(key, view)| {
+                let status = match view {
                     Ok(raw) => interpret(&raw),
                     Err(Failure::Refused(message)) => Err(refusal(&message)),
+                    Err(Failure::TimedOut(message)) => Err(RefError::Other(message)),
                     // Nothing else will work either, so this is the whole
                     // provider failing rather than one issue.
                     Err(Failure::Unavailable(message)) => {
-                        return Err(ProviderError::Transport(message));
+                        return Err(ProviderError::Jira(message));
                     }
                 };
                 Ok((key.clone(), status))
@@ -223,7 +267,6 @@ struct StatusCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
 
     /// The REST issue resource, trimmed to the fields `--fields` asks for.
     ///
@@ -239,24 +282,21 @@ mod tests {
         )
     }
 
+    /// Replies by key: `AI-n` gets the nth, whatever order the calls arrive in.
     struct Canned {
-        replies: RefCell<Vec<Result<String, Failure>>>,
-        asked: RefCell<Vec<String>>,
+        replies: Vec<Result<String, Failure>>,
     }
 
     impl Canned {
         fn of(replies: Vec<Result<String, Failure>>) -> Self {
-            Self {
-                replies: RefCell::new(replies),
-                asked: RefCell::new(Vec::new()),
-            }
+            Self { replies }
         }
     }
 
     impl Shell for Canned {
         fn view(&self, key: &str) -> Result<String, Failure> {
-            self.asked.borrow_mut().push(key.to_string());
-            self.replies.borrow_mut().remove(0)
+            let n: usize = key.trim_start_matches("AI-").parse().unwrap();
+            self.replies[n - 1].clone()
         }
     }
 
@@ -323,7 +363,33 @@ mod tests {
         let provider = JiraProvider::with_shell(Canned::of(vec![Err(Failure::Unavailable(
             "running `acli`: No such file or directory".into(),
         ))]));
-        assert!(provider.read(&["AI-1".to_string()]).is_err());
+        let error = provider.read(&["AI-1".to_string()]).unwrap_err();
+        assert!(error.to_string().starts_with("jira "), "{error}");
+    }
+
+    #[test]
+    fn a_slow_issue_fails_alone_and_keeps_the_others() {
+        // A timeout says nothing about the next key, unlike a missing binary.
+        let provider = JiraProvider::with_shell(Canned::of(vec![
+            Ok(issue("To Do", "new")),
+            Err(Failure::TimedOut(
+                "running `acli`: no answer within 5s".into(),
+            )),
+            Ok(issue("Done", "done")),
+        ]));
+        let keys = ["AI-1", "AI-2", "AI-3"].map(String::from);
+        let read = provider
+            .read(&keys)
+            .expect("one slow issue is not the provider");
+
+        assert!(read[0].1.is_ok());
+        assert_eq!(
+            read[1].1,
+            Err(RefError::Other(
+                "running `acli`: no answer within 5s".into()
+            ))
+        );
+        assert!(read[2].1.is_ok());
     }
 
     #[test]
@@ -360,6 +426,44 @@ mod tests {
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].0, "AI-1");
         assert_eq!(read[1].1.as_ref().unwrap().category, Category::Done);
+    }
+
+    #[test]
+    fn issues_are_read_a_few_at_a_time_and_come_back_in_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // How many calls are in flight at once, at most.
+        #[derive(Default)]
+        struct Counting {
+            now: AtomicUsize,
+            most: AtomicUsize,
+        }
+
+        impl Shell for Counting {
+            fn view(&self, key: &str) -> Result<String, Failure> {
+                let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                self.now.fetch_sub(1, Ordering::SeqCst);
+                Ok(issue(key, "new"))
+            }
+        }
+
+        let provider = JiraProvider::with_shell(Counting::default());
+        let keys: Vec<String> = (1..=9).map(|n| format!("AI-{n}")).collect();
+        let read = provider.read(&keys).unwrap();
+
+        let names: Vec<_> = read
+            .iter()
+            .map(|(key, status)| (key.clone(), status.clone().unwrap().name))
+            .collect();
+        assert_eq!(
+            names,
+            keys.iter()
+                .map(|k| (k.clone(), k.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(provider.shell.most.load(Ordering::SeqCst), CONCURRENCY);
     }
 
     #[test]

@@ -315,6 +315,16 @@ impl Config {
         if self.github.hosts.is_empty() {
             return Err(invalid("github.hosts is empty; nothing would match".into()));
         }
+        // Every reference is read from api_url, so a second host's pull
+        // request would be read as the same number on the first host.
+        if self.github.hosts.len() > 1 {
+            return Err(invalid(format!(
+                "github.hosts lists {}, but every host is read from one api_url ({}); \
+                 list only the host api_url serves",
+                self.github.hosts.join(", "),
+                self.github.api_url
+            )));
+        }
 
         if self.tracking.doubling_period.is_zero() {
             return Err(invalid(
@@ -870,5 +880,16 @@ mod tests {
             canonical = ""
         "#;
         assert!(error(raw).contains("canonical is empty"));
+    }
+
+    #[test]
+    fn a_second_github_host_is_rejected_rather_than_read_from_the_first_ones_api() {
+        let raw = format!("{EXAMPLE}\n[github]\nhosts = [\"github.com\", \"ghe.example.com\"]\n");
+        assert!(error(&raw).contains("one api_url"), "{}", error(&raw));
+
+        let enterprise = format!(
+            "{EXAMPLE}\n[github]\nhosts = [\"ghe.example.com\"]\napi_url = \"https://ghe.example.com/api/graphql\"\n"
+        );
+        assert!(parse(&enterprise).is_ok());
     }
 }

@@ -46,7 +46,7 @@ pub fn message(event: &Event) -> String {
 
 /// Everything one round owes a session, as one message: a merge queue that
 /// lands fifteen pull requests costs one turn, not fifteen.
-fn digest(events: &[&Event]) -> String {
+pub fn digest(events: &[&Event]) -> String {
     match lines(events).as_slice() {
         [line] => format!("inkling: {line}"),
         lines => {
