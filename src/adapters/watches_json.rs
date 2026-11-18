@@ -25,6 +25,7 @@ use crate::domain::watch::{
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -941,12 +942,42 @@ fn parse(raw: &str) -> Result<Watches, Unparsed> {
         return Err(Unparsed::Newer(found));
     }
     let mut watches: Watches = serde_json::from_str(raw).map_err(Unparsed::Broken)?;
-    // A channel was keyed by its name before 2026-11-17.
-    let rekeyed = std::mem::take(&mut watches.watches)
-        .into_values()
-        .map(|watch| (watch.reference.key(), watch));
-    watches.watches = rekeyed.collect();
+    // A channel was keyed by its name before 2026-11-17, so one may be there
+    // under both keys.
+    for watch in std::mem::take(&mut watches.watches).into_values() {
+        match watches.watches.entry(watch.reference.key()) {
+            Entry::Vacant(slot) => {
+                slot.insert(watch);
+            }
+            Entry::Occupied(mut slot) => merge(slot.get_mut(), watch),
+        }
+    }
     Ok(watches)
+}
+
+/// One watch of the same thing from two: every reader and receipt, the later
+/// deadline and reading, and the reference that knows a name.
+fn merge(into: &mut Watch, other: Watch) {
+    if matches!(
+        other.reference,
+        Reference::SlackChannel { name: Some(_), .. }
+    ) {
+        into.reference = other.reference;
+    }
+    into.since = into.since.min(other.since);
+    into.deadline = into.deadline.max(other.deadline);
+    if other.seen.as_ref().map(|s| s.at) > into.seen.as_ref().map(|s| s.at) {
+        into.seen = other.seen;
+    }
+    into.owners.extend(other.owners);
+    into.stirred_at = into.stirred_at.max(other.stirred_at);
+    into.head = into.head.take().or(other.head);
+    into.tried_at = into.tried_at.max(other.tried_at);
+    for (owner, theirs) in other.receipts {
+        let mine = into.receipts.entry(owner).or_default();
+        mine.posted.extend(theirs.posted);
+        mine.reacted.extend(theirs.reacted);
+    }
 }
 
 /// `watches.json` and the lock around it.
@@ -2447,6 +2478,48 @@ mod tests {
             "s-2 watches nothing"
         );
         assert!(watches.reachable("s-1", now()), "but status still shows it");
+    }
+
+    #[test]
+    fn a_channel_watched_under_both_keys_merges_when_rekeyed() {
+        // A store from before channels were keyed by id can hold one watch
+        // by name and another by id; rekeying must not drop either's readers.
+        let channel = |name: Option<&str>| Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: name.map(Into::into),
+        };
+        let mut by_name = Watches::default();
+        by_name.watch(&channel(Some("general")), "b", forever(), now());
+        let posted = Receipt::Posted {
+            channel: "C0E48AHSN".into(),
+            ts: "1.1".into(),
+        };
+        by_name.receipt("b", &posted, now());
+        let mut by_id = Watches::default();
+        by_id.watch(&channel(None), "a", now() + TimeDelta::days(1), now());
+        let mut old = Watches {
+            version: 2,
+            ..Watches::default()
+        };
+        old.watches.insert(
+            "slack:#general".into(),
+            by_name.watches.into_values().next().unwrap(),
+        );
+        old.watches.insert(
+            "slack:C0E48AHSN".into(),
+            by_id.watches.into_values().next().unwrap(),
+        );
+
+        let raw = serde_json::to_string(&old).unwrap();
+        let Ok(watches) = parse(&raw) else {
+            panic!("parses")
+        };
+        assert_eq!(watches.watches.len(), 1);
+        let watch = &watches.watches["slack:C0E48AHSN"];
+        assert_eq!(watch.reference, channel(Some("general")));
+        assert_eq!(watch.owners, ["a".to_string(), "b".to_string()].into());
+        assert_eq!(watch.deadline, forever());
+        assert!(watch.receipts["b"].posted.contains("1.1"));
     }
 
     #[test]
