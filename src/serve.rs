@@ -10,7 +10,9 @@
 //! lease made resident.
 //!
 //! What a tick *does* is somebody else's business. This module owns the lock,
-//! the clock, the exit conditions, and the log — nothing else.
+//! the clock, the exit conditions, and the log — nothing else. Work too slow
+//! for a tick runs `beside` the loop, on a thread that lives no longer than
+//! the lock does.
 
 use crate::adapters::lock::{FileLock, LockError};
 use crate::ports::{Clock, RealSleeper, Sleeper, SystemClock};
@@ -375,6 +377,51 @@ pub struct Serve<'a> {
     pub clock: &'a dyn Clock,
     pub sleeper: &'a dyn Sleeper,
     pub shutdown: &'a dyn Shutdown,
+    /// Work too slow for a tick, run on its own thread for as long as this
+    /// process holds the lock.
+    pub beside: Option<&'a Worker<'a>>,
+}
+
+pub type Worker<'a> = dyn Fn(&Beside) + Sync + 'a;
+
+/// What a worker beside the loop is handed: when to stop, and a way to wake
+/// the loop to deliver what it recorded.
+pub struct Beside<'a> {
+    done: &'a AtomicBool,
+    doorbell: &'a Path,
+}
+
+impl Beside<'_> {
+    /// The loop has finished, or a signal asked it to.
+    pub fn stopping(&self) -> bool {
+        self.done.load(Ordering::Relaxed) || SIGNALLED.load(Ordering::Relaxed)
+    }
+
+    pub fn wake(&self) {
+        ring(self.doorbell);
+    }
+
+    /// Up to `duration`, or until it is time to stop.
+    pub fn nap(&self, duration: Duration) {
+        let until = std::time::Instant::now() + duration;
+        while !self.stopping() {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(100)));
+        }
+    }
+}
+
+/// Sets the flag however the loop ends, a panic included: the scope joins the
+/// worker before unwinding, and a worker never told would hang it.
+struct Finished<'a>(&'a AtomicBool);
+
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Serve<'_> {
@@ -427,83 +474,95 @@ impl Serve<'_> {
             _ => false,
         };
 
-        let exit = loop {
-            // Before as well as after: a nap can span an install, and the new
-            // build's hooks may already have written a store this one can't.
-            if replaced() {
-                break Exit::Replaced;
+        let done = AtomicBool::new(false);
+        let exit = std::thread::scope(|scope| {
+            if let Some(worker) = self.beside {
+                let beside = Beside {
+                    done: &done,
+                    doorbell: &self.config.doorbell,
+                };
+                scope.spawn(move || worker(&beside));
             }
-            let tick_started = self.clock.now();
-            let outcome = self.work.tick();
-            let now = self.clock.now();
-            let tick_took = since(tick_started, now);
-            longest_tick = longest_tick.max(tick_took);
-            record.ticks += 1;
-            record.last_tick_at = Some(now);
-
-            match outcome {
-                Ok(Beat {
-                    pulse,
-                    next: wanted,
-                }) => {
-                    consecutive_failures = 0;
-                    record.last_error = None;
-                    next = wanted;
-                    idle_since = match pulse {
-                        Pulse::Busy => None,
-                        Pulse::Idle => idle_since.or(Some(now)),
-                        Pulse::Superseded => {
-                            superseded = true;
-                            idle_since
-                        }
-                    };
-                    tracing::debug!(
-                        tick = record.ticks,
-                        elapsed_ms = tick_took.as_millis() as u64,
-                        outcome = pulse.as_str(),
-                        idle_seconds = idle_since.map_or(0, |start| since(start, now).as_secs()),
-                        "tick"
-                    );
+            let _finished = Finished(&done);
+            loop {
+                // Before as well as after: a nap can span an install, and the new
+                // build's hooks may already have written a store this one can't.
+                if replaced() {
+                    break Exit::Replaced;
                 }
-                Err(error) => {
-                    consecutive_failures += 1;
-                    record.failures += 1;
-                    record.last_error = Some(error.to_string());
-                    tracing::warn!(
-                        %error,
-                        consecutive = consecutive_failures,
-                        elapsed_ms = tick_took.as_millis() as u64,
-                        "tick failed; still serving"
-                    );
-                }
-            }
-            self.write_status(&record);
+                let tick_started = self.clock.now();
+                let outcome = self.work.tick();
+                let now = self.clock.now();
+                let tick_took = since(tick_started, now);
+                longest_tick = longest_tick.max(tick_took);
+                record.ticks += 1;
+                record.last_tick_at = Some(now);
 
-            if let Some(idle_since) = idle_since
-                && since(idle_since, now) >= self.config.idle_after
-            {
-                break Exit::Idle;
+                match outcome {
+                    Ok(Beat {
+                        pulse,
+                        next: wanted,
+                    }) => {
+                        consecutive_failures = 0;
+                        record.last_error = None;
+                        next = wanted;
+                        idle_since = match pulse {
+                            Pulse::Busy => None,
+                            Pulse::Idle => idle_since.or(Some(now)),
+                            Pulse::Superseded => {
+                                superseded = true;
+                                idle_since
+                            }
+                        };
+                        tracing::debug!(
+                            tick = record.ticks,
+                            elapsed_ms = tick_took.as_millis() as u64,
+                            outcome = pulse.as_str(),
+                            idle_seconds =
+                                idle_since.map_or(0, |start| since(start, now).as_secs()),
+                            "tick"
+                        );
+                    }
+                    Err(error) => {
+                        consecutive_failures += 1;
+                        record.failures += 1;
+                        record.last_error = Some(error.to_string());
+                        tracing::warn!(
+                            %error,
+                            consecutive = consecutive_failures,
+                            elapsed_ms = tick_took.as_millis() as u64,
+                            "tick failed; still serving"
+                        );
+                    }
+                }
+                self.write_status(&record);
+
+                if let Some(idle_since) = idle_since
+                    && since(idle_since, now) >= self.config.idle_after
+                {
+                    break Exit::Idle;
+                }
+                if since(started, now) >= self.config.max_lifetime {
+                    break Exit::MaxLifetime;
+                }
+                if replaced() {
+                    break Exit::Replaced;
+                }
+                if superseded {
+                    tracing::info!("a newer build owns the store; standing down for it");
+                    break Exit::Superseded;
+                }
+                if self.shutdown.requested() {
+                    break Exit::Signalled;
+                }
+                let nap = match consecutive_failures {
+                    0 => self.nap(now, next, started, idle_since),
+                    failures => self.backoff(failures),
+                };
+                tracing::debug!(nap_seconds = nap.as_secs(), "napping");
+                self.sleeper.sleep(nap);
             }
-            if since(started, now) >= self.config.max_lifetime {
-                break Exit::MaxLifetime;
-            }
-            if replaced() {
-                break Exit::Replaced;
-            }
-            if superseded {
-                tracing::info!("a newer build owns the store; standing down for it");
-                break Exit::Superseded;
-            }
-            if self.shutdown.requested() {
-                break Exit::Signalled;
-            }
-            let nap = match consecutive_failures {
-                0 => self.nap(now, next, started, idle_since),
-                failures => self.backoff(failures),
-            };
-            tracing::debug!(nap_seconds = nap.as_secs(), "napping");
-            self.sleeper.sleep(nap);
-        };
+        });
 
         let report = Report {
             exit,
@@ -679,7 +738,11 @@ pub fn ring(path: &Path) {
 
 /// Run a server in this process, with the real clock, a sleeper that can be
 /// woken, and real signals. `Serve` is the same loop with those swapped out.
-pub fn run(mut config: Config, work: &dyn Work) -> Result<Outcome, ServeError> {
+pub fn run(
+    mut config: Config,
+    work: &dyn Work,
+    beside: Option<&Worker<'_>>,
+) -> Result<Outcome, ServeError> {
     // The path it was launched as: after a rename-over it names the new file.
     config.executable = config.executable.or_else(|| std::env::current_exe().ok());
     let doorbell = Doorbell::install(&config.doorbell, config.interval);
@@ -689,6 +752,7 @@ pub fn run(mut config: Config, work: &dyn Work) -> Result<Outcome, ServeError> {
         clock: &SystemClock,
         sleeper: &doorbell,
         shutdown: &Signals::install(),
+        beside,
     }
     .run()?;
 
@@ -796,6 +860,7 @@ mod tests {
             clock: &clock,
             sleeper: &sleeper,
             shutdown: &Never,
+            beside: None,
         }
         .run()
         .expect("served");
@@ -976,6 +1041,7 @@ mod tests {
             clock: &clock,
             sleeper: &sleeper,
             shutdown: &Never,
+            beside: None,
         }
         .run()
         .unwrap();
@@ -1132,6 +1198,7 @@ mod tests {
             clock: &clock,
             sleeper: &sleeper,
             shutdown: &signals,
+            beside: None,
         }
         .run()
         .expect("served");
@@ -1161,11 +1228,66 @@ mod tests {
             clock: &clock,
             sleeper: &sleeper,
             shutdown: &Never,
+            beside: None,
         }
         .run()
         .expect("standing down is not an error");
 
         assert!(matches!(outcome, Outcome::AlreadyRunning));
+    }
+
+    #[test]
+    fn a_worker_beside_the_loop_runs_while_it_serves_and_stops_with_it() {
+        let scratch = Scratch::new("beside");
+        let clock = FixedClock::at("2026-09-20T12:00:00Z");
+        let sleeper = Fast(&clock);
+        let rounds = AtomicBool::new(false);
+        let worker = |beside: &Beside| {
+            while !beside.stopping() {
+                rounds.store(true, Ordering::Relaxed);
+                beside.nap(Duration::from_secs(60));
+            }
+        };
+        // Busy until the worker has been round once, so the loop can't end
+        // before the thread has started.
+        let work = || match rounds.load(Ordering::Relaxed) {
+            true => Ok(Pulse::Idle.into()),
+            false => Ok(Pulse::Busy.into()),
+        };
+        let outcome = Serve {
+            config: scratch.config(),
+            work: &work,
+            clock: &clock,
+            sleeper: &sleeper,
+            shutdown: &Never,
+            beside: Some(&worker),
+        }
+        .run()
+        .expect("served");
+
+        assert!(matches!(outcome, Outcome::Served(_)), "and did not hang");
+    }
+
+    #[test]
+    fn a_server_that_stands_down_starts_no_worker() {
+        // The worker reads Slack; two of them would both pay for a reading.
+        let scratch = Scratch::new("beside-contended");
+        let config = scratch.config();
+        let _held = FileLock::try_acquire(&config.lock).unwrap();
+        let clock = FixedClock::at("2026-09-20T12:00:00Z");
+        let started = AtomicBool::new(false);
+        let worker = |_: &Beside| started.store(true, Ordering::Relaxed);
+        Serve {
+            config,
+            work: &|| Ok(Pulse::Idle.into()),
+            clock: &clock,
+            sleeper: &Fast(&clock),
+            shutdown: &Never,
+            beside: Some(&worker),
+        }
+        .run()
+        .unwrap();
+        assert!(!started.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -1297,6 +1419,7 @@ mod tests {
             clock: &clock,
             sleeper: &sleeper,
             shutdown: &Never,
+            beside: None,
         }
         .run()
         .expect("served");

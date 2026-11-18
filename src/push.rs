@@ -558,12 +558,14 @@ impl Tick<'_> {
         let started = self.clock.now();
         // The schedule alone decides: a watch a prompt hook just read is not
         // due again, so there is no refresh window to keep.
-        // GitHub and Jira news goes out before the slow Slack reads start.
+        // What is recorded goes out between reads, before a slower one starts.
         let mut early = Ok(());
         let polled = self
             .poller
             .poll_if_stale_then(TimeDelta::zero(), "serve", &mut || {
-                early = self.deliver().map(|_| ());
+                if early.is_ok() {
+                    early = self.deliver().map(|_| ());
+                }
             })?;
         early?;
         let (beat, outcomes, attached) = self.deliver()?;

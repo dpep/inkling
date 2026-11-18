@@ -293,14 +293,21 @@ carry the time they were taken, so a slower poller's older answer can't land
 last and report a pull request moving backwards. The poll lock is left to the
 opportunistic caller, the only one that might be redundant.
 
-**Quick sources first.** A poll reads and records GitHub and Jira before it
-starts on Slack, and the server pushes in between (`Poller::poll_then`). One
+**Slack is off the tick.** The server reads Slack on a worker thread of its
+own (`Poller::poll_slack`, run beside `serve::Serve`'s loop), so its tick reads
+GitHub and Jira and delivers on schedule however long the bridge takes. One
 batch for everything held a red pull request in memory behind every `claude -p`
-in the same poll — 9–75s each, serially (found 2026-11-18). And a Slack
-watch is *claimed* before it is read: `tried_at` is stamped under the data
-lock, after checking it is still due, so a second poller arriving during a
-minute-long read finds it inside the attempt floor instead of paying for the
-same reading again. The prompt hook asks only whether something *it* would
+in the same poll — 9–75s each, serially (found 2026-11-18); putting Slack last
+in the poll only fixed the half inside one tick, because the next tick still
+waited for the whole Slack phase. Any poll reads a source at a time —
+GitHub, Jira, then each Slack watch — and records each as it lands, stamped
+with when that read began. A Slack watch is *claimed* just before its read:
+`tried_at` is stamped under the data lock, after checking it is still due, so
+a second poller arriving during a minute-long read finds it inside the attempt
+floor instead of paying for the same reading again. That claim is why the poll
+lock is let go before the first Slack read: the lock only saves redundant
+GitHub requests. The worker checks for shutdown between reads, so a signal or
+a hand-off waits for at most the read in flight. The prompt hook asks only whether something *it* would
 read is due (`watch::due_without_bridge`) before resolving a GitHub token, so
 a Slack watch alone no longer costs every prompt a `gh auth token`.
 

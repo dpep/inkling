@@ -123,8 +123,33 @@ impl Poller<'_> {
         why: &str,
         between: &mut dyn FnMut(),
     ) -> Result<Polled, StoreError> {
+        self.read_due(floor, why, |_| true, None, &mut || {
+            between();
+            true
+        })
+    }
+
+    /// The server's Slack worker: each due Slack watch in turn, until `stop`.
+    /// Takes no poll lock — the claim is what keeps two readers from paying
+    /// for one reading — so GitHub and Jira never wait on the bridge.
+    pub fn poll_slack(&self, why: &str, stop: &dyn Fn() -> bool) -> Result<Polled, StoreError> {
+        self.read_due(TimeDelta::zero(), why, is_slack, None, &mut || !stop())
+    }
+
+    /// What `which` picks of what is due, a source at a time. `lock` is let go
+    /// before the first Slack read; `go_on` runs between reads and can end
+    /// the poll.
+    fn read_due(
+        &self,
+        floor: TimeDelta,
+        why: &str,
+        which: fn(&Reference) -> bool,
+        lock: Option<FileLock>,
+        go_on: &mut dyn FnMut() -> bool,
+    ) -> Result<Polled, StoreError> {
         let observed_at = self.clock.now();
-        let references = self.wanted(&self.store.read(), observed_at, floor);
+        let mut references = self.wanted(&self.store.read(), observed_at, floor);
+        references.retain(which);
         if references.is_empty() {
             tracing::debug!(why, "nothing is due");
             return Ok(Polled {
@@ -146,15 +171,17 @@ impl Poller<'_> {
             .into_iter()
             .partition(|r| matches!(r, Reference::GitHubPullRequest { .. }));
         let mut first = true;
+        let mut go_on = || std::mem::take(&mut first) || go_on();
         for group in [github, jira].into_iter().filter(|g| !g.is_empty()) {
-            if !std::mem::take(&mut first) {
-                between();
+            if !go_on() {
+                break;
             }
             self.read_and_record(&group, &mut polled)?;
         }
+        drop(lock);
         for reference in slow {
-            if !std::mem::take(&mut first) {
-                between();
+            if !go_on() {
+                break;
             }
             if self.claim(&reference, floor)? {
                 self.read_and_record(std::slice::from_ref(&reference), &mut polled)?;
@@ -227,7 +254,9 @@ impl Poller<'_> {
         self.poll_if_stale_then(floor, why, &mut || {})
     }
 
-    /// `poll_if_stale`, with `poll_then`'s `between`.
+    /// `poll_if_stale`, with `poll_then`'s `between`. The lock is let go before
+    /// any Slack read: the claim already stops a second paid read, and a
+    /// prompt hook mustn't skip its GitHub refresh for a minute-long one.
     pub fn poll_if_stale_then(
         &self,
         floor: TimeDelta,
@@ -246,14 +275,17 @@ impl Poller<'_> {
         let lock_path = self.store.poll_lock_path();
         let held =
             FileLock::try_acquire(&lock_path).map_err(|e| StoreError::Write(e.to_string()))?;
-        let Some(_lock) = held else {
+        let Some(lock) = held else {
             tracing::debug!(why, "another process is polling; reading what it writes");
             return Ok(Polled {
                 skipped: true,
                 ..Polled::default()
             });
         };
-        self.poll_then(floor, why, between)
+        self.read_due(floor, why, |_| true, Some(lock), &mut || {
+            between();
+            true
+        })
     }
 
     /// What this caller would read now: everything due, less what needs a
@@ -1228,6 +1260,58 @@ mod tests {
         assert_eq!(*recorded_before_next.borrow(), vec![0, 1]);
         let at: Vec<_> = polled.events.iter().map(|e| e.at).collect();
         assert_eq!(at, vec![started, started + TimeDelta::seconds(30)]);
+    }
+
+    #[test]
+    fn the_poll_lock_is_let_go_before_a_slack_read() {
+        // A prompt hook found the lock held for a whole Slack phase and
+        // skipped the GitHub refresh it had come for.
+        let h = Harness::new("lock-released");
+        h.slack.replied(&slack(), &[]);
+        h.watch(&slack());
+        let free = std::cell::Cell::new(None);
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| {
+                let lock = FileLock::try_acquire(&h.store.poll_lock_path()).unwrap();
+                free.set(Some(lock.is_some()));
+            }),
+        };
+        Poller {
+            slack: Some(&spy),
+            ..h.poller()
+        }
+        .poll_if_stale(TimeDelta::zero(), "test")
+        .unwrap();
+        assert_eq!(free.get(), Some(true));
+    }
+
+    #[test]
+    fn the_slack_worker_reads_only_slack_and_stops_between_reads() {
+        let h = Harness::new("slack-worker");
+        h.github.set(&pr(3), State::Open);
+        h.slack.replied(&slack(), &[]);
+        h.slack.replied(&another_slack(), &[]);
+        h.watch(&pr(3));
+        h.watch(&slack());
+        h.watch(&another_slack());
+
+        let stop = std::cell::Cell::new(false);
+        let spy = Spy {
+            inner: &h.slack,
+            on_read: Box::new(|| stop.set(true)),
+        };
+        let polled = Poller {
+            slack: Some(&spy),
+            ..h.poller()
+        }
+        .poll_slack("test", &|| stop.get())
+        .unwrap();
+
+        assert_eq!(polled.sightings.len(), 1, "stopped after the first read");
+        assert_eq!(h.github.calls(), 0, "GitHub is the tick's");
+        let due = h.store.read().due_now(h.clock.now(), TimeDelta::zero());
+        assert_eq!(due.len(), 2, "the PR and the unread message: {due:?}");
     }
 
     /// Issues that look at the store when asked, the way `Spy` does.

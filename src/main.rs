@@ -565,21 +565,46 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let watches = watch_store(&cli.common);
             let github = GitHubProvider::from_config(&config.github, token);
             let jira = inkling::adapters::jira_acli::JiraProvider::new();
-            let slack = slack_threads(&config, store.path())?;
+            // Fails here rather than on the worker, where no one would see it.
+            slack_threads(&config, store.path())?;
             let clock = SystemClock;
+            // Slack is the worker's, so a bridge call never holds up a tick.
+            let poller = || inkling::watch::Poller {
+                store: &watches,
+                github: &github,
+                jira: &jira,
+                slack: None,
+                clock: &clock,
+            };
             let work = inkling::push::Tick {
-                poller: inkling::watch::Poller {
-                    store: &watches,
-                    github: &github,
-                    jira: &jira,
-                    slack: Some(&slack),
-                    clock: &clock,
-                },
+                poller: poller(),
                 sessions: &inkling::push::RealSessions,
                 clock: &clock,
             };
+            let serving = serve_config(&config, &cli.common);
+            let interval = serving.interval;
+            let state = store.path().to_path_buf();
+            // Built on its own thread: the reader caches who you are in a
+            // RefCell, which can't be shared.
+            let slack_worker = |beside: &inkling::serve::Beside| {
+                let Ok(slack) = slack_threads(&config, &state) else {
+                    return;
+                };
+                let poller = inkling::watch::Poller {
+                    slack: Some(&slack),
+                    ..poller()
+                };
+                while !beside.stopping() {
+                    match poller.poll_slack("serve", &|| beside.stopping()) {
+                        Ok(polled) if !polled.events.is_empty() => beside.wake(),
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(%error, "could not read slack watches"),
+                    }
+                    beside.nap(interval);
+                }
+            };
 
-            match inkling::serve::run(serve_config(&config, &cli.common), &work)
+            match inkling::serve::run(serving, &work, Some(&slack_worker))
                 .map_err(|e| e.to_string())?
             {
                 inkling::serve::Outcome::AlreadyRunning => Ok(0),

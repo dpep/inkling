@@ -36,9 +36,9 @@
   was dropped even while it owned a watch, so a `--ttl 30d` watch lost news still inside
   retention, and a session waiting quietly lost its push address. A reader is now kept while it
   owns a watch or is owed news, and a session that answers the server's probe counts as alive.
-- **CI news no longer waits for Slack.** In a poll that also read Slack, a pull request's change
-  was held until every Slack read (up to a minute or more each) had returned. GitHub and Jira are
-  now recorded and pushed first.
+- **CI news no longer waits for Slack.** The server reads Slack watches on a thread of their own,
+  so a pull request's or issue's change is read and pushed on schedule however long the Slack
+  reads (up to a minute or more each) take.
 - **A live session wrongly taken for ended comes back by itself.** A session resumed in the moment
   between the server's probe and its write, or one whose socket refused a connection while busy,
   was marked ended and its watches paused until its next `SessionStart`. The server now drops only

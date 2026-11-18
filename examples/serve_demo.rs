@@ -47,7 +47,7 @@ fn main() {
                     false => Ok(Pulse::Idle.into()),
                 }
             };
-            serve::run(config(dir), &work).expect("served");
+            serve::run(config(dir), &work, None).expect("served");
         }
         ["ensure", dir, who] => {
             let _logging = logging(dir, false);
