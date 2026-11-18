@@ -1621,16 +1621,20 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
                     file.take(&input.session_id, clock.now())
                 })
                 .map_err(|e| e.to_string())?;
-            // Nothing to say means nothing printed: this runs on every
-            // prompt, and the common case must add nothing to it. The same
-            // wording a push uses, so news reads the same whichever way it
-            // arrived.
-            for event in &due {
-                println!("{}", inkling::push::message(event));
+            if let Some(news) = news(&due) {
+                println!("{news}");
             }
             Ok(())
         }
     }
+}
+
+/// What a prompt owes the session, worded and grouped as a push is, so news
+/// reads the same whichever way it arrived. `None` when nothing is owed: this
+/// runs on every prompt, and the common case must add nothing to it.
+fn news(due: &[inkling::domain::watch::Event]) -> Option<String> {
+    let due: Vec<_> = due.iter().collect();
+    (!due.is_empty()).then(|| inkling::push::digest(&due))
 }
 
 /// How long the `post-tool` hook will wait on GitHub to say which pull
@@ -2832,7 +2836,7 @@ fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge,
+        Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge, news,
         noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
     };
     use inkling::adapters::store_json::Snapshot;
@@ -3228,6 +3232,35 @@ mod tests {
             unread(&[jira("AI-1"), jira("AI-2"), pr(7)], &polled),
             ["AI-1, AI-2: jira request failed: running `acli`: no answer within 5s"]
         );
+    }
+
+    #[test]
+    fn news_pulled_at_a_prompt_reads_as_one_push() {
+        use inkling::domain::watch::{Axis, Event};
+        let reaction = |seq: u64, emoji: &str| Event {
+            seq,
+            at: chrono::Utc::now(),
+            reference: inkling::domain::model::Reference::SlackMessage {
+                channel: "C1".into(),
+                ts: "1.000001".into(),
+                thread: None,
+            },
+            axis: Axis::Reactions,
+            from: "0".into(),
+            to: "1".into(),
+            title: String::new(),
+            detail: Some(format!(":{emoji}:")),
+            job: None,
+            receipt_for: Default::default(),
+            partial: false,
+            lines: 0,
+            after: None,
+            audience: Default::default(),
+        };
+        assert_eq!(news(&[]), None, "nothing owed prints nothing");
+        let said = news(&[reaction(1, "dart"), reaction(2, "+1")]).unwrap();
+        assert_eq!(said.lines().count(), 1, "{said}");
+        assert!(said.contains("2 reactions :dart: :+1:"), "{said}");
     }
 
     #[test]

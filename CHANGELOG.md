@@ -13,6 +13,8 @@
   two watches, each reporting every change. Pull requests are now named in lowercase. A watch
   made before this keeps its old spelling until it ends, so retyping it in another case can
   still make a second one.
+- **News picked up at a prompt reads as a push does:** one message, `inkling: N changes` and a
+  line per change, with a message's new emoji on one line rather than one line each.
 <!-- /fix2-github-jira -->
 
 - **A watch on something that isn't there any more ends, once.** A Slack message that was
