@@ -17,20 +17,28 @@ use std::time::{Duration, Instant};
 /// to a fast command, long enough not to spin.
 const LOOK: Duration = Duration::from_millis(10);
 
-/// Run to completion, or kill the child and everything it started once
-/// `budget` has passed.
+/// Run to completion, or kill the child once `budget` has passed — and
+/// everything it started, unless run from a terminal's foreground.
 ///
 /// Done means exited *and* its output closed: a background process that
 /// inherited stdout holds the pipe open after the child is gone, and the
 /// deadline covers that wait too.
 pub fn output_within(command: &mut Command, budget: Duration) -> io::Result<Output> {
+    // Its own group, so giving up reaches what it started. Not in the
+    // terminal's foreground, though: a background group that reads the tty is
+    // stopped, and a token command may prompt there. There, only the child
+    // itself is killed, and a Ctrl-C reaches it.
+    run(command, budget, !in_foreground())
+}
+
+fn run(command: &mut Command, budget: Duration, grouped: bool) -> io::Result<Output> {
+    if grouped {
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Its own group, so giving up reaches what it started. The price: a
-        // Ctrl-C at the terminal no longer reaches it.
-        .process_group(0)
         .spawn()?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
@@ -50,7 +58,7 @@ pub fn output_within(command: &mut Command, budget: Duration) -> io::Result<Outp
         if Instant::now() >= deadline {
             // The drains are left to end when the pipe closes: something that
             // left the group can hold it for as long as it likes.
-            return Err(gave_up(&mut child, budget));
+            return Err(gave_up(&mut child, grouped, budget));
         }
         std::thread::sleep(LOOK);
     }
@@ -68,11 +76,22 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// Kill its whole process group and reap it, so neither its descendants nor
-/// zombies outlive the call.
-fn gave_up(child: &mut Child, budget: Duration) -> io::Error {
-    // The group is the child's pid: `process_group(0)` made it the leader.
-    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+/// Whether this process runs in the foreground of a controlling terminal.
+fn in_foreground() -> bool {
+    use std::os::fd::AsRawFd;
+    match std::fs::File::open("/dev/tty") {
+        Ok(tty) => unsafe { libc::tcgetpgrp(tty.as_raw_fd()) == libc::getpgrp() },
+        Err(_) => false,
+    }
+}
+
+/// Kill it, and its whole process group when it has one, and reap it, so
+/// neither its descendants nor zombies outlive the call.
+fn gave_up(child: &mut Child, grouped: bool, budget: Duration) -> io::Error {
+    if grouped {
+        // The group is the child's pid: `process_group(0)` made it the leader.
+        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    }
     let _ = child.kill();
     let _ = child.wait();
     io::Error::new(
@@ -137,7 +156,8 @@ mod tests {
     fn giving_up_kills_what_the_command_started_too() {
         let pidfile = std::env::temp_dir().join(format!("inkling-group-{}", std::process::id()));
         let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
-        output_within(&mut sh(&script), Duration::from_millis(300)).unwrap_err();
+        // Grouped whether or not the tests run from a terminal.
+        run(&mut sh(&script), Duration::from_millis(300), true).unwrap_err();
 
         let pid: i32 = std::fs::read_to_string(&pidfile)
             .unwrap()
@@ -152,6 +172,39 @@ mod tests {
             0,
             "sleep {pid} outlived the call"
         );
+    }
+
+    /// Run from a terminal, a command may prompt on it: a token command
+    /// asking for a passphrase. Reruns this test under a pseudo-terminal
+    /// that `script` gives the foreground, and types the answer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_command_can_prompt_on_the_terminal_it_was_run_from() {
+        use std::io::Write;
+        const NAME: &str = "subprocess::tests::a_command_can_prompt_on_the_terminal_it_was_run_from";
+        if std::env::var_os("INKLING_TEST_IN_PTY").is_some() {
+            let script = "printf 'passphrase: ' > /dev/tty; read x < /dev/tty; echo tok$x";
+            let output = output_within(&mut sh(script), Duration::from_secs(3)).unwrap();
+            println!("answered {}", String::from_utf8_lossy(&output.stdout).trim());
+            return;
+        }
+        let mut pty = Command::new("script")
+            .args(["-q", "/dev/null"])
+            .arg(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+            .env("INKLING_TEST_IN_PTY", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Held open until the end: `script` may stop at end of input.
+        let mut typed = pty.stdin.take().unwrap();
+        typed.write_all(b"x\n").unwrap();
+        let mut seen = String::new();
+        pty.stdout.take().unwrap().read_to_string(&mut seen).unwrap();
+        drop(typed);
+        pty.wait().unwrap();
+        assert!(seen.contains("answered tokx"), "{seen}");
     }
 
     #[test]
