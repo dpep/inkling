@@ -324,7 +324,7 @@ impl Poller<'_> {
 
     /// Each channel from the newest message its last reading saw. No reading
     /// yet is a baseline, which needs only the newest; a channel that was
-    /// empty reads from the beginning.
+    /// empty reads from when the watch began.
     fn channels(
         &self,
         slack: &dyn MessageProvider,
@@ -338,7 +338,8 @@ impl Poller<'_> {
             let Reference::SlackChannel { channel, .. } = reference else {
                 continue;
             };
-            let before = match watches.watches.get(&reference.key()) {
+            let watch = watches.watches.get(&reference.key());
+            let before = match watch {
                 Some(Watch {
                     seen:
                         Some(Seen {
@@ -349,9 +350,13 @@ impl Poller<'_> {
                 }) => Some(newest.clone()),
                 _ => None,
             };
+            // A channel that read empty is read from when the watch began: a
+            // first read that wrongly came back empty must not make its
+            // history news.
+            let began = watch.map(|w| format!("{}.000000", w.since.timestamp()));
             let oldest = before
                 .as_ref()
-                .map(|newest| newest.as_deref().unwrap_or("0"));
+                .map(|newest| newest.as_deref().or(began.as_deref()).unwrap_or("0"));
             match slack.channel(channel, oldest) {
                 Ok(status) => {
                     let newest = status
@@ -715,6 +720,33 @@ mod tests {
                 Some("1786596000.000001".into())
             ],
             "a baseline asks for the newest, then each read starts where the last ended"
+        );
+    }
+
+    #[test]
+    fn a_channel_that_read_empty_counts_only_what_came_after_the_watch() {
+        // A flaky empty first read must not turn a channel's history into news.
+        let h = Harness::new("empty-first");
+        let general = Reference::SlackChannel {
+            channel: "C0E48AHSN".into(),
+            name: None,
+        };
+        h.watch(&general);
+        assert!(h.poll().events.is_empty(), "baseline, read as empty");
+
+        h.clock
+            .advance(crate::adapters::watches_json::SLACK_READ_FLOOR);
+        h.slack.posts.borrow_mut().extend([
+            ("1786596000.000001".to_string(), "U9".to_string()),
+            ("1789905900.000001".to_string(), "U1".to_string()),
+        ]);
+        let polled = h.poll();
+        assert_eq!(polled.events.len(), 1);
+        assert_eq!(polled.events[0].to, "1", "{:?}", polled.events);
+        assert_eq!(
+            h.slack.asked.borrow()[1].as_deref(),
+            Some("1789905600.000000"),
+            "from when the watch began"
         );
     }
 
