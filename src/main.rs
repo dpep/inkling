@@ -547,7 +547,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
         }
         Command::Unsubscribe { session } => {
             let id = session_id(session.as_deref())?;
-            match unsubscribe(&id, &cli.common)? {
+            match unsubscribe(&id, &cli.common, true)? {
                 true => println!("unsubscribed {}", short(&id)),
                 false => println!("{}: not subscribed", short(&id)),
             }
@@ -1614,7 +1614,9 @@ fn hook(event: HookEvent, config: &Config, common: &Common) -> Result<(), String
             Ok(())
         }
         HookEvent::SessionEnd => {
-            unsubscribe(&input.session_id, common)?;
+            // Not asked for: a session that is still there (a resume) gets
+            // attached again by its next hook.
+            unsubscribe(&input.session_id, common, false)?;
             Ok(())
         }
         HookEvent::PostTool => {
@@ -1893,30 +1895,35 @@ fn subscribe(id: &str, config: &Config, common: &Common) -> Result<bool, String>
     Ok(replaced)
 }
 
-/// Attach again a session the store has as ended. Only a live session fires
-/// hooks, and a probe can be wrong: macOS refuses a connection to a listener
-/// whose backlog is full exactly as it does to a dead one.
+/// Attach again a session the store holds no address for, unless it asked
+/// to be unsubscribed. Only a live session fires hooks, and a probe can be
+/// wrong: macOS refuses a connection to a listener whose backlog is full
+/// exactly as it does to a dead one.
 fn revive(id: &str, config: &Config, common: &Common) {
-    if std::env::var_os(SOCKET_ENV).is_none() || !watch_store(common).read().ended(id) {
+    if std::env::var_os(SOCKET_ENV).is_none() || !watch_store(common).read().lost_address(id) {
         return;
     }
     match subscribe(id, config, common) {
         Ok(_) => tracing::info!(
             subscriber = id,
-            "a session taken for ended fired a hook; attached again"
+            "a session with no address fired a hook; attached again"
         ),
         Err(error) => tracing::warn!(subscriber = id, error, "could not attach again"),
     }
 }
 
 /// Detach the address, and only the address. Whatever this session is still
-/// owed stays owed, so ending one loses nothing.
-fn unsubscribe(id: &str, common: &Common) -> Result<bool, String> {
+/// owed stays owed, so ending one loses nothing. `asked` is a person's
+/// `inkling unsubscribe`, which the session's own hooks must not undo.
+fn unsubscribe(id: &str, common: &Common, asked: bool) -> Result<bool, String> {
     let clock = SystemClock;
     let detached = watch_store(common)
-        .update(clock.now(), |file| file.detach(id))
+        .update(clock.now(), |file| match asked {
+            true => file.unsubscribe(id),
+            false => file.detach(id),
+        })
         .map_err(|e| e.to_string())?;
-    tracing::info!(subscriber = id, detached, "unsubscribed");
+    tracing::info!(subscriber = id, detached, asked, "unsubscribed");
     Ok(detached)
 }
 

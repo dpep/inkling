@@ -272,6 +272,10 @@ pub struct Subscriber {
     /// one, and nothing will ever tell us it has gone. What pauses a watch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub departed: bool,
+    /// Detached because it asked to be. Unlike a probe or `SessionEnd`, that
+    /// is not undone by the session's next hook — only by attaching.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsubscribed: bool,
 }
 
 impl Watches {
@@ -527,9 +531,14 @@ impl Watches {
             && watch.owners.iter().all(|owner| self.departed(owner))
     }
 
-    /// Whether the store has this reader as a session that ended.
-    pub fn ended(&self, subscriber: &str) -> bool {
-        self.departed(subscriber)
+    /// Whether this reader has no address, and not by its own choice: what a
+    /// hook from a live session attaches again.
+    pub fn lost_address(&self, subscriber: &str) -> bool {
+        subscriber != TERMINAL
+            && self
+                .subscribers
+                .get(subscriber)
+                .is_some_and(|entry| entry.address.is_none() && !entry.unsubscribed)
     }
 
     fn departed(&self, owner: &str) -> bool {
@@ -787,6 +796,7 @@ impl Watches {
                 address: None,
                 pushes: Vec::new(),
                 departed: false,
+                unsubscribed: false,
             });
         entry.seen_at = now;
         entry
@@ -815,6 +825,7 @@ impl Watches {
             .collect();
         let entry = self.meet(subscriber, now);
         entry.departed = false;
+        entry.unsubscribed = false;
         let replaced = entry.address.replace(address).is_some();
         for key in paused {
             if let Some(watch) = self.watches.get_mut(&key) {
@@ -836,6 +847,15 @@ impl Watches {
         let had = entry.address.take().is_some();
         entry.departed |= had;
         had
+    }
+
+    /// Detach because the session asked to, which its own hooks won't undo.
+    pub fn unsubscribe(&mut self, subscriber: &str) -> bool {
+        let detached = self.detach(subscriber);
+        if let Some(entry) = self.subscribers.get_mut(subscriber) {
+            entry.unsubscribed = true;
+        }
+        detached
     }
 
     /// Detach, but only from `address`: a session that resumed onto a new
@@ -2205,6 +2225,7 @@ mod tests {
                 address: _,
                 pushes: _,
                 departed: _,
+                unsubscribed: _,
             } = subscriber;
         }
         match standing {
@@ -2461,15 +2482,36 @@ mod tests {
     }
 
     #[test]
-    fn a_reader_has_ended_only_once_it_was_seen_to_leave() {
-        // What a hook asks before attaching a session again.
+    fn a_reader_that_lost_its_address_is_one_a_hook_attaches_again() {
+        // Only a live session fires hooks, so whatever took its address — a
+        // probe, SessionEnd, a week of quiet that dropped the record — was
+        // wrong or is over.
         let mut watches = watching(State::Open);
-        assert!(!watches.ended("s-1"), "never attached");
-        ended(&mut watches, "s-1");
-        assert!(watches.ended("s-1"));
+        assert!(watches.lost_address("s-1"), "its record holds no address");
         watches.attach("s-1", address("/tmp/s"), now());
-        assert!(!watches.ended("s-1"));
-        assert!(!watches.ended(TERMINAL));
+        assert!(!watches.lost_address("s-1"));
+        watches.detach("s-1");
+        assert!(watches.lost_address("s-1"));
+        assert!(!watches.lost_address("stranger"), "nobody we know");
+        assert!(!watches.lost_address(TERMINAL));
+    }
+
+    #[test]
+    fn an_unsubscribed_session_stays_unsubscribed_until_it_attaches() {
+        // Found by the hunt: the PostToolUse hook of `inkling unsubscribe`
+        // itself attached the session again.
+        let mut watches = watching(State::Open);
+        watches.attach("s-1", address("/tmp/s"), now());
+        assert!(watches.unsubscribe("s-1"));
+        assert!(!watches.lost_address("s-1"));
+        assert!(
+            watches.paused(&watches.watches[&pr(3).key()]),
+            "and its watches pause"
+        );
+
+        watches.attach("s-1", address("/tmp/s"), now());
+        watches.detach("s-1");
+        assert!(watches.lost_address("s-1"), "attaching ends the choice");
     }
 
     #[test]

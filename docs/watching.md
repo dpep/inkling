@@ -397,8 +397,9 @@ baseline, `departed`, `tried_at`, `own`).
   `receipt_for`, `lines`, `after`, and watches keyed by `Reference::key`
   (older keys are rekeyed on read). The tripwire caught the last four landing
   from two other lanes while this rule was being merged.
-- **Version 3 adds `misses`** (see "A conversation never finishes"); a version
-  2 file reads as having missed nothing.
+- **Version 3 adds `misses`** (see "A conversation never finishes") and
+  `unsubscribed`; a version 2 file reads as having missed nothing and nobody
+  having asked to leave.
 - **Builds from before this rule still quarantine.** They parse everything
   before looking at the version. Nothing this build does can reach them;
   version 2 or 3 only parses for them if it holds nothing they lack.
@@ -687,6 +688,11 @@ session posts. So a closed session kept paying for news nobody could hear.
   and `prompt` and `post-tool` attach it again as `SessionStart` would. A
   stale probe can't do it any more either: a tick detaches only the address it
   probed, not one a resumed session attached meanwhile (both 2026-11-18).
+  The same goes for any session whose record holds no address — one forgotten
+  after a quiet week and met again, say — except one that ran `inkling
+  unsubscribe`: that choice holds until `SessionStart` or `subscribe`
+  attaches it (`Subscriber::unsubscribed`). `SessionEnd` is not a choice; a
+  session still firing hooks after one was resumed.
 - **`cli` and readers that never attached are exempt.** Pausing is only safe
   when we *saw* the reader leave. The terminal has no session to end, and a
   session without the hooks gives no sign either way. Pausing their watches
