@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+<!-- fix2-github-jira -->
+- **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,
+  so a pull request on an enterprise host was reported as the same number on github.com. List only
+  the host `api_url` serves.
+<!-- /fix2-github-jira -->
+
 - **A watch on something that isn't there any more ends, once.** A Slack message that was
   deleted, or a channel the connector can't see, used to be read (and paid for) every five minutes
   until its deadline; its first such read now says `state watched → gone` and the watch is dropped.
