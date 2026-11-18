@@ -878,6 +878,19 @@ was found.
   `thread_ts`; the thread is read from that root and only replies after the
   watched message count. A thread is one conversation, and what came before
   was already there when you asked.
+- **A reply counts for one watched message: the latest before it.** Added
+  2026-11-18, after one DM answer pushed once per watched message earlier in
+  the DM, and a thread reply pushed for both the root and a watched reply in
+  the thread. A reply read from a thread belongs to the latest watched message
+  in that thread (the root, or a watched reply) posted before it; a later
+  message in the channel, to the latest watched message anywhere in the
+  channel. Only live message watches count, due or not — a channel watch is
+  its own thing. `MessageProvider::read` is handed them for this
+  (`domain::slack::owner`); the store is unchanged, and a reply that a newer
+  watch takes over isn't a loss to the older one, since replies never shrink.
+  One gap: a thread reply also sent to the channel is a thread's to the
+  message that read its thread, but the channel read doesn't say it was
+  threaded, so a later watched top-level message hears it too.
 - **The reference is `slack:<channel>/<ts>`**, which is what Slack's own tools
   take to read the message — the agent's next step. The thread root is how to
   read it, not which message it is, so it isn't in the name. Always given in
