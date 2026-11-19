@@ -3,109 +3,13 @@
 //! The model is asked for strict JSON, but it's still a model: it wraps
 //! output in code fences, prepends a sentence, or truncates. Parsing is
 //! written to survive all three and to fail loudly rather than silently
-//! returning nothing — an empty result is indistinguishable from "no
-//! messages", which would quietly stall discovery forever.
+//! returning nothing — an empty result is indistinguishable from "nothing
+//! happened", which would quietly hide every reply.
 
-use crate::domain::model::{Message, MessageId, ReactionName};
+use crate::domain::model::ReactionName;
 use crate::domain::slack;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-#[derive(Debug, Deserialize)]
-pub struct SearchHit {
-    pub channel_id: String,
-    /// Slack reports this alongside the ID, so capturing it here saves a
-    /// reverse lookup just to print something a human recognizes.
-    #[serde(default)]
-    pub channel_name: String,
-    pub ts: String,
-    #[serde(default)]
-    pub user_id: String,
-    /// Display name, reported alongside the ID.
-    #[serde(default)]
-    pub user_name: String,
-    #[serde(default)]
-    pub permalink: String,
-    #[serde(default)]
-    pub text: String,
-}
-
-impl SearchHit {
-    pub fn into_message(self) -> Message {
-        let posted_at = slack_ts_to_time(&self.ts).unwrap_or_else(Utc::now);
-        Message {
-            id: MessageId::new(&self.channel_id, &self.ts),
-            channel_name: self.channel_name,
-            text: self.text,
-            author: self.user_id,
-            author_name: self.user_name,
-            posted_at,
-            permalink: self.permalink,
-            reactions: None,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct SearchResponse {
-    /// How many results the tool said it had. Absent in older replies.
-    #[serde(default)]
-    total: Option<usize>,
-    messages: Vec<SearchHit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReactionsResponse {
-    messages: Vec<ReactionHit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReactionHit {
-    ts: String,
-    #[serde(default)]
-    reactions: Vec<String>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Reaction {
-    pub ts: String,
-    pub names: Vec<ReactionName>,
-}
-
-pub fn parse_search(raw: &str) -> Result<Vec<SearchHit>, String> {
-    let json = extract_json(raw)?;
-    let response: SearchResponse =
-        serde_json::from_str(&json).map_err(|e| format!("search response: {e}"))?;
-
-    // Observed: the same search returned 3 messages four times and 1 the
-    // fifth. A short list is indistinguishable from a quiet window, and the
-    // watermark would advance straight past whatever got dropped — so a count
-    // that doesn't match its own list is treated as a failed call.
-    if let Some(total) = response.total
-        && total != response.messages.len()
-    {
-        return Err(format!(
-            "bridge reported {total} results but listed {}",
-            response.messages.len()
-        ));
-    }
-    Ok(response.messages)
-}
-
-pub fn parse_reactions(raw: &str) -> Result<Vec<Reaction>, String> {
-    let json = extract_json(raw)?;
-    let response: ReactionsResponse =
-        serde_json::from_str(&json).map_err(|e| format!("reactions response: {e}"))?;
-    Ok(response
-        .messages
-        .into_iter()
-        .map(|hit| Reaction {
-            ts: hit.ts,
-            names: hit.reactions.iter().map(ReactionName::new).collect(),
-        })
-        .collect())
-}
 
 /// One message of a thread, as a watch needs it: who wrote it and what it
 /// carries, and deliberately not what it says.
@@ -345,106 +249,47 @@ fn preview(s: &str) -> String {
     }
 }
 
-/// Slack timestamps are `seconds.microseconds` since the epoch.
-fn slack_ts_to_time(ts: &str) -> Option<DateTime<Utc>> {
-    let (seconds, fraction) = ts.split_once('.').unwrap_or((ts, "0"));
-    let seconds: i64 = seconds.parse().ok()?;
-    let micros: u32 = format!("{fraction:0<6}")[..6].parse().ok()?;
-    DateTime::from_timestamp(seconds, micros * 1_000)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SEARCH: &str = r#"{"messages":[
-        {"channel_id":"C012XYZ6789","ts":"1786596050.245879","user_id":"U012ABC345",
-         "permalink":"https://example.slack.com/archives/C012XYZ6789/p1786596050245879",
-         "text":"test fixture — merged PR https://github.com/dpep/gqls/pull/1"}
-    ]}"#;
-
-    #[test]
-    fn a_clean_search_response_parses() {
-        let hits = parse_search(SEARCH).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].channel_id, "C012XYZ6789");
-        assert_eq!(hits[0].ts, "1786596050.245879");
-    }
-
     #[test]
     fn a_code_fence_is_stripped() {
         // Haiku wraps JSON in fences; observed, not hypothetical.
-        let raw = format!("```json\n{SEARCH}\n```");
-        assert_eq!(parse_search(&raw).unwrap().len(), 1);
+        let raw = format!("```json\n{REAL_CHANNEL_READ}\n```");
+        assert_eq!(parse_channel_read(&raw).unwrap().channel.len(), 2);
     }
 
     #[test]
     fn a_leading_sentence_is_ignored() {
-        let raw = format!("Here are the results:\n\n{SEARCH}");
-        assert_eq!(parse_search(&raw).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn an_empty_result_set_is_not_an_error() {
-        assert!(parse_search(r#"{"messages": []}"#).unwrap().is_empty());
-        assert!(
-            parse_search(r#"{"total": 0, "messages": []}"#)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn a_truncated_list_is_rejected_rather_than_silently_short() {
-        // The dangerous one: fewer messages than the tool found reads exactly
-        // like a quiet window, and the watermark moves past the difference.
-        let raw = r#"{"total": 3, "messages": [
-            {"channel_id":"C1","ts":"1.0","user_id":"U1","permalink":"p","text":"t"}
-        ]}"#;
-        let error = parse_search(raw).unwrap_err();
-        assert!(error.contains("3 results but listed 1"), "{error}");
-    }
-
-    #[test]
-    fn a_matching_count_passes() {
-        let raw = r#"{"total": 1, "messages": [
-            {"channel_id":"C1","ts":"1.0","user_id":"U1","permalink":"p","text":"t"}
-        ]}"#;
-        assert_eq!(parse_search(raw).unwrap().len(), 1);
+        let raw = format!("Here are the results:\n\n{REAL_CHANNEL_READ}");
+        assert_eq!(parse_channel_read(&raw).unwrap().channel.len(), 2);
     }
 
     #[test]
     fn truncated_output_is_an_error_not_an_empty_list() {
-        // The dangerous failure: silently reading as "nothing to do" would
-        // stall discovery while looking healthy.
-        let raw = r#"{"messages":[{"channel_id":"C1","ts":"1"#;
-        let error = parse_search(raw).unwrap_err();
+        // The dangerous failure: silently reading as "nothing happened".
+        let raw = r#"{"channel":[{"ts":"1794976230.118559","user_id":"U1"#;
+        let error = parse_channel_read(raw).unwrap_err();
         assert!(error.contains("truncated"), "{error}");
     }
 
     #[test]
     fn prose_instead_of_json_is_an_error() {
-        let error = parse_search("I could not find any messages.").unwrap_err();
+        let error = parse_channel_read("I could not find any messages.").unwrap_err();
         assert!(error.contains("no JSON object"), "{error}");
     }
 
     #[test]
     fn empty_output_is_an_error() {
-        assert!(parse_search("").is_err());
-        assert!(parse_search("   \n ").is_err());
+        assert!(parse_channel_read("").is_err());
+        assert!(parse_channel_read("   \n ").is_err());
     }
 
     #[test]
-    fn a_wrong_shape_is_an_error() {
-        assert!(parse_search(r#"{"results": "some markdown"}"#).is_err());
-    }
-
-    #[test]
-    fn braces_inside_message_text_do_not_end_the_object() {
-        let raw = r#"{"messages":[{"channel_id":"C1","ts":"1.0","user_id":"U1",
-            "permalink":"p","text":"fix: use {braces} and a \" quote"}]}"#;
-        let hits = parse_search(raw).unwrap();
-        assert!(hits[0].text.contains("{braces}"));
+    fn braces_inside_a_string_do_not_end_the_object() {
+        let raw = r#"{"id":"U012ABC345","handle":"dp","name":"a {brace} and a \" quote"}"#;
+        assert!(parse_identity(raw).unwrap().name.contains("{brace}"));
     }
 
     #[test]
@@ -562,23 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn reactions_parse_and_normalize() {
-        let raw = r#"{"messages":[
-            {"ts":"1786596050.245879","reactions":[":Merged:","white_check_mark"]},
-            {"ts":"1786596055.150629","reactions":[]}
-        ]}"#;
-        let parsed = parse_reactions(raw).unwrap();
-        assert_eq!(
-            parsed[0].names,
-            vec![
-                ReactionName::new("merged"),
-                ReactionName::new("white_check_mark")
-            ]
-        );
-        assert!(parsed[1].names.is_empty());
-    }
-
-    #[test]
     fn an_identity_parses_with_optional_fields_missing() {
         let me = parse_identity(r#"{"id":"U012ABC345","handle":"dp","name":"D Pepper"}"#).unwrap();
         assert_eq!(me.id, "U012ABC345");
@@ -597,26 +425,5 @@ mod tests {
         // No such channel is an answer, not a failure.
         assert_eq!(parse_channel_id(r#"{"id": null}"#).unwrap(), None);
         assert_eq!(parse_channel_id(r#"{"id": ""}"#).unwrap(), None);
-    }
-
-    #[test]
-    fn a_slack_timestamp_becomes_a_time() {
-        let hit = SearchHit {
-            channel_id: "C1".into(),
-            channel_name: "eng".into(),
-            ts: "1786596050.245879".into(),
-            user_id: "U1".into(),
-            user_name: "dp".into(),
-            permalink: String::new(),
-            text: String::new(),
-        };
-        let message = hit.into_message();
-        // The real ts of a fixture message posted to #inkling.
-        assert_eq!(
-            message
-                .posted_at
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "2026-08-13T04:40:50Z"
-        );
     }
 }

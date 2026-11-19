@@ -6,7 +6,6 @@ use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
 use inkling::adapters::store_json::{JsonStore, Store};
 use inkling::adapters::watches_json::{TERMINAL, Unwatched};
-use inkling::app::{Report, Run};
 use inkling::config::Config;
 use inkling::config_edit;
 use inkling::obs;
@@ -65,28 +64,6 @@ struct Common {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Discover new messages and bring tracked ones up to date.
-    // Hidden: the Slack reactions are parked, not removed (docs/deferred.md).
-    #[command(hide = true)]
-    Run {
-        /// Channels to search, or pull requests to check now.
-        ///
-        /// A channel handle or ID narrows the run to it, turning off personal
-        /// mode. A pull request — a URL, `owner/repo#12`, or a shorter form
-        /// matching something tracked — is checked immediately, ignoring the
-        /// backoff schedule.
-        targets: Vec<String>,
-        /// Report what would happen, changing nothing in Slack or on disk.
-        #[arg(long, short = 'n')]
-        dry_run: bool,
-        /// Widen the search window to this many hours back, for a one-off
-        /// catch-up. Narrowing it will not advance the watermark.
-        #[arg(long)]
-        since_hours: Option<i64>,
-        /// Emit the run report as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Block until pull requests move.
     ///
     /// By default that means any change at all — the next step, whatever it
@@ -606,7 +583,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
         }
         Command::Status => {
-            let snapshot = store.load().map_err(|e| e.to_string())?;
             let now = Utc::now();
             // A newer build's store reads as empty, and zeros here would send
             // someone to watch everything again.
@@ -649,12 +625,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!();
             last_day_out(&log_directory(&cli.common), now);
 
-            // The parked Slack reactions (`run`): only for someone still
-            // running them, and after what everyone uses.
-            if snapshot.run.last_run_outcome.is_some() {
-                println!();
-                reactions_out(&snapshot, &config, now);
-            }
             Ok(0)
         }
         Command::Watch { targets, ttl, json } => {
@@ -668,7 +638,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 let snapshot = store.load().map_err(|e| e.to_string())?;
                 let known = known(&snapshot, &watches.read());
                 let references;
-                let bridge = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
+                let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
                 let channel = |handle: &str| slack_channel(handle, &bridge, &store);
                 (references, refused) =
                     watch_targets(targets, &config.github.hosts, &known, &channel);
@@ -769,7 +739,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             let snapshot = store.load().map_err(|e| e.to_string())?;
             let known = known(&snapshot, &watches.read());
-            let bridge = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
+            let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
             let channel = |handle: &str| slack_channel(handle, &bridge, &store);
             let (references, refused) =
                 watch_targets(targets, &config.github.hosts, &known, &channel);
@@ -944,75 +914,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             wait_out(&report, *json)?;
             Ok(report.exit_code())
         }
-        Command::Run {
-            targets,
-            dry_run,
-            since_hours,
-            json,
-        } => {
-            let dry_run = *dry_run || config.run.dry_run;
-            let token = Secret::resolve(
-                config.github.token_env.as_deref(),
-                config.github.token_command.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-
-            let slack = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
-            let github = GitHubProvider::from_config(&config.github, token);
-            let clock = SystemClock;
-
-            // Still needed with an explicit channel: only_my_messages filters
-            // by author regardless of how a message was found. Before the
-            // lock, which caching the answer takes for a moment.
-            let mut config = config;
-            if config.slack.user_id.is_none() {
-                config.slack.user_id = Some(resolve_identity(&slack, &store, clock.now())?);
-            }
-
-            // One writer at a time. The snapshot is rewritten whole, so two
-            // overlapping runs would silently last-writer-win — and the
-            // casualty would be the ownership ledger, which cannot be
-            // reconstructed from anything else.
-            let lock_path = inkling::adapters::lock::FileLock::path_for(store.path());
-            let _lock = match inkling::adapters::lock::FileLock::try_acquire(&lock_path) {
-                Ok(Some(lock)) => lock,
-                Ok(None) => {
-                    // Cron overlap is expected, not a fault: the next run
-                    // picks up whatever this one leaves.
-                    tracing::info!("another run holds the state lock; leaving it to finish");
-                    return Ok(0);
-                }
-                Err(e) => return Err(e.to_string()),
-            };
-
-            let snapshot = store.load().map_err(|e| e.to_string())?;
-            let known = known(&snapshot, &watch_store(&cli.common).read());
-            let (channels, force) = classify(targets, &config.github.hosts, &known)?;
-            if !channels.is_empty() {
-                config.slack.channels = channels;
-                config.slack.personal = false;
-            } else if !force.is_empty() {
-                // Only pull requests named: "check this one now" needs no
-                // search, since the message is already tracked.
-                config.slack.channels.clear();
-                config.slack.personal = false;
-            }
-
-            let run = Run {
-                config: &config,
-                source: &slack,
-                provider: &github,
-                sink: &slack,
-                store: &store,
-                clock: &clock,
-                dry_run,
-                since: since_hours.map(|h| Utc::now() - TimeDelta::hours(h)),
-                force,
-            };
-            let report = run.execute().map_err(|e| e.to_string())?;
-            report_out(&report, dry_run, *json, cli.common.verbose)?;
-            Ok(report.exit_code())
-        }
     }
 }
 
@@ -1140,56 +1041,6 @@ fn resolve_identity<R: slack_claude::Runner>(
         tracing::warn!(%error, "could not cache who you are in slack; asking again next time");
     }
     Ok(me.id)
-}
-
-/// How many tracked records to list before summarizing the rest. Enough to
-/// see everything on a normal week, short enough not to bury the summary.
-const TRACKING_LIMIT: usize = 15;
-
-/// List the tracked records, so "tracking 7" says which seven.
-///
-/// One line per reference: state, what's on it, the ref, and its title —
-/// `dpep/gqls#1` alone doesn't tell you what it is. Live records come first,
-/// since finished ones are only waiting to age out.
-fn tracking(records: &[inkling::app::Tracked]) {
-    if records.is_empty() {
-        return;
-    }
-    let (live, done): (Vec<_>, Vec<_>) = records.iter().partition(|r| !r.terminal);
-    let ordered: Vec<_> = live.into_iter().chain(done).collect();
-
-    let width = ordered
-        .iter()
-        .flat_map(|r| r.refs.iter().map(|(name, _)| name.len()))
-        .max()
-        .unwrap_or(0);
-
-    // Titles are arbitrary prose. Left whole they wrap, and a wrapped row
-    // stops being a row — the columns no longer line up with anything.
-    let used = 2 + 8 + 2 + 14 + 2 + width + 2;
-    let budget = terminal_width().saturating_sub(used).max(24);
-
-    println!("tracking");
-    for record in ordered.iter().take(TRACKING_LIMIT) {
-        let state = record.state.map_or("?", |s| s.as_str());
-        let marks = match record.applied.is_empty() {
-            true => "—".to_string(),
-            false => record
-                .applied
-                .iter()
-                .map(|e| format!(":{e}:"))
-                .collect::<Vec<_>>()
-                .join(" "),
-        };
-        for (name, title) in &record.refs {
-            let title = ellipsize(title, budget);
-            println!("  {state:<8}  {marks:<14}  {name:<width$}  {title}");
-        }
-    }
-    if ordered.len() > TRACKING_LIMIT {
-        println!("  … and {} more", ordered.len() - TRACKING_LIMIT);
-    }
-    println!();
 }
 
 /// Everything a short reference can select among: what is watched, plus what
@@ -2283,7 +2134,7 @@ fn slack_threads(
     config: &Config,
     state: &std::path::Path,
 ) -> Result<inkling::adapters::slack_thread::SlackThreads<slack_claude::ClaudeRunner>, String> {
-    let slack = slack_claude::from_config(config, None).map_err(|e| e.to_string())?;
+    let slack = slack_claude::from_config(config).map_err(|e| e.to_string())?;
     let config = config.clone();
     let state = state.to_path_buf();
     Ok(inkling::adapters::slack_thread::SlackThreads::new(
@@ -2292,7 +2143,7 @@ fn slack_threads(
             if let Some(id) = &config.slack.user_id {
                 return Some(id.clone());
             }
-            let slack = slack_claude::from_config(&config, None).ok()?;
+            let slack = slack_claude::from_config(&config).ok()?;
             resolve_identity(&slack, &JsonStore::new(state.clone()), SystemClock.now())
                 .map_err(|error| {
                     tracing::warn!(
@@ -2631,47 +2482,6 @@ fn event_lines(events: &[inkling::domain::watch::Event], width: usize) -> Vec<St
         .collect()
 }
 
-/// Where `run`, the parked Slack reactions, has got to.
-fn reactions_out(
-    snapshot: &inkling::adapters::store_json::Snapshot,
-    config: &Config,
-    now: DateTime<Utc>,
-) {
-    let window = inkling::domain::window::next_window(
-        &config.window,
-        snapshot.run.last_successful_discovery_at,
-        now,
-    );
-    let local = |t: DateTime<Utc>| {
-        t.with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M %Z")
-            .to_string()
-    };
-    println!(
-        "last run    {}",
-        match snapshot.run.last_run_outcome {
-            Some(outcome) => format!("{outcome:?}").to_lowercase(),
-            None => "never".into(),
-        }
-    );
-    println!(
-        "last search {}",
-        snapshot
-            .run
-            .last_successful_discovery_at
-            .map_or("never".into(), local)
-    );
-    println!(
-        "next window {} .. {}",
-        local(window.start),
-        local(window.end)
-    );
-    let live = snapshot.tracked.values().filter(|t| !t.terminal).count();
-    println!("tracked     {}", snapshot.tracked.len());
-    println!("  live      {live}");
-    println!("  done      {}", snapshot.tracked.len() - live);
-}
-
 /// What the resident server is doing, if anything.
 ///
 /// "Running" comes from the lock, because that is the only claim the kernel
@@ -2895,131 +2705,6 @@ fn wait_out(report: &inkling::wait::Report, json: bool) -> Result<(), String> {
         humantime::format_duration(std::time::Duration::from_secs(waited)),
         report.polls,
         if report.polls == 1 { "poll" } else { "polls" }
-    );
-    Ok(())
-}
-
-fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result<(), String> {
-    if json {
-        // The detail rows carry everything; a summary object keeps the common
-        // case readable.
-        let out = serde_json::json!({
-            "discovered": report.discovered,
-            "tracked": report.tracked,
-            "checked": report.checked,
-            "added": report.added.iter().map(|(id, e)| {
-                serde_json::json!({"message": id.to_string(), "emoji": e.to_string()})
-            }).collect::<Vec<_>>(),
-            "skipped": report.skipped,
-            "failed": report.failed,
-            "terminal": report.terminal,
-            "dry_run": dry_run,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-        );
-        return Ok(());
-    }
-
-    if dry_run {
-        for detail in &report.details {
-            let channel = if detail.channel_name.is_empty() {
-                detail.id.channel.clone()
-            } else {
-                format!("#{}", detail.channel_name)
-            };
-            let posted = detail
-                .posted_at
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M %Z");
-            let who = if detail.author.is_empty() {
-                String::new()
-            } else {
-                format!(" by {}", detail.author)
-            };
-            println!("{channel}  {posted}{who}");
-            println!("  link     {}", detail.permalink);
-
-            for (reference, author) in &detail.references {
-                // The person who posted the link often isn't the person who
-                // wrote the code; saying so only when they differ keeps the
-                // common case quiet.
-                let author = match author.as_str() {
-                    "" => String::new(),
-                    a if a.eq_ignore_ascii_case(&detail.author) => String::new(),
-                    a => format!(" (opened by {a})"),
-                };
-                println!("  ref      {reference}{author}");
-            }
-            let states: Vec<String> = detail.states.iter().map(ToString::to_string).collect();
-            println!("  state    {}", states.join(", "));
-            println!(
-                "  existing {}",
-                match &detail.existing {
-                    Some(names) if names.is_empty() => "none".to_string(),
-                    Some(names) => names
-                        .iter()
-                        .map(|n| format!(":{n}:"))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    None => "unknown".to_string(),
-                }
-            );
-            println!(
-                "  action   {}",
-                match (&detail.plan.add, &detail.plan.satisfied_by) {
-                    (Some(emoji), _) => format!("add :{emoji}:"),
-                    // Usually an alias, so naming the canonical here would be
-                    // a claim about a reaction that isn't on the message.
-                    (None, Some(found)) => format!("nothing (already signaled by :{found}:)"),
-                    (None, None) => "nothing (no signal for this state)".to_string(),
-                }
-            );
-            println!();
-        }
-    }
-
-    // A discovery failure isn't a per-record failure, so the counters below
-    // all read zero while the run exits nonzero. Say it outright.
-    if report.discovery_failed() {
-        println!("discovery FAILED — the search window was not covered; see the log");
-    }
-
-    if verbose > 0 {
-        tracking(&report.tracking);
-    }
-
-    for reference in &report.unmatched {
-        println!("{reference}: nothing tracked references it");
-    }
-
-    // "checked 0" alone reads the same whether nothing was due or nothing was
-    // found, so say how many were eligible and when the next one comes up.
-    let checked = match report.next_check {
-        Some(next) => {
-            let wait = next
-                .signed_duration_since(Utc::now())
-                .max(TimeDelta::zero());
-            format!(
-                "checked {}/{} (next in {})",
-                report.checked,
-                report.live,
-                humanize(wait)
-            )
-        }
-        None => format!("checked {}/{}", report.checked, report.live),
-    };
-
-    let verb = if dry_run { "would add" } else { "added" };
-    println!(
-        "discovered {} · {checked} · {verb} {} · skipped {} · failed {} · tracking {} ({} done)",
-        report.discovered,
-        report.added.len(),
-        report.skipped,
-        report.failed,
-        report.tracked,
-        report.terminal,
     );
     Ok(())
 }
