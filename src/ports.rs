@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
-    #[error("slack search failed: {0}")]
-    Search(String),
+    /// A Slack read or lookup: a channel, a user, whoami.
+    #[error("slack read failed: {0}")]
+    Read(String),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]

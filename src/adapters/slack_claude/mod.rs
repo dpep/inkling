@@ -246,7 +246,7 @@ impl<R: Runner> SlackClaude<R> {
                     Err(error) => Err(Retry::Again(error)),
                 }
             })
-            .map_err(SourceError::Search)?;
+            .map_err(SourceError::Read)?;
         self.channel_ids
             .borrow_mut()
             .insert(name.to_string(), id.clone());
@@ -279,7 +279,7 @@ impl<R: Runner> SlackClaude<R> {
                 Err(error) => Err(Retry::Again(error)),
             }
         })
-        .map_err(SourceError::Search)
+        .map_err(SourceError::Read)
     }
 
     /// Who wrote each message of a thread and of the channel after `wanted`,

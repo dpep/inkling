@@ -182,7 +182,7 @@ enum Command {
     },
     /// Claude Code's side of the wiring: reads a hook payload on stdin.
     ///
-    /// Three one-line commands in settings.json instead of shell that picks
+    /// Four one-line commands in settings.json instead of shell that picks
     /// the session id out of JSON. A hook never fails a session — whatever
     /// goes wrong, this logs it and exits 0 saying nothing.
     Hook {
