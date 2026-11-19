@@ -35,6 +35,8 @@ pub enum EditError {
     NoSuchKey(String),
     #[error("{key} is a section, not a value")]
     NotAValue { key: String },
+    #[error("{key} is retired and has no effect; `inkling config set {key} \"\"` removes it")]
+    Retired { key: String },
     /// The edit was applied to a copy, found invalid, and discarded.
     #[error("that change would make the config invalid: {reason}")]
     WouldBeInvalid { reason: String },
@@ -55,6 +57,26 @@ pub fn load(path: &Path) -> Result<DocumentMut, EditError> {
     raw.parse().map_err(|source| EditError::Parse {
         path: path.display().to_string(),
         source,
+    })
+}
+
+/// Keys only the removed Slack reactions read. `Config` accepts and ignores
+/// them on load, but setting one would write a knob nothing turns.
+const RETIRED: &[&str] = &[
+    "window",
+    "tracking",
+    "filters",
+    "status",
+    "run",
+    "slack.personal",
+    "slack.channels",
+    "slack.mcp.tools.search",
+];
+
+fn retired(key: &str) -> bool {
+    RETIRED.iter().any(|r| {
+        key.strip_prefix(r)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
     })
 }
 
@@ -83,8 +105,14 @@ pub fn set(document: &mut DocumentMut, key: &str, value: &str) -> Result<(), Edi
     let segments: Vec<&str> = key.split('.').collect();
     let (last, parents) = segments.split_last().expect("split never yields empty");
 
+    // Removing one is still allowed: that's how a dead key leaves the file.
     if value.is_empty() {
         return remove(document, &segments);
+    }
+    if retired(key) {
+        return Err(EditError::Retired {
+            key: key.to_string(),
+        });
     }
 
     let mut item: &mut Item = document.as_item_mut();
@@ -217,6 +245,12 @@ idle_after = "5m"
         SAMPLE.parse().unwrap()
     }
 
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("inkling-edit-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn reads_scalars_and_lists() {
         let d = doc();
@@ -312,13 +346,50 @@ idle_after = "5m"
         let mut d = doc();
         set(&mut d, "github.hosts", "github.com, ghe.example.com").unwrap();
 
-        let dir = std::env::temp_dir().join(format!("inkling-edit-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("invalid");
         let path = dir.join("config.toml");
 
         let error = save(&path, &d).unwrap_err();
         assert!(matches!(error, EditError::WouldBeInvalid { .. }), "{error}");
         assert!(!path.exists(), "nothing should have been written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_retired_key_is_refused_but_can_be_removed() {
+        let mut d: DocumentMut = "[window]\noverlap = \"5m\"\n[slack]\nchannels = [\"#eng\"]\n"
+            .parse()
+            .unwrap();
+        for key in [
+            "window.overlap",
+            "tracking.max_tracking_age",
+            "filters.only_my_messages",
+            "status.merged.canonical",
+            "run.dry_run",
+            "slack.personal",
+            "slack.channels",
+            "slack.mcp.tools.search",
+        ] {
+            let error = set(&mut d, key, "1").unwrap_err();
+            assert!(matches!(error, EditError::Retired { .. }), "{key}: {error}");
+            assert!(error.to_string().contains(key), "{error}");
+        }
+        // A name that only starts like a retired one is not retired.
+        let mut other = DocumentMut::new();
+        set(&mut other, "slack.mcp.tools.search_channels", "find").unwrap();
+        set(&mut other, "statusbar.x", "1").unwrap();
+
+        // A config already holding them still saves, and removing them works.
+        set(&mut d, "serve.interval", "30s").unwrap();
+        set(&mut d, "window.overlap", "").unwrap();
+        assert!(matches!(
+            get(&d, "window.overlap"),
+            Err(EditError::NoSuchKey(_))
+        ));
+        assert_eq!(get(&d, "slack.channels").unwrap(), "#eng");
+        let dir = scratch("retired");
+        let path = dir.join("config.toml");
+        save(&path, &d).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

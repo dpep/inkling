@@ -84,8 +84,8 @@ impl Default for ClaudeRunner {
 }
 
 impl ClaudeRunner {
-    /// Flags that keep the boot cost down. Measured against the default
-    /// invocation: 6x cheaper and 2x faster (see docs/slack-mcp-spike.md).
+    /// Flags that keep the boot cost down: each invocation is a fresh process,
+    /// and the default one is several times slower and costlier.
     ///
     /// `--tools ""` drops every built-in tool definition — the bridge needs
     /// none of them, and their descriptions are large. Not `--bare`, which

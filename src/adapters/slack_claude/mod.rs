@@ -181,8 +181,7 @@ impl<R: Runner> SlackClaude<R> {
 }
 
 /// Slack's codes for a thread that isn't there to read. They arrive through
-/// the bridge intact (docs/slack-mcp-spike.md), so they are matched, not
-/// guessed at.
+/// the bridge intact, so they are matched, not guessed at.
 const GONE: [&str; 3] = ["thread_not_found", "message_not_found", "channel_not_found"];
 const GONE_MARK: &str = "gone";
 
@@ -247,7 +246,7 @@ impl<R: Runner> SlackClaude<R> {
                     Err(error) => Err(Retry::Again(error)),
                 }
             })
-            .map_err(SourceError::Search)?;
+            .map_err(SourceError::Read)?;
         self.channel_ids
             .borrow_mut()
             .insert(name.to_string(), id.clone());
@@ -280,7 +279,7 @@ impl<R: Runner> SlackClaude<R> {
                 Err(error) => Err(Retry::Again(error)),
             }
         })
-        .map_err(SourceError::Search)
+        .map_err(SourceError::Read)
     }
 
     /// Who wrote each message of a thread and of the channel after `wanted`,
@@ -523,7 +522,7 @@ mod tests {
         // Resolving a handle costs a bridge call, so an ID must never take
         // that path.
         assert!(looks_like_channel_id("C012XYZ6789"));
-        assert!(looks_like_channel_id("D0AS6PZ20AF"));
+        assert!(looks_like_channel_id("D0000000B"));
         assert!(!looks_like_channel_id("inkling"));
         assert!(!looks_like_channel_id("eng-prs"));
         assert!(!looks_like_channel_id("Coding"), "mixed case is a handle");

@@ -207,7 +207,7 @@ mod tests {
         // The real case: a :dart: on the watched message, then a top-level
         // message in the DM rather than a thread reply.
         let (slack, prompts) = threads(&[REAL_DM_ACTIVITY]);
-        let watched = message("D1MG8KWNR", "1794976101.418449", None);
+        let watched = message("D0000000A", "1794976101.418449", None);
         let status = slack.read(&[watched]).unwrap()[0].1.clone().unwrap();
 
         let prompt = &prompts.borrow()[0];
@@ -219,10 +219,10 @@ mod tests {
         assert_eq!(status.reactions, BTreeMap::from([("dart".into(), 1)]));
         assert_eq!(
             status.replies,
-            BTreeMap::from([("1794976230.118559".into(), "U0E48AHQA".into())])
+            BTreeMap::from([("1794976230.118559".into(), "U00000001".into())])
         );
         assert_eq!(
-            status.names.get("U0E48AHQA").map(String::as_str),
+            status.names.get("U00000001").map(String::as_str),
             Some("dpepper")
         );
     }
@@ -232,7 +232,7 @@ mod tests {
         // An empty list would read as a quiet DM; a missing one is a model
         // that made one call of the two.
         let (slack, prompts) = threads(&[REAL_THREAD, REAL_DM_ACTIVITY]);
-        let read = slack.read(&[message("D1MG8KWNR", "1794976101.418449", None)]);
+        let read = slack.read(&[message("D0000000A", "1794976101.418449", None)]);
         assert_eq!(read.unwrap()[0].1.clone().unwrap().replies.len(), 1);
         assert_eq!(prompts.borrow().len(), 2);
     }
@@ -379,7 +379,7 @@ mod tests {
         let (slack, _) = threads(&[&channel]);
         assert!(
             slack
-                .channel("D1MG8KWNR", Some("1771013015.064589"))
+                .channel("D0000000A", Some("1771013015.064589"))
                 .is_ok()
         );
     }
@@ -388,7 +388,7 @@ mod tests {
     fn a_channel_read_is_one_read_channel_from_where_the_last_one_ended() {
         let (slack, prompts) = threads(&[REAL_CHANNEL_READ]);
         let status = slack
-            .channel("D1MG8KWNR", Some("1771013015.064589"))
+            .channel("D0000000A", Some("1771013015.064589"))
             .unwrap();
 
         let prompt = &prompts.borrow()[0];
@@ -403,13 +403,13 @@ mod tests {
         assert_eq!(
             status.arrived,
             BTreeMap::from([
-                ("1794976101.418449".into(), "U0E48AHQA".into()),
-                ("1794976230.118559".into(), "U0E48AHQA".into()),
+                ("1794976101.418449".into(), "U00000001".into()),
+                ("1794976230.118559".into(), "U00000001".into()),
             ])
         );
         assert!(!status.more);
         assert_eq!(
-            status.names.get("U0E48AHQA").map(String::as_str),
+            status.names.get("U00000001").map(String::as_str),
             Some("dpepper")
         );
     }
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn a_channel_baseline_asks_for_the_newest_alone() {
         let (slack, prompts) = threads(&[REAL_CHANNEL_BASELINE]);
-        let status = slack.channel("D1MG8KWNR", None).unwrap();
+        let status = slack.channel("D0000000A", None).unwrap();
         let prompt = &prompts.borrow()[0];
         assert!(!prompt.contains("oldest"), "{prompt}");
         assert!(prompt.contains("limit: 1\n"), "{prompt}");
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn an_empty_channel_is_an_answer_and_a_skipped_call_is_retried() {
         let (slack, prompts) = threads(&[r#"{"messages": []}"#, REAL_EMPTY_CHANNEL]);
-        let status = slack.channel("C0E48AHSN", Some("0")).unwrap();
+        let status = slack.channel("C0E00000A", Some("0")).unwrap();
         assert!(status.arrived.is_empty());
         assert_eq!(prompts.borrow().len(), 2);
     }
@@ -441,14 +441,14 @@ mod tests {
             .collect();
         let raw = format!(r#"{{"channel":[{}],"more":false}}"#, page.join(","));
         let (slack, _) = threads(&[&raw]);
-        assert!(slack.channel("C0E48AHSN", Some("1.000000")).unwrap().more);
+        assert!(slack.channel("C0E00000A", Some("1.000000")).unwrap().more);
     }
 
     #[test]
     fn a_channel_slack_says_is_gone_is_not_found() {
         let (slack, _) = threads(&["channel_not_found"]);
         assert_eq!(
-            slack.channel("C0E48AHSN", Some("0")),
+            slack.channel("C0E00000A", Some("0")),
             Err(RefError::NotFound)
         );
     }

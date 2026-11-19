@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_cache_write_keeps_what_another_writer_saved_meanwhile() {
-        // Found by the hunt: `watch slack:#new` loaded the state, spent a
+        // Regression: `watch slack:#new` loaded the state, spent a
         // bridge call resolving the channel, and saved its stale copy over
         // whatever another process had written in between.
         let dir = TempDir::new("merge");

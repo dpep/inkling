@@ -177,12 +177,14 @@ enum Command {
     /// Stop pushing to this session. It stays attached, so its watches keep
     /// being read and the prompt hook still shows what moved.
     Unsubscribe {
+        /// The session id to detach from. Defaults to the one Claude Code
+        /// exports.
         #[arg(long)]
         session: Option<String>,
     },
     /// Claude Code's side of the wiring: reads a hook payload on stdin.
     ///
-    /// Three one-line commands in settings.json instead of shell that picks
+    /// Four one-line commands in settings.json instead of shell that picks
     /// the session id out of JSON. A hook never fails a session — whatever
     /// goes wrong, this logs it and exits 0 saying nothing.
     Hook {
@@ -251,7 +253,8 @@ impl HookEvent {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Print the effective config — defaults plus whatever the file changes.
+    /// Print where the config, state and logs live, and whether GitHub
+    /// credentials resolve.
     Show,
     /// Print where the config file would be read from.
     Path,
@@ -355,6 +358,15 @@ fn log_directory(common: &Common) -> PathBuf {
     }
 }
 
+/// Where `inkling config` says logs go: the directory being written, or that
+/// writing is off.
+fn logs_shown(common: &Common) -> String {
+    match common.log_dir.as_deref() {
+        Some("off") => "off".to_string(),
+        _ => tildify(&log_directory(common)),
+    }
+}
+
 fn config_path(common: &Common) -> PathBuf {
     common.config.clone().unwrap_or_else(|| {
         let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -419,7 +431,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 "{}",
                 config_edit::get(&document, key).map_err(|e| format!(
                     "{e}\n  the file only holds what you've changed; \
-                     `inkling config` shows effective values"
+                     anything absent takes its default"
                 ))?
             );
             return Ok(0);
@@ -465,7 +477,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             };
             println!("config     {}{absent}", tildify(&path));
             println!("state      {}", tildify(store.path()));
-            println!("logs       {}", tildify(&obs::default_log_directory()));
+            println!("logs       {}", logs_shown(&cli.common));
 
             println!();
             println!("github     {}", credentials(&config));
@@ -1010,8 +1022,8 @@ fn known(
 /// shorter than that — `repo#N`, `#N`, `N` — need a watch, where a short
 /// form genuinely selects among what is watched.
 ///
-/// A rule per command is what dogfooding caught: `watch` learned the first
-/// half and `wait` did not, and both suites stayed green.
+/// One rule for every command: with a rule per command, `watch` learned the
+/// first half and `wait` did not, and both suites stayed green.
 fn complete(
     owner: Option<String>,
     repo: Option<String>,
@@ -1969,7 +1981,7 @@ fn watch_target(
 /// A Slack channel by `#name` or by id, named when that is known.
 ///
 /// The name is display only: a watch is keyed by the id, so `#general` and
-/// `C0E48AHSN` are one watch whichever came first. An id takes the name the
+/// `C0E00000A` are one watch whichever came first. An id takes the name the
 /// cache has for it. A name nobody has resolved yet costs one bridge call, kept in
 /// `state.json` with the rest of the channel cache.
 fn slack_channel<R: slack_claude::Runner>(
@@ -2653,6 +2665,24 @@ fn wait_out(report: &inkling::wait::Report, json: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn config_shows_the_log_directory_in_use() {
+        use clap::Parser;
+        let shown = |args: &[&str]| {
+            let cli = super::Cli::try_parse_from(args).unwrap();
+            super::logs_shown(&cli.common)
+        };
+        assert_eq!(
+            shown(&["inkling", "config", "--log-dir", "/private/tmp/scrub/logs"]),
+            "/private/tmp/scrub/logs"
+        );
+        assert_eq!(shown(&["inkling", "config", "--log-dir", "off"]), "off");
+        assert_eq!(
+            shown(&["inkling", "config"]),
+            super::tildify(&inkling::obs::default_log_directory())
+        );
+    }
+
     use super::{
         Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge, news,
         noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
@@ -2686,7 +2716,7 @@ mod tests {
 
     #[test]
     fn only_a_return_to_the_session_undoes_an_unsubscribe() {
-        // Found by the hunt: a compaction's SessionStart re-attached it.
+        // Regression: a compaction's SessionStart re-attached it.
         // A /clear needs no rule: Claude Code gives it a new session id.
         assert!(super::unmutes_at_start("startup"));
         assert!(super::unmutes_at_start("resume"));
@@ -2699,7 +2729,7 @@ mod tests {
 
     #[test]
     fn the_prompt_hook_leaves_refreshing_to_a_running_server() {
-        // Found by the hunt: a refresh abandoned at its budget left `acli`
+        // Regression: a refresh abandoned at its budget left `acli`
         // children running, four more on every prompt.
         let dir = std::env::temp_dir().join(format!("inkling-prompt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2725,7 +2755,7 @@ mod tests {
             .unwrap();
         ticked(serve.interval);
         assert!(!super::refreshes_at_prompt(&serve, &watches, now, floor));
-        // Found by the hunt: a server winding down holds the lock but no
+        // Regression: a server winding down holds the lock but no
         // longer ticks, and the prompt went quiet with it.
         ticked(serve.interval * 3);
         assert!(
@@ -2889,9 +2919,8 @@ mod tests {
 
     /// One argument, put through every command that takes a reference.
     ///
-    /// The level the dogfood finding was at: each command was tested against
-    /// its own idea of what a reference is, so `watch` learning a form and
-    /// `wait` not learning it looked green both times.
+    /// Runs a target through every command, so one learning a form the others
+    /// don't fails here rather than passing in each command's own suite.
     fn each_command(
         target: &str,
         known: &[inkling::domain::model::Reference],
@@ -2963,8 +2992,8 @@ mod tests {
 
     #[test]
     fn every_command_accepts_the_same_reference() {
-        // Found by dogfooding: `watch dpep/inkling#7` was accepted seconds
-        // before `wait dpep/inkling#7` was refused. `owner/repo#N` names a
+        // Regression: `watch dpep/inkling#7` was accepted and
+        // `wait dpep/inkling#7` refused. `owner/repo#N` names a
         // pull request completely once the host defaults, and which command
         // you are running has nothing to do with it.
         for target in [
@@ -3018,7 +3047,7 @@ mod tests {
 
     #[test]
     fn a_shorter_form_selects_what_is_already_watched() {
-        // Found by dogfooding: short forms once matched only what the Slack
+        // Regression: short forms once matched only what the Slack
         // reactions tracked, so `wait 3` never worked.
         let now = chrono::Utc::now();
         let mut watches = Watches::default();
@@ -3038,7 +3067,7 @@ mod tests {
 
     #[test]
     fn one_unresolvable_reference_does_not_stop_the_others() {
-        // Found by dogfooding: a typo in the second argument cost the watch
+        // Regression: a typo in the second argument cost the watch
         // on the first one, which was the whole reason for running it.
         let targets = ["dpep/inkling#3".to_string(), "42".to_string()];
         let (references, refused) = watch_targets(&targets, &hosts(), &[], &named);
@@ -3079,7 +3108,7 @@ mod tests {
 
     #[test]
     fn watching_one_thing_reports_only_on_that_thing() {
-        // Found by dogfooding: watching a new pull request printed "already
+        // Regression: watching a new pull request printed "already
         // merged — nothing left to watch" for two older ones the same poll
         // happened to finish. One poll reads every live watch, so it does
         // somebody else's housekeeping too; the log already says so.
@@ -3111,7 +3140,7 @@ mod tests {
 
     #[test]
     fn a_watch_missing_at_its_first_reading_is_a_typo_not_a_wait() {
-        // Found by the hunt: a mistyped pull request was reported unreadable
+        // Regression: a mistyped pull request was reported unreadable
         // and kept, to end as `gone` a few polls later.
         let now = chrono::Utc::now();
         let mut watches = Watches::default();
@@ -3401,14 +3430,14 @@ mod tests {
         let mut snapshot = store.load().unwrap_or_default();
         snapshot
             .channels
-            .insert("general".into(), "C0E48AHSN".into());
+            .insert("general".into(), "C0E00000A".into());
         store.save(&snapshot).unwrap();
         // Never run: both forms are answered from the cache.
         let slack =
             super::slack_claude::SlackClaude::new(super::slack_claude::ClaudeRunner::default());
 
         let by_name = super::slack_channel("#General", &slack, &store).unwrap();
-        let by_id = super::slack_channel("C0E48AHSN", &slack, &store).unwrap();
+        let by_id = super::slack_channel("C0E00000A", &slack, &store).unwrap();
         assert_eq!(by_name, by_id);
         assert_eq!(by_id.to_string(), "slack:#general");
         std::fs::remove_dir_all(&dir).unwrap();

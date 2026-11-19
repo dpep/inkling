@@ -21,7 +21,7 @@
 //! on a case that only happens in some session configurations. See
 //! docs/watching.md.
 //!
-//! Inkling still only observes (DESIGN §1). It delivers news into a session;
+//! Inkling still only observes (docs/watching.md#observe-never-act). It delivers news into a session;
 //! what the session does about it is the session's business.
 
 use crate::adapters::session_socket::{DeliverError, SessionAddress, Written};
@@ -1050,7 +1050,7 @@ mod tests {
 
         // A channel shows `#name`; the read needs its id.
         let incidents = Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: Some("incidents".into()),
         };
         let posted = Event {
@@ -1059,7 +1059,7 @@ mod tests {
         };
         assert_eq!(
             lookup(&posted),
-            "slack_read_channel channel_id=C0E48AHSN oldest=1794976101.418449"
+            "slack_read_channel channel_id=C0E00000A oldest=1794976101.418449"
         );
     }
 
@@ -1098,7 +1098,7 @@ mod tests {
             after: after.map(String::from),
             ..on(
                 Reference::SlackChannel {
-                    channel: "C0E48AHSN".into(),
+                    channel: "C0E00000A".into(),
                     name: name.map(String::from),
                 },
                 event(Axis::Messages, "0", "2", "@a"),
@@ -1106,15 +1106,15 @@ mod tests {
         };
         assert_eq!(
             line(channel(Some("incidents"), Some("1.000002"))),
-            "inkling: slack:#incidents | 2 messages from @a (C0E48AHSN, after 1.000002)"
+            "inkling: slack:#incidents | 2 messages from @a (C0E00000A, after 1.000002)"
         );
         assert_eq!(
             line(channel(None, Some("1.000002"))),
-            "inkling: slack:C0E48AHSN | 2 messages from @a (after 1.000002)"
+            "inkling: slack:C0E00000A | 2 messages from @a (after 1.000002)"
         );
         assert_eq!(
             line(channel(None, None)),
-            "inkling: slack:C0E48AHSN | 2 messages from @a"
+            "inkling: slack:C0E00000A | 2 messages from @a"
         );
     }
 
@@ -1443,7 +1443,7 @@ mod tests {
 
     #[test]
     fn a_draft_marked_ready_waits_for_the_next_prompt() {
-        // Dogfooded on #14: `gh pr ready` woke the session that ran it. Out of
+        // Regression: `gh pr ready` woke the session that ran it. Out of
         // draft is a start, like a suite starting; review is what follows.
         let mut watches = drafted();
         moved(&mut watches, State::Open);

@@ -1003,7 +1003,7 @@ mod touched_tests {
     #[test]
     fn a_browse_url_is_unambiguous_wherever_it_sits() {
         assert_eq!(
-            names("open https://dpep.atlassian.net/browse/AI-42", ""),
+            names("open https://example.atlassian.net/browse/AI-42", ""),
             ["AI-42"]
         );
     }

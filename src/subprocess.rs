@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn a_background_process_holding_the_output_does_not_outlast_the_deadline() {
-        // Found by the hunt: a token command that forked something which
+        // Regression: a token command that forked something which
         // inherited stdout held a 2s call for as long as that ran.
         let started = Instant::now();
         let error =

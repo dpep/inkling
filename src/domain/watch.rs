@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn a_commit_with_no_rollup_yet_keeps_the_one_it_had() {
-        // Found by dogfooding: pushing to a pull request produced `checks
+        // Regression: pushing to a pull request produced `checks
         // success → none` and `none → pending` before the `pending → success`
         // that was the news. The head commit briefly has no rollup, which says
         // nothing about where CI stands.
@@ -1741,7 +1741,7 @@ mod tests {
     fn a_burst_past_the_page_is_at_least_what_github_counted() {
         // Conversation comments past the page: totalCount gives the number,
         // but a comment deleted since the last reading hides one new one, and
-        // nothing the page shows can tell. Recorded as a hunt repro: one of
+        // nothing the page shows can tell. Regression: one of
         // ten deleted, then 31 new, read as exactly 30.
         let base = reading(
             None,

@@ -56,10 +56,11 @@ impl fmt::Display for CheckState {
 
 /// The condition a wait is waiting for.
 ///
-/// Deliberately tiny. Two threshold shapes and a settling shape cover both
-/// motivating cases; anything richer is the expression language that turns
-/// this into a rules engine (DESIGN §1 rules that out). A new predicate has
-/// to argue its way in here, as a named variant, never as a syntax.
+/// Deliberately tiny. Two threshold shapes and a settling shape cover waiting
+/// on a review and waiting on CI; anything richer is the expression language
+/// that turns this into a rules engine, which
+/// docs/watching.md#observe-never-act rules out. A new predicate has to argue
+/// its way in here, as a named variant, never as a syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
     /// Moved at all, in any direction — whatever the next step turns out to
@@ -154,8 +155,8 @@ pub enum Resolution {
 
 /// The lifecycle position of a whole set of references.
 ///
-/// The minimum, which is the same fold reconciliation uses for a message
-/// holding several links: one closed pull request pins the group down.
+/// The minimum: the group is only as far along as its least advanced member,
+/// so one closed pull request pins the group down.
 pub fn aggregate(observations: &[Observation]) -> Option<State> {
     observations.iter().map(|o| o.state).min()
 }
@@ -313,8 +314,8 @@ mod tests {
 
     #[test]
     fn one_closed_sibling_precludes_the_whole_wait() {
-        // Same aggregation reconcile uses: Closed ranks lowest, so it pins
-        // the minimum and the group can never reach the threshold.
+        // Closed ranks lowest, so it pins the minimum and the group can
+        // never reach the threshold.
         let refs = [seen(1, State::Merged), seen(2, State::Closed)];
         assert_eq!(
             resolve(Until::Reached(State::Merged), &refs, None),
@@ -324,7 +325,7 @@ mod tests {
 
     #[test]
     fn a_red_suite_ends_the_wait_immediately() {
-        // "so i can respond" — one failure is enough to respond to, even
+        // A wait exists so a session can respond: one failure is enough, even
         // with other jobs still running.
         let refs = [
             checked(1, CheckState::Failure),
