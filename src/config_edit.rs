@@ -89,8 +89,8 @@ pub fn set(document: &mut DocumentMut, key: &str, value: &str) -> Result<(), Edi
 
     let mut item: &mut Item = document.as_item_mut();
     for segment in parents {
-        // Creating missing tables is the point: `config set status.merged.
-        // canonical x` shouldn't require the section to exist first.
+        // Creating missing tables is the point: `config set slack.mcp.tools.
+        // read_thread x` shouldn't require the section to exist first.
         let table = item
             .as_table_like_mut()
             .ok_or_else(|| EditError::NotAValue {
@@ -150,8 +150,8 @@ fn parse_value(raw: &str) -> Value {
     if let Ok(n) = trimmed.parse::<i64>() {
         return Value::from(n);
     }
-    // A comma or brackets means a list — the shape `channels` and `aliases`
-    // both want, and the only ones a user is likely to set.
+    // A comma or brackets means a list — the shape `github.ignore_checks`
+    // wants.
     let bracketed = trimmed.starts_with('[') && trimmed.ends_with(']');
     if bracketed || trimmed.contains(',') {
         let inner = if bracketed {
@@ -180,7 +180,7 @@ fn render(value: &Value) -> String {
 }
 
 /// Write only if the result still parses as a config. An edit that would take
-/// the tool out of service should fail at the edit, not at 3am from cron.
+/// the tool out of service should fail at the edit, not later in a hook.
 pub fn save(path: &Path, document: &DocumentMut) -> Result<(), EditError> {
     let text = document.to_string();
     Config::parse(&text, path).map_err(|e| EditError::WouldBeInvalid {
@@ -204,14 +204,13 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = r##"# Inkling config
-[slack]
-# Find your own posts.
-personal = true
-channels = ["#eng"]
+[github]
+# Where the token comes from.
+token_command = "gh auth token"
+ignore_checks = ["merge-lock"]
 
-[status.merged]
-canonical = "purple_heart"
-aliases = ["merged", "shipit"]
+[serve]
+idle_after = "5m"
 "##;
 
     fn doc() -> DocumentMut {
@@ -221,15 +220,14 @@ aliases = ["merged", "shipit"]
     #[test]
     fn reads_scalars_and_lists() {
         let d = doc();
-        assert_eq!(get(&d, "slack.personal").unwrap(), "true");
-        assert_eq!(get(&d, "status.merged.canonical").unwrap(), "purple_heart");
-        assert_eq!(get(&d, "status.merged.aliases").unwrap(), "merged, shipit");
+        assert_eq!(get(&d, "github.token_command").unwrap(), "gh auth token");
+        assert_eq!(get(&d, "github.ignore_checks").unwrap(), "merge-lock");
     }
 
     #[test]
     fn an_unknown_key_says_so() {
         assert!(matches!(
-            get(&doc(), "slack.nope"),
+            get(&doc(), "github.nope"),
             Err(EditError::NoSuchKey(_))
         ));
     }
@@ -237,7 +235,7 @@ aliases = ["merged", "shipit"]
     #[test]
     fn a_section_is_not_a_value() {
         assert!(matches!(
-            get(&doc(), "slack"),
+            get(&doc(), "github"),
             Err(EditError::NotAValue { .. })
         ));
     }
@@ -247,69 +245,72 @@ aliases = ["merged", "shipit"]
         // The starter config is mostly comments; losing them on the first
         // edit would be worse than not having the command.
         let mut d = doc();
-        set(&mut d, "slack.personal", "false").unwrap();
+        set(&mut d, "github.token_command", "op read x").unwrap();
         let out = d.to_string();
         assert!(out.contains("# Inkling config"));
-        assert!(out.contains("# Find your own posts."));
-        assert!(out.contains("personal = false"));
+        assert!(out.contains("# Where the token comes from."));
+        assert!(out.contains(r#"token_command = "op read x""#), "{out}");
     }
 
     #[test]
     fn values_take_the_type_they_look_like() {
         let mut d = doc();
-        set(&mut d, "slack.personal", "false").unwrap();
-        set(&mut d, "filters.max_message_chars", "500").unwrap();
-        set(&mut d, "window.overlap", "20m").unwrap();
+        set(&mut d, "flag", "false").unwrap();
+        set(&mut d, "count", "500").unwrap();
+        set(&mut d, "serve.interval", "20s").unwrap();
 
         let out = d.to_string();
-        assert!(out.contains("personal = false"), "{out}");
-        assert!(out.contains("max_message_chars = 500"), "{out}");
+        assert!(out.contains("flag = false"), "{out}");
+        assert!(out.contains("count = 500"), "{out}");
         // Durations must stay strings or they won't deserialize.
-        assert!(out.contains(r#"overlap = "20m""#), "{out}");
+        assert!(out.contains(r#"interval = "20s""#), "{out}");
     }
 
     #[test]
     fn a_comma_separated_value_becomes_a_list() {
         let mut d = doc();
-        set(&mut d, "slack.channels", "#eng, #design").unwrap();
-        assert_eq!(get(&d, "slack.channels").unwrap(), "#eng, #design");
+        set(&mut d, "github.ignore_checks", "merge-lock, labels").unwrap();
+        assert_eq!(
+            get(&d, "github.ignore_checks").unwrap(),
+            "merge-lock, labels"
+        );
 
-        set(&mut d, "status.merged.aliases", r#"["a", "b"]"#).unwrap();
-        assert_eq!(get(&d, "status.merged.aliases").unwrap(), "a, b");
+        set(&mut d, "github.ignore_checks", r#"["a", "b"]"#).unwrap();
+        assert_eq!(get(&d, "github.ignore_checks").unwrap(), "a, b");
     }
 
     #[test]
     fn setting_an_empty_value_removes_the_key() {
         let mut d = doc();
-        set(&mut d, "slack.personal", "").unwrap();
+        set(&mut d, "github.ignore_checks", "").unwrap();
         assert!(matches!(
-            get(&d, "slack.personal"),
+            get(&d, "github.ignore_checks"),
             Err(EditError::NoSuchKey(_))
         ));
         // The section and its neighbours survive.
-        assert_eq!(get(&d, "slack.channels").unwrap(), "#eng");
+        assert_eq!(get(&d, "github.token_command").unwrap(), "gh auth token");
     }
 
     #[test]
     fn removing_something_absent_is_not_an_error() {
         let mut d = doc();
-        assert!(set(&mut d, "slack.never_set", "").is_ok());
+        assert!(set(&mut d, "github.never_set", "").is_ok());
         assert!(set(&mut d, "nothing.here.at.all", "").is_ok());
     }
 
     #[test]
     fn missing_sections_are_created() {
         let mut d = doc();
-        set(&mut d, "status.approved.canonical", "eyes").unwrap();
-        assert_eq!(get(&d, "status.approved.canonical").unwrap(), "eyes");
+        set(&mut d, "slack.mcp.tools.read_thread", "read").unwrap();
+        assert_eq!(get(&d, "slack.mcp.tools.read_thread").unwrap(), "read");
     }
 
     #[test]
     fn an_edit_that_breaks_the_config_is_refused() {
-        // Same emoji for two states — caught by the config's own validation
-        // rather than duplicated here.
+        // A second host — caught by the config's own validation rather than
+        // duplicated here.
         let mut d = doc();
-        set(&mut d, "status.approved.canonical", "shipit").unwrap();
+        set(&mut d, "github.hosts", "github.com, ghe.example.com").unwrap();
 
         let dir = std::env::temp_dir().join(format!("inkling-edit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -464,49 +464,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("logs       {}", tildify(&obs::default_log_directory()));
 
             println!();
-            println!("personal   {}", config.slack.personal);
-            println!(
-                "channels   {}",
-                if config.slack.channels.is_empty() {
-                    "none".to_string()
-                } else {
-                    config.slack.channels.join(", ")
-                }
-            );
-            println!("mine only  {}", config.filters.only_my_messages);
             println!("github     {}", credentials(&config));
-
-            // Canonical emoji vary in width, so the "also" column is padded to
-            // the widest one rather than a guess that breaks on a long name.
-            let drawn: Vec<_> = inkling::domain::model::State::ALL
-                .into_iter()
-                .filter_map(|state| config.canonical_for(state).map(|e| (state, e)))
-                .collect();
-            let widest = drawn
-                .iter()
-                .map(|(_, emoji)| emoji.as_str().len())
-                .max()
-                .unwrap_or(0);
-
-            if !drawn.is_empty() {
-                println!();
-            }
-            for (state, emoji) in drawn {
-                // The canonical is in the evidence list too; repeating it in
-                // "also" would suggest it's a second, different emoji.
-                let also: Vec<String> = config
-                    .evidence_for(state)
-                    .iter()
-                    .filter(|e| **e != emoji)
-                    .map(|e| format!(":{e}:"))
-                    .collect();
-                let canonical = format!(":{emoji}:");
-                let padded = format!("{canonical:<width$}", width = widest + 2);
-                match also.is_empty() {
-                    true => println!("{state:<10} {padded}"),
-                    false => println!("{state:<10} {padded}  also {}", also.join(" ")),
-                }
-            }
             Ok(0)
         }
         Command::Subscribe { session } => {

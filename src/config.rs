@@ -1,12 +1,8 @@
-//! Configuration: what to watch, how often to look, and which emoji mean what.
-//!
-//! Emoji vocabulary differs from org to org — one team's merged is `:merged:`,
-//! another's is `:shipit:` — so the whole mapping lives here and none of it
-//! leaks into the core. A state is signaled only if it appears in `[status.*]`
-//! and isn't disabled, which is also how states stay recognized-but-silent.
+//! Configuration: where credentials come from, how Slack is reached, and how
+//! the resident server paces itself. Every field has a default.
 
-use crate::domain::model::{ReactionName, State};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,91 +29,34 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
-    pub window: Window,
-    #[serde(default)]
-    pub tracking: Tracking,
-    #[serde(default)]
-    pub filters: Filters,
-    #[serde(default)]
     pub slack: Slack,
     #[serde(default)]
     pub github: GitHub,
-    /// Keyed by state name. A state absent here is never drawn.
-    #[serde(default)]
-    pub status: BTreeMap<String, Status>,
-    #[serde(default)]
-    pub run: Run,
     #[serde(default)]
     pub serve: Serve,
+    // Sections only the removed Slack reactions read. Accepted and ignored,
+    // so a config written for them still loads; any other unknown key is
+    // still a typo worth refusing.
+    #[serde(default, rename = "window")]
+    _window: IgnoredAny,
+    #[serde(default, rename = "tracking")]
+    _tracking: IgnoredAny,
+    #[serde(default, rename = "filters")]
+    _filters: IgnoredAny,
+    #[serde(default, rename = "status")]
+    _status: IgnoredAny,
+    #[serde(default, rename = "run")]
+    _run: IgnoredAny,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Window {
-    /// Re-scan this far back past the last successful discovery, so a message
-    /// landing right on the boundary isn't missed.
-    #[serde(with = "humantime_serde", default = "d_overlap")]
-    pub overlap: Duration,
-    /// Hard clamp. A corrupt or ancient timestamp can never widen the search
-    /// past this.
-    #[serde(with = "humantime_serde", default = "d_max_lookback")]
-    pub max_lookback: Duration,
-    /// First run, or after state loss.
-    #[serde(with = "humantime_serde", default = "d_initial_lookback")]
-    pub initial_lookback: Duration,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Tracking {
-    /// How long a message stays worth updating. Short on purpose: nobody
-    /// scrolls back to a week-old post to see whether the PR landed.
-    #[serde(with = "humantime_serde", default = "d_max_tracking_age")]
-    pub max_tracking_age: Duration,
-    /// Interval between checks while the message is fresh. Defaults to the
-    /// expected cron cadence, so a fresh message is effectively checked every
-    /// run. Zero disables backoff entirely.
-    #[serde(with = "humantime_serde", default = "d_base_check_interval")]
-    pub base_check_interval: Duration,
-    /// The check interval doubles once per this much message age.
-    #[serde(with = "humantime_serde", default = "d_doubling_period")]
-    pub doubling_period: Duration,
-    #[serde(with = "humantime_serde", default = "d_max_check_interval")]
-    pub max_check_interval: Duration,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Filters {
-    /// A long message is a digest or a standup post; a reaction on it says
-    /// nothing useful.
-    #[serde(default = "d_max_message_chars")]
-    pub max_message_chars: usize,
-    #[serde(default = "d_max_references")]
-    pub max_references_per_message: usize,
-    /// Annotate only messages the configured user wrote, however they were
-    /// discovered. On by default — your own posts are the safe blast radius.
-    #[serde(default = "d_true")]
-    pub only_my_messages: bool,
-}
-
-// Default is implemented by hand rather than derived: `#[serde(default)]` on
-// the containing field constructs the whole struct via Default, bypassing the
-// per-field defaults below. Deriving it silently reverts them to false/None.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Slack {
-    /// Search for messages the configured user authored. On by default, so
-    /// there's always something to search without any configuration.
-    #[serde(default = "d_true")]
-    pub personal: bool,
-    /// Slack user ID, e.g. `U012ABC345`. Needed by personal mode and by
-    /// `only_my_messages`, but resolved from the credentials and cached when
-    /// omitted — nobody knows their own Slack ID off-hand.
+    /// Slack user ID, e.g. `U012ABC345`: a channel message counts as a reply
+    /// only when it mentions you. Resolved from the credentials and cached
+    /// when omitted — nobody knows their own Slack ID off-hand.
     #[serde(default)]
     pub user_id: Option<String>,
-    #[serde(default)]
-    pub channels: Vec<String>,
     /// Which Slack MCP server to load, and what its tools are called.
     ///
     /// Omitted, the bridge inherits whatever MCP configuration the ambient
@@ -125,6 +64,11 @@ pub struct Slack {
     /// reliability depend on things Inkling can't see.
     #[serde(default)]
     pub mcp: Option<SlackMcp>,
+    // Where the removed reactions searched; ignored, as in `Config`.
+    #[serde(default, rename = "personal")]
+    _personal: IgnoredAny,
+    #[serde(default, rename = "channels")]
+    _channels: IgnoredAny,
 }
 
 /// A declarable MCP server, named explicitly so the subprocess can be scoped
@@ -139,7 +83,7 @@ pub struct Slack {
 /// Only works for a server expressible as a static block. An account-linked
 /// OAuth connector isn't declarable, and `--strict-mcp-config` would drop it
 /// along with everything else.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SlackMcp {
     /// Name the server is given in the generated config, and therefore the
@@ -155,12 +99,11 @@ pub struct SlackMcp {
 }
 
 /// Tool names by role. Defaults are the names the current server uses, so a
-/// backend that matches needs none of this.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// backend that matches needs none of this. `react` and `send_message` are
+/// never called: they name the session's own calls, for the post-tool hook.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SlackMcpTools {
-    #[serde(default = "d_search")]
-    pub search: String,
     #[serde(default = "d_read_channel")]
     pub read_channel: String,
     #[serde(default = "d_react")]
@@ -173,6 +116,9 @@ pub struct SlackMcpTools {
     pub read_user_profile: String,
     #[serde(default = "d_send_message")]
     pub send_message: String,
+    // The removed reactions' search tool; ignored, as in `Config`.
+    #[serde(default, rename = "search")]
+    _search: IgnoredAny,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,20 +140,6 @@ pub struct GitHub {
     /// policy — by exact name. They never turn a pull request red.
     #[serde(default)]
     pub ignore_checks: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Status {
-    /// What Inkling adds when it needs to signal this state.
-    pub canonical: String,
-    /// Other emoji that count as evidence this state is already signaled,
-    /// from anyone. Inkling reads these but only ever writes `canonical`.
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    /// Keep the mapping, stop drawing it.
-    #[serde(default = "d_true")]
-    pub enabled: bool,
 }
 
 /// The resident server: how often it looks, and when it gives up.
@@ -232,19 +164,11 @@ pub struct Serve {
     pub max_lifetime: Duration,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Run {
-    #[serde(default)]
-    pub dry_run: bool,
-}
-
 impl Config {
     /// Load from disk, or fall back to defaults when there's no file.
     ///
     /// A config file is a way to change Inkling's mind, not a prerequisite for
-    /// running it — every field has a working default, so a fresh machine can
-    /// go straight to `inkling run --dry-run`.
+    /// running it — every field has a working default.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         match std::fs::read_to_string(path) {
@@ -263,54 +187,17 @@ impl Config {
     }
 
     pub fn parse(raw: &str, path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let mut config: Config = toml::from_str(raw).map_err(|source| ConfigError::Parse {
+        let config: Config = toml::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.as_ref().to_owned(),
             source,
         })?;
-        // Only when nothing was configured at all — a file that names one
-        // state means the others were left out deliberately.
-        if config.status.is_empty() {
-            config.status = default_status();
-        }
         config.validate()?;
         Ok(config)
     }
 
-    /// Everything that would otherwise fail at 3am from cron: an unknown state
-    /// name, an emoji claimed by two states, a mode with nothing to search.
+    /// What would otherwise fail later, out of sight in a hook or the server.
     fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |msg: String| ConfigError::Invalid(msg);
-
-        let mut owner: BTreeMap<ReactionName, String> = BTreeMap::new();
-        for (name, status) in &self.status {
-            name.parse::<State>()
-                .map_err(|_| invalid(format!("[status.{name}]: unknown state")))?;
-
-            if status.canonical.trim().is_empty() {
-                return Err(invalid(format!("[status.{name}]: canonical is empty")));
-            }
-
-            for emoji in std::iter::once(&status.canonical).chain(&status.aliases) {
-                let emoji = ReactionName::new(emoji);
-                if let Some(other) = owner.insert(emoji.clone(), name.clone())
-                    && &other != name
-                {
-                    return Err(invalid(format!(
-                        ":{emoji}: is mapped to both {other} and {name}; \
-                         one emoji can only mean one thing"
-                    )));
-                }
-            }
-        }
-
-        if !self.slack.personal && self.slack.channels.is_empty() {
-            return Err(invalid(
-                "nothing to search: enable slack.personal or list slack.channels".into(),
-            ));
-        }
-
-        // slack.user_id is deliberately not required: the modes that need it
-        // resolve it from the credentials at run time and cache it.
 
         if self.github.hosts.is_empty() {
             return Err(invalid("github.hosts is empty; nothing would match".into()));
@@ -326,69 +213,10 @@ impl Config {
             )));
         }
 
-        if self.tracking.doubling_period.is_zero() {
-            return Err(invalid(
-                "tracking.doubling_period must be non-zero; it divides message age".into(),
-            ));
-        }
-
         Ok(())
     }
-
-    /// The emoji to add when signaling `state`, or `None` if config doesn't
-    /// draw it.
-    pub fn canonical_for(&self, state: State) -> Option<ReactionName> {
-        let status = self.status.get(state.as_str())?;
-        status.enabled.then(|| ReactionName::new(&status.canonical))
-    }
-
-    /// Every emoji that counts as evidence `state` is already signaled.
-    /// Includes disabled states: a signal someone else left still means
-    /// something even if Inkling wouldn't have drawn it.
-    pub fn evidence_for(&self, state: State) -> Vec<ReactionName> {
-        let Some(status) = self.status.get(state.as_str()) else {
-            return Vec::new();
-        };
-        std::iter::once(&status.canonical)
-            .chain(&status.aliases)
-            .map(ReactionName::new)
-            .collect()
-    }
 }
 
-fn d_true() -> bool {
-    true
-}
-fn d_overlap() -> Duration {
-    Duration::from_secs(10 * 60)
-}
-fn d_max_lookback() -> Duration {
-    Duration::from_secs(24 * 60 * 60)
-}
-fn d_initial_lookback() -> Duration {
-    // Same as max_lookback: 24h is already the most this will ever look back,
-    // so a first run covering less was an arbitrary extra limit. A scope set
-    // up in the afternoon should still find the morning's pull requests.
-    Duration::from_secs(24 * 60 * 60)
-}
-fn d_max_tracking_age() -> Duration {
-    Duration::from_secs(7 * 24 * 60 * 60)
-}
-fn d_base_check_interval() -> Duration {
-    Duration::from_secs(20 * 60)
-}
-fn d_doubling_period() -> Duration {
-    Duration::from_secs(24 * 60 * 60)
-}
-fn d_max_check_interval() -> Duration {
-    Duration::from_secs(24 * 60 * 60)
-}
-fn d_max_message_chars() -> usize {
-    1000
-}
-fn d_max_references() -> usize {
-    3
-}
 fn d_hosts() -> Vec<String> {
     vec!["github.com".to_string()]
 }
@@ -396,12 +224,7 @@ fn d_token_command() -> Option<String> {
     Some("gh auth token".to_string())
 }
 
-// Most roles follow `slack_<role>`; search and react don't, so every default
-// is spelled out rather than derived from a pattern that holds five times
-// out of seven.
-fn d_search() -> String {
-    "slack_search_public_and_private".into()
-}
+// Spelled out rather than derived from `slack_<role>`: react doesn't follow it.
 fn d_read_channel() -> String {
     "slack_read_channel".into()
 }
@@ -424,13 +247,13 @@ fn d_send_message() -> String {
 impl Default for SlackMcpTools {
     fn default() -> Self {
         Self {
-            search: d_search(),
             read_channel: d_read_channel(),
             react: d_react(),
             search_channels: d_search_channels(),
             read_thread: d_read_thread(),
             read_user_profile: d_read_user_profile(),
             send_message: d_send_message(),
+            _search: IgnoredAny,
         }
     }
 }
@@ -482,33 +305,6 @@ fn expand_env(raw: &str) -> Result<String, ConfigError> {
     Ok(out)
 }
 
-/// Emoji every workspace has. `:merged:` and `:shipit:` are common but not
-/// universal, and adding one the workspace lacks fails with invalid_name —
-/// so they're accepted as evidence, never written.
-fn default_status() -> BTreeMap<String, Status> {
-    BTreeMap::from([
-        (
-            State::Approved.as_str().to_string(),
-            Status {
-                canonical: "white_check_mark".into(),
-                aliases: ["heavy_check_mark", "lgtm", "approved"]
-                    .map(String::from)
-                    .into(),
-                enabled: true,
-            },
-        ),
-        (
-            State::Merged.as_str().to_string(),
-            Status {
-                canonical: "rocket".into(),
-                aliases: ["merged", "shipit", "ship", "done"]
-                    .map(String::from)
-                    .into(),
-                enabled: true,
-            },
-        ),
-    ])
-}
 fn d_api_url() -> String {
     "https://api.github.com/graphql".to_string()
 }
@@ -532,37 +328,6 @@ impl Default for Serve {
     }
 }
 
-impl Default for Window {
-    fn default() -> Self {
-        Self {
-            overlap: d_overlap(),
-            max_lookback: d_max_lookback(),
-            initial_lookback: d_initial_lookback(),
-        }
-    }
-}
-
-impl Default for Tracking {
-    fn default() -> Self {
-        Self {
-            max_tracking_age: d_max_tracking_age(),
-            base_check_interval: d_base_check_interval(),
-            doubling_period: d_doubling_period(),
-            max_check_interval: d_max_check_interval(),
-        }
-    }
-}
-
-impl Default for Filters {
-    fn default() -> Self {
-        Self {
-            max_message_chars: d_max_message_chars(),
-            max_references_per_message: d_max_references(),
-            only_my_messages: d_true(),
-        }
-    }
-}
-
 impl Default for GitHub {
     fn default() -> Self {
         Self {
@@ -575,42 +340,20 @@ impl Default for GitHub {
     }
 }
 
-impl Default for Slack {
-    fn default() -> Self {
-        Self {
-            personal: d_true(),
-            user_id: None,
-            channels: Vec::new(),
-            mcp: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const EXAMPLE: &str = r##"
         [slack]
-        personal = true
         user_id = "U012ABC345"
-        channels = ["#coding"]
 
-        [status.approved]
-        canonical = "white_check_mark"
-        aliases = ["heavy_check_mark", "lgtm"]
-
-        [status.merged]
-        canonical = "merged"
-        aliases = ["shipit"]
+        [serve]
+        interval = "30s"
     "##;
 
     fn parse(raw: &str) -> Result<Config, ConfigError> {
         Config::parse(raw, "test.toml")
-    }
-
-    fn example() -> Config {
-        parse(EXAMPLE).expect("example config should be valid")
     }
 
     fn error(raw: &str) -> String {
@@ -620,15 +363,11 @@ mod tests {
     #[test]
     fn an_empty_config_is_a_working_config() {
         // A config file changes Inkling's mind; it isn't a prerequisite for
-        // running. A fresh machine should go straight to a dry run.
+        // running.
         let config = Config::with_defaults();
-        assert!(config.slack.personal, "something must be searchable");
-        assert!(config.filters.only_my_messages);
-        assert_eq!(
-            config.canonical_for(State::Merged),
-            Some(ReactionName::new("rocket"))
-        );
         assert!(config.github.token_command.is_some());
+        assert_eq!(config.github.hosts, vec!["github.com"]);
+        assert_eq!(config.serve.interval, Duration::from_secs(15));
     }
 
     #[test]
@@ -636,29 +375,50 @@ mod tests {
         // `#[serde(default)]` on the containing field builds the struct via
         // Default, so the two must agree or an omitted section silently
         // means something different from an empty one.
-        let from_serde = parse("[status.merged]\ncanonical = \"x\"\n").unwrap();
-        assert_eq!(from_serde.slack.personal, Slack::default().personal);
+        let from_serde = parse("[github]\n[serve]\n").unwrap();
         assert_eq!(
             from_serde.github.token_command,
             GitHub::default().token_command
         );
+        assert_eq!(from_serde.serve.idle_after, Serve::default().idle_after);
     }
 
     #[test]
-    fn omitted_sections_fall_back_to_defaults() {
-        let config = example();
-        assert_eq!(config.window.overlap, Duration::from_secs(600));
-        assert_eq!(
-            config.window.initial_lookback, config.window.max_lookback,
-            "a first run should cover as much as the clamp allows"
-        );
-        assert_eq!(
-            config.tracking.max_tracking_age,
-            Duration::from_secs(7 * 24 * 3600)
-        );
-        assert_eq!(config.filters.max_message_chars, 1000);
-        assert!(config.filters.only_my_messages);
-        assert_eq!(config.github.hosts, vec!["github.com"]);
+    fn a_config_written_for_the_removed_reactions_still_loads() {
+        // Their sections and keys are ignored; nothing else about the file
+        // changes.
+        let raw = r##"
+            [window]
+            overlap = "10m"
+
+            [tracking]
+            doubling_period = "0s"
+
+            [filters]
+            only_my_messages = false
+
+            [run]
+            dry_run = true
+
+            [status.merged]
+            canonical = "rocket"
+
+            [slack]
+            personal = false
+            channels = ["#eng"]
+            user_id = "U012ABC345"
+
+            [slack.mcp]
+            server = "s"
+            url = "u"
+
+            [slack.mcp.tools]
+            search = "slack_search_public_and_private"
+            read_thread = "read_thread"
+        "##;
+        let config = parse(raw).unwrap();
+        assert_eq!(config.slack.user_id.as_deref(), Some("U012ABC345"));
+        assert_eq!(config.slack.mcp.unwrap().tools.read_thread, "read_thread");
     }
 
     #[test]
@@ -673,55 +433,9 @@ mod tests {
 
     #[test]
     fn durations_are_human_readable() {
-        let config = parse(&format!("{EXAMPLE}\n[window]\noverlap = \"90s\"\n")).unwrap();
-        assert_eq!(config.window.overlap, Duration::from_secs(90));
-    }
-
-    #[test]
-    fn canonical_emoji_comes_from_config() {
-        let config = example();
         assert_eq!(
-            config.canonical_for(State::Merged),
-            Some(ReactionName::new("merged"))
-        );
-        // Not configured, so never drawn — even though it's a real state.
-        assert_eq!(config.canonical_for(State::Open), None);
-    }
-
-    #[test]
-    fn a_disabled_state_is_not_drawn_but_still_counts_as_evidence() {
-        let raw =
-            format!("{EXAMPLE}\n[status.closed]\ncanonical = \"wastebasket\"\nenabled = false\n");
-        let config = parse(&raw).unwrap();
-        assert_eq!(config.canonical_for(State::Closed), None);
-        assert_eq!(
-            config.evidence_for(State::Closed),
-            vec![ReactionName::new("wastebasket")]
-        );
-    }
-
-    #[test]
-    fn evidence_covers_canonical_and_aliases() {
-        assert_eq!(
-            example().evidence_for(State::Approved),
-            vec![
-                ReactionName::new("white_check_mark"),
-                ReactionName::new("heavy_check_mark"),
-                ReactionName::new("lgtm"),
-            ]
-        );
-    }
-
-    #[test]
-    fn seen_is_not_approved() {
-        // :eyes: conventionally means "I'm looking at this", not "approved".
-        // Accepting it as evidence would keep Inkling silent on a PR someone
-        // merely glanced at, and it would stay silent when the PR really was
-        // approved — a wrong non-action, which nothing else would surface.
-        let evidence = Config::with_defaults().evidence_for(State::Approved);
-        assert!(
-            !evidence.contains(&ReactionName::new("eyes")),
-            "{evidence:?}"
+            parse(EXAMPLE).unwrap().serve.interval,
+            Duration::from_secs(30)
         );
     }
 
@@ -729,7 +443,7 @@ mod tests {
     fn an_omitted_mcp_table_changes_nothing() {
         // The whole feature is additive: without it the bridge keeps
         // inheriting the ambient MCP configuration exactly as before.
-        assert_eq!(example().slack.mcp, None);
+        assert_eq!(parse(EXAMPLE).unwrap().slack.mcp, None);
     }
 
     #[test]
@@ -750,7 +464,11 @@ mod tests {
         );
         let mcp = parse(&raw).unwrap().slack.mcp.unwrap();
         assert_eq!(mcp.tools.react, "add_reaction");
-        assert_eq!(mcp.tools.search, d_search(), "the rest keep their defaults");
+        assert_eq!(
+            mcp.tools.read_thread,
+            d_read_thread(),
+            "the rest keep their defaults"
+        );
     }
 
     #[test]
@@ -796,90 +514,16 @@ mod tests {
 
     #[test]
     fn an_unknown_key_is_rejected_rather_than_ignored() {
-        // A typo in an emoji mapping would otherwise silently no-op.
-        let err = error(&format!("{EXAMPLE}\n[filters]\nmax_message_charz = 10\n"));
+        // A typo would otherwise silently leave the default in place.
+        let err = error(&format!("{EXAMPLE}\nidle_aftr = \"1m\"\n"));
+        assert!(err.contains("parsing"), "{err}");
+        let err = error("[watch]\nttl = \"1d\"\n");
         assert!(err.contains("parsing"), "{err}");
     }
 
     #[test]
-    fn an_unknown_state_name_is_rejected() {
-        let raw = format!("{EXAMPLE}\n[status.changes_requested]\ncanonical = \"eyes\"\n");
-        assert!(error(&raw).contains("unknown state"));
-    }
-
-    #[test]
-    fn one_emoji_cannot_mean_two_things() {
-        let raw = r#"
-            [slack]
-            personal = true
-            user_id = "U1"
-
-            [status.approved]
-            canonical = "eyes"
-
-            [status.merged]
-            canonical = "merged"
-            aliases = ["eyes"]
-        "#;
-        assert!(error(raw).contains("only mean one thing"));
-    }
-
-    #[test]
-    fn repeating_an_emoji_within_one_state_is_fine() {
-        let raw = r#"
-            [slack]
-            personal = true
-            user_id = "U1"
-
-            [status.approved]
-            canonical = "eyes"
-            aliases = [":EYES:"]
-        "#;
-        assert!(parse(raw).is_ok());
-    }
-
-    #[test]
-    fn a_run_with_nothing_to_search_is_rejected() {
-        let raw = r#"
-            [slack]
-            personal = false
-
-            [status.merged]
-            canonical = "merged"
-        "#;
-        assert!(error(raw).contains("nothing to search"));
-    }
-
-    #[test]
     fn an_omitted_user_id_is_fine_because_it_gets_resolved() {
-        let raw = r#"
-            [slack]
-            personal = true
-
-            [status.merged]
-            canonical = "merged"
-        "#;
-        let config = parse(raw).unwrap();
-        assert_eq!(config.slack.user_id, None);
-    }
-
-    #[test]
-    fn a_zero_doubling_period_is_rejected() {
-        let raw = format!("{EXAMPLE}\n[tracking]\ndoubling_period = \"0s\"\n");
-        assert!(error(&raw).contains("doubling_period"));
-    }
-
-    #[test]
-    fn an_empty_canonical_is_rejected() {
-        let raw = r#"
-            [slack]
-            personal = true
-            user_id = "U1"
-
-            [status.merged]
-            canonical = ""
-        "#;
-        assert!(error(raw).contains("canonical is empty"));
+        assert_eq!(Config::with_defaults().slack.user_id, None);
     }
 
     #[test]
