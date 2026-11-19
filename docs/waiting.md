@@ -1,7 +1,8 @@
 # Waiting
 
-Status: built, W0–W3. This is the design as it was argued; the notes below
-record where the build departed from it.
+Status: built. This is the design as it was argued; [Where the build departed
+from the design](#where-the-build-departed-from-the-design) records what
+changed on contact with GitHub.
 
 The idea: `inkling wait <pr>` blocks until a condition on that pull request is
 met, then exits with a code that says how it resolved. Callers are people,
@@ -55,10 +56,10 @@ it, and the state file is hand-readable at 2am." docs/deferred.md
 already rejected a persistent process once for the bridge, partly because
 fresh processes *are* the recovery mechanism. Same reasoning applies.
 
-**N full processes contending on the store.** Each waiter runs something like
-the existing run loop. This fails the dedup requirement outright (N waiters =
-N× polling), and it puts N writers on a snapshot that has no lock and no
-merge.
+**N full processes contending on the store.** Each waiter polls for itself
+and writes the shared state. This fails the dedup requirement outright (N
+waiters = N× polling), and it puts N writers on a snapshot that has no lock
+and no merge.
 
 **Cooperative short-lived processes — chosen.** Waiters are ordinary CLI
 processes that coordinate through a small shared file of their own,
@@ -95,19 +96,31 @@ replace polling entirely) becomes right. The
 wait loop is shaped for that future: its single seam is an `observe()` step,
 and webhook delivery would slot in behind it.
 
+Inkling did later grow a resident server, for pushing news into sessions
+([watching.md](watching.md#who-polls)). It isn't the daemon rejected here:
+nobody installs, starts or restarts it, it stands down when idle, and all its
+state is on disk. Waits don't depend on it. They still coordinate among
+themselves through `waits.json`, so `inkling wait` works the same with or
+without one running.
+
 ## The predicate vocabulary
 
 Resist the DSL. The smallest vocabulary covering the stated cases is one
 flag, one word:
 
 ```
-inkling wait <pr>... [--until merged|approved|open|done|checks] [--timeout 30m]
+inkling wait <pr>... [--until changed|merged|approved|open|draft|done|checks] [--timeout 30m]
 ```
 
+- `--until changed`, the default, resolves on the first move in any direction
+  from where the wait began. It is the one condition that needs no guess
+  about what comes next, which is why it is the default. Something already
+  merged or closed has nothing left to change, so it resolves precluded at
+  once rather than waiting out the timeout.
 - `--until <state>` means "reached **at least** `<state>`." `State` is an
   ordered enum whose declaration order is the ordering, so this predicate is
-  `observed >= threshold` — nearly free. `--until merged` (the default) is
-  `>= Merged`, i.e. `== Merged`, since Merged is the top.
+  `observed >= threshold` — nearly free. `--until merged` is `>= Merged`,
+  i.e. `== Merged`, since Merged is the top.
 - Several PRs means all of them: fold with `min`, then compare once. `min(states) >= threshold` is
   "every reference has reached the threshold." No new machinery.
 - **Precluded** falls out of the same ordering: an observation that is
@@ -123,7 +136,7 @@ inkling wait <pr>... [--until merged|approved|open|done|checks] [--timeout 30m]
 - `--until checks` is the CI case, below.
 
 That is the whole language. No `--filter` expressions, no boolean operators,
-no field comparisons. Two threshold predicates and a terminality predicate
+no field comparisons. A threshold, terminality, CI and "anything at all"
 cover both stated uses; anything more is the rules engine that turns this
 into the automation platform the non-goals rule out. If a third predicate
 shape ever demands entry, it should have to argue its way into this section.
@@ -145,7 +158,7 @@ Costs, itemized:
   GraphQL query — one more field, no extra round trip. `RefStatus` grows an
   `Option<CheckState>` (`None`: repo has no checks configured — a wait on it
   should fail fast, not spin for the full timeout). Exact response shapes —
-  no checks, queued, in-progress, a re-run — need recorded fixtures, W0.
+  no checks, queued, in-progress, a re-run — need recorded fixtures first.
 - **Domain**: the enum, its terminality, and the predicate arm. Small.
 - **A real semantic wrinkle**: check terminality is not permanent. A new push
   or a re-run takes a red rollup back to pending. The pull request
@@ -181,7 +194,7 @@ than overloading 1:
 | --- | --- |
 | 0 | condition met (`--until checks`: checks green) |
 | 2 | error — config, credentials, GitHub unreachable past retries |
-| 3 | precluded — resolved terminally against the condition: PR closed while waiting for merged/approved; checks red |
+| 3 | precluded — resolved terminally against the condition: PR closed while waiting for merged/approved; checks red; nothing left to change |
 | 4 | timed out, still undecided |
 | 5 | reference vanished — 404/not-visible; fails fast on the first poll rather than burning the timeout on a typo |
 
@@ -190,51 +203,47 @@ observed state per reference, checks state when asked for, seconds waited
 (whole seconds — a poll-interval-derived duration has no sub-second
 precision), polls made. Progress chatter goes to the log layer, not stdout.
 On timeout the last observation still prints — the consolation prize the
-caller can act on. `--timeout` has a default (30m suggested) rather than
-being optional-and-infinite; an unbounded wait is a hung agent.
+caller can act on. `--timeout` has a default (30m) rather than being
+optional-and-infinite; an unbounded wait is a hung agent.
 
-## What this costs the existing product
+## What it cost the rest of Inkling
 
-- **Code**: nothing existing changes, and the bridge is untouched. New: a
-  pure `domain/wait.rs` (predicate + fold), an app-level wait loop,
-  `CheckState`, one provider field, and the `waits.json` adapter.
-- **The missing lock gets urgent.** Once `inkling` processes routinely run
-  for minutes, overlapping ones are the normal case, not the rare one. The
-  waits file gets a lock from day one; `state.json` gets one as its own small
-  change.
-- **Logs interleave.** Two processes appending to the same daily log file
-  (src/obs.rs) is currently impossible and becomes routine. Line-buffered
-  appends are probably fine; worth one look, not a redesign.
+- **Code**: nothing existing changed. New: a pure `domain/wait.rs` (predicate
+  and fold), the wait loop in `src/wait.rs`, `CheckState`, one provider field,
+  and the `waits.json` adapter.
+- **The missing lock got urgent.** Once `inkling` processes routinely run for
+  minutes, overlapping ones are the normal case. The waits file had a lock
+  from day one; `state.json` got one as its own small change.
+- **Logs interleave.** Several processes append to the same daily log file
+  (src/obs.rs), so `inkling logs` sorts by timestamp rather than trusting
+  file order.
 - **Rate budget** is shared but roomy: a batched single-PR query costs ~1
   point of GitHub's 5000/hr; a 30-minute wait at the default 15s interval is
   ~120 points, and the lease means fan-out adds waiters, not queries.
-- **Conceptual surface.** The pitch grows a clause: Inkling observes external
-  lifecycles — and now lets you block on one. That is a real widening, but it
-  stays on the observe side of the observe/act line.
+- **Conceptual surface.** The pitch grew a clause: Inkling observes external
+  lifecycles, and lets you block on one. A real widening, but it stays on the
+  observe side of the observe/act line.
 
-Not building any of it is also on the table for one piece: if real usage is
-always one waiter per PR, the W3 lease machinery is coordination without
-load, and `wait` should stay a self-contained polling loop forever.
+Not building one piece stays on the table: if real usage is always one waiter
+per PR, the lease machinery is coordination without load, and `wait` should
+be a self-contained polling loop.
 
-## Milestones
+## How it was built
 
-Each lands on its own, with the tree green and a changelog entry.
+Four steps, each landing on its own: fixtures, `wait` on the PR lifecycle,
+`--until checks`, then shared polling. Shared polling is on by default rather
+than behind a flag: with one waiter it is the same query plus a lock and a
+small write.
 
-- **W0 — fixtures and numbers. Done.** All four rollup shapes recorded from
-  the live API and kept as constants in `src/adapters/github.rs`'s tests:
-  `SUCCESS` (dpep/inkling#1), `PENDING` (rust-lang/rust#161731), `FAILURE`
-  (rust-lang/rust#161685), and `null` — no checks configured — from an old
-  pre-Actions PR (sinatra/sinatra#100). The rollup rides on
-  `commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`;
-  `commits.nodes` can also be empty, so both emptinesses read as "no checks".
-  Measured cost of a 3-reference batch *including* the rollup: **1 point** of
-  GitHub's 5000/hour, so a 30-minute wait at the default interval costs ~120
-  points and batching more references into it is free.
-- **W1 — `inkling wait` on the PR lifecycle. Done.** As designed.
-- **W2 — `--until checks`. Done.** As designed.
-- **W3 — deduplicated polling. Done.** As designed, and on by default rather
-  than behind a flag: with one waiter the shared path is the same query plus
-  a lock and a small write, which is not worth a flag to avoid.
+The fixtures came first. All four rollup shapes were recorded from the live
+API and kept as constants in `src/adapters/github.rs`'s tests: `SUCCESS`
+(dpep/inkling#1), `PENDING` (rust-lang/rust#161731), `FAILURE`
+(rust-lang/rust#161685), and `null` — no checks configured — from an old
+pre-Actions PR (sinatra/sinatra#100). The rollup rides on
+`commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`;
+`commits.nodes` can also be empty, so both emptinesses read as "no checks".
+A 3-reference batch *including* the rollup measured **1 point** of GitHub's
+5000/hour, so batching more references into a wait is free.
 
 ### Where the build departed from the design
 
@@ -312,7 +321,7 @@ wait finished until=changed outcome="timed_out" waited_seconds=20 polls=5
 
 What each field is there to answer:
 
-- **`peak_watches`** — the one that decides W3's fate. Stuck at 1 across real
+- **`peak_watches`** — the one that decides whether shared polling stays. Stuck at 1 across real
   usage means the lease is coordination without load; delete it and keep
   `wait` a self-contained poll loop.
 - **`polled` vs `shared`** — the saving, per waiter. A waiter with
@@ -344,7 +353,7 @@ collector.
   point — and the answer is probably still no, because a 15s flaky bridge is
   a terrible substrate for a tight poll loop; that demand feeds [a real Slack
   app](deferred.md#becoming-a-real-slack-app) instead.
-- **One waiter per PR, always.** Then W3 never earns itself: drop the lease,
+- **One waiter per PR, always.** Then shared polling never earns itself: drop the lease,
   keep `wait` a self-contained loop, delete this doc's hardest section.
 - **Dozens of concurrent long waits.** The cooperative model is the wrong
   side of the daemon line; revisit alongside a push-driven design rather
