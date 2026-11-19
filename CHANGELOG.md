@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Install with Homebrew**: `brew install dpep/tools/inkling`.
+
 ## 0.4.0 — 2026-11-18
 
 **Upgrading.** An old config still loads: keys only the Slack reactions read (`[window]`,

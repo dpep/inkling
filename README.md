@@ -36,13 +36,13 @@ You only need the ones for what you watch.
 ## Install
 
 ```sh
-cargo install inkling-dev
+brew install dpep/tools/inkling
 ```
 
-The package is `inkling-dev` because `inkling` on crates.io is an unrelated crate; the command
-it installs is `inkling`. To build from source instead, clone the repository and run
-`cargo install --path .`. Either way it lands in `~/.cargo/bin`, which must be on your `PATH`:
-the hooks call `inkling` by name.
+Or with Cargo, `cargo install inkling-dev`: the package carries a suffix because `inkling` on
+crates.io is an unrelated crate, but the command it installs is `inkling`. To build from source,
+clone the repository and run `cargo install --path .`. However you install it, `inkling` must be
+on your `PATH`: the hooks call it by name.
 
 ## Quick start
 

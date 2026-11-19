@@ -104,16 +104,6 @@ is more surface, not less.
 **Revisit if** Slack reads turn out to be wanted only "when I ask" rather
 than on a schedule.
 
-## Homebrew
-
-**Deferred, 2026-11-18.** Inkling installs with `cargo install inkling-dev`
-(crates.io's `inkling` is an unrelated Ink markup library, so the package
-carries a suffix and the binary keeps the name). Homebrew needs a tap formula
-pinning a release tarball; nothing stops it now the repository is public, and
-it waits for someone who wants it.
-
-**Revisit when** someone asks for `brew install`.
-
 ## Becoming a real Slack app
 
 **The big one.** Every Slack read today is a `claude -p` call through Claude
