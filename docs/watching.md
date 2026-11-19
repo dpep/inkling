@@ -125,7 +125,10 @@ and a warning that logs may not be ready would have been false.
 
 **What was built: the push names the command that works now.** When the red
 check is an Actions job, the line ends in `gh api --hostname <host>
-repos/<owner>/<repo>/actions/jobs/<id>/logs` instead of `gh pr checks`. An
+repos/<owner>/<repo>/actions/jobs/<id>/logs` instead of `gh pr checks`. (Since
+2026-11-18 the push says only `(job <id>)` and the skill holds the command; see
+[The line carries facts, not commands](#the-line-carries-facts-not-commands).
+`inkling events` still spells it out.) An
 Actions check run's id is its job's id, so this is two more fields in the
 existing query (`databaseId`, and the check suite's app) — measured at one
 rate-limit point for a three-reference batch with or without them. It is
@@ -748,6 +751,32 @@ session posts. So a closed session kept paying for news nobody could hear.
   `watch resumed` once.
 - **`wait` is unaffected.** A wait has a foreground reader by construction.
 
+## The line carries facts, not commands
+
+Changed 2026-11-18, at the user's request. Each pushed line used to end in the
+full command that reads it — `(gh pr view 42 --repo github.com/you/repo
+--comments)`, `(slack_read_thread channel_id=… message_ts=…; slack_read_channel
+…)` — often longer than the news. Most of it is a template the reference
+already fills, and every push spends it inside somebody's turn.
+
+So the line keeps only what reading it needs that the reference doesn't say:
+
+| news | the line adds |
+| --- | --- |
+| comments, some on lines | `, N on a line` / `, N on lines` (`gh pr view` misses them) |
+| red Actions check | `(job <id>)`, the only way to its log |
+| reply or reaction on a threaded Slack message | `(thread <root ts>)` |
+| channel messages | `(<id>, after <ts>)`, the id only when the line shows `#name` |
+
+The templates live in the inkling skill, whose description triggers on a line
+starting `inkling:`. `inkling events` and its `--json` `lookup` keep the full
+command: those are pulled when wanted, not pushed into a turn.
+
+- **The cost is a step.** A session that hasn't loaded the skill has to before
+  it can act; that is no network call, but it is one the old line didn't need.
+- **What would change this:** dogfood lines where a push arrived and the agent
+  guessed the wrong read, or went to `events` for it.
+
 ## Watching what a session touched
 
 `inkling hook post-tool` registers a watch for the pull request or issue a
@@ -847,8 +876,8 @@ posted.
 the replies after it, as ts → who wrote it. Two axes, like a pull request's:
 
 ```
-slack:C0123ABCD/1786596050.245879 | 2 replies from @alice and @bob (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879)
-slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark: (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879)
+slack:C0123ABCD/1786596050.245879 | 2 replies from @alice and @bob
+slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark:
 ```
 
 The event keeps both counts (`from: "2"`, `to: "4"`, in `--json` too); the
@@ -860,7 +889,8 @@ every axis that accumulates, so the next one reads the same — in the push, in
 `inkling events`, and in the `inkling watch` listing (`1 reply, 2 reactions
 :dart:`).
 
-**Every accumulating line names the read that shows it**, as the Slack MCP
+**Every accumulating `events` row names the read that shows it** (the push
+stopped carrying it on 2026-11-18, below), as the Slack MCP
 call an agent makes, written `(tool key=value; tool key=value)`: compact, and
 each key is the tool's own parameter name. A reaction is read with
 `slack_read_thread` on the message's root, which prints the counts. A reply
@@ -1103,7 +1133,7 @@ Built 2026-11-17: a watched pull request reports new comments, from anyone, as
 a third axis beside `state` and `checks`:
 
 ```
-github.com/you/repo#42 | 2 comments from @alice and coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)
+github.com/you/repo#42 | 2 comments from @alice and coderabbitai (bot), 1 on a line
 ```
 
 **What counts.** Conversation comments (`comments`, GitHub's issue comments),
@@ -1181,7 +1211,7 @@ read. So a review is kept as its line comments and whether it has a body
 **No prose.** The review body is fetched only to know whether it is empty —
 `SubmittedReview::body` deserializes to a `bool`, so the text never outlives
 parsing — and no comment text is asked for at all. The push says who, how
-many, and the command to read them.
+many, and how many are line comments.
 
 **Cost, measured 2026-11-17** on a 3-reference batch (care_fe#16618,
 home-assistant/core#193001, dpep/inkling#30), ten interleaved runs each:
@@ -1203,9 +1233,10 @@ none.
 conversation comments and reviews with a body. Checked on rippled#6493, where
 one author has 29 reviews, 27 of them a single line comment and no body: gh
 prints 7 entries for them. So the event carries how many of its comments are
-line comments (`lines`), and the line ends in the command that shows them:
+line comments (`lines`); the push says that count, and `events` and the skill
+name the command that shows them:
 
-| new comments | the line ends in |
+| new comments | read with |
 | --- | --- |
 | none are line comments | `gh pr view <n> --repo <host>/<o>/<r> --comments` |
 | all are | `gh api --hostname <host> --paginate repos/<o>/<r>/pulls/<n>/comments` |
@@ -1239,9 +1270,9 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
   running total, which for a channel is noise. Underneath, `from`/`to` are
   the count of messages since the watch began, as for comments — `--json`
   carries them, the line never says them. The newest ts before the round
-  rides beside them (`after`), so the line ends in the read that shows the
-  round: `(slack_read_channel channel_id=C0123ABCD oldest=1794976101.418449)`.
-  The channel id, not `#name`, since the tool takes the id. The `inkling
+  rides beside them (`after`), so the line says where the round began:
+  `(C0123ABCD, after 1794976101.418449)`, the id included when the line
+  shows `#name`, since the tool takes the id. The `inkling
   watch` listing says the running count, `12 messages since watched`.
 - **Names, then a count.** Up to three authors are named (`@a, @b and @c`);
   more becomes `12 messages from 7 people`. Names come with the read.

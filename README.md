@@ -9,7 +9,7 @@ channel you're watching. The news lands in the session as one line, mid-turn, wi
 anyone asking:
 
 ```
-inkling: github.com/dpep/inkling#7 | checks pending → failure: test / build (gh api --hostname github.com repos/dpep/inkling/actions/jobs/106193645679/logs)
+inkling: github.com/dpep/inkling#7 | checks pending → failure: test / build (job 106193645679)
 ```
 
 It works just as well for a script or a person at a terminal: `wait` blocks
@@ -168,7 +168,7 @@ A Slack message is its permalink (Slack's *Copy link*), always in full:
 `slack:<channel>/<ts>`, which `unwatch` also takes and Slack's own tools read.
 
 It reports new replies and who wrote them, and each emoji whose count changes.
-Each line ends in the Slack MCP call that shows it, written
+In `inkling events`, each row ends in the Slack MCP call that shows it, written
 `(tool key=value …)`: a reaction in `slack_read_thread` on the message, a
 reply in that and `slack_read_channel` from the message's ts, since a reply
 can be in either.
@@ -204,9 +204,9 @@ first time and is remembered; the watch is then `slack:#incidents`, which
 `unwatch` takes back.
 
 The news is who posted and how many — `slack:#incidents | 3 messages from
-@john and @jane (slack_read_channel channel_id=C0E48AHSN oldest=…)`, or `12
-messages from 7 people` — never what they wrote. The read names the channel
-by id, from the newest message seen before, so it shows exactly the round. A
+@john and @jane (C0E48AHSN, after 1794976101.418449)`, or `12 messages from
+7 people` — never what they wrote. The channel's id and the newest message
+seen before are what a read of exactly the round needs. A
 round where only this session posted is in `events` but isn't pushed. Replies inside a
 thread don't count: watch that message for them. A stretch busier than one
 page (100 messages) says `at least 100`.
@@ -260,14 +260,14 @@ so a merge queue landing fifteen pull requests costs one turn. A red check is
 held for one more reading, about a minute, and dropped if the checks moved on:
 some CI marks a build red while a retry is still running.
 
-A red Actions job ends in the command for its log, which GitHub serves as soon
-as that job ends (`gh run view --log-failed` waits for the whole run). A check
-from any other app ends in `gh pr checks` instead. New comments end in
-`gh pr view <n> --repo <host>/<owner>/<repo> --comments`, which shows
-conversation comments and review bodies but not line comments. When some are
-line comments, the line names `gh api --hostname <host> --paginate
-repos/<owner>/<repo>/pulls/<n>/comments` too (oldest first), or only that when
-all of them are. Slack lines end in the MCP call that shows them.
+A line carries only what reading the news needs and the reference doesn't
+say, not the command: spelled out every time, commands cost more of a turn
+than the news. A red Actions job names its job (`(job 106193645679)`), whose
+log GitHub serves as soon as that job ends. New comments say how many are line
+comments (`3 comments from @a, 1 on a line`), which `gh pr view --comments`
+doesn't show. A reply to a threaded Slack message names the thread root, and a
+channel its id and where the round began. The commands for each are in the
+inkling skill, and in `inkling events`, whose rows still end in them.
 
 The line is built only from what Inkling decided: the reference, what moved,
 who caused it, and which check went red. Never the pull request's title, a

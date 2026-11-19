@@ -97,11 +97,44 @@ fn line(group: &[&Event]) -> String {
             tally(count, REACTION, false, &[], &emoji)
         }
     };
-    let mut text = format!("{} | {moved}", event.reference);
-    if let Some(command) = more(event) {
-        text.push_str(&format!(" ({command})"));
+    format!("{} | {moved}{}", event.reference, hint(event))
+}
+
+/// What reading the news needs that the reference doesn't say. The commands
+/// themselves live in the inkling skill and `events`: spelled out on every
+/// line, they cost more of a turn than the news.
+fn hint(event: &Event) -> String {
+    match (&event.reference, event.axis) {
+        (Reference::GitHubPullRequest { .. }, Axis::Comments) if event.lines > 0 => {
+            let place = if event.lines == 1 { "a line" } else { "lines" };
+            format!(", {} on {place}", event.lines)
+        }
+        (Reference::GitHubPullRequest { .. }, Axis::Checks)
+            if event.to == CheckState::Failure.as_str() =>
+        {
+            event
+                .job
+                .map(|job| format!(" (job {job})"))
+                .unwrap_or_default()
+        }
+        (
+            Reference::SlackMessage {
+                thread: Some(root), ..
+            },
+            Axis::Reactions | Axis::Replies,
+        ) => format!(" (thread {root})"),
+        // A named channel shows `#name`, and Slack's tools want its id.
+        (Reference::SlackChannel { channel, name }, Axis::Messages) => {
+            let id = name.as_ref().map(|_| channel.as_str());
+            let after = event.after.as_ref().map(|ts| format!("after {ts}"));
+            let parts: Vec<&str> = id.into_iter().chain(after.as_deref()).collect();
+            match parts.as_slice() {
+                [] => String::new(),
+                parts => format!(" ({})", parts.join(", ")),
+            }
+        }
+        _ => String::new(),
     }
-    text
 }
 
 /// What moved, as a reader is told it: `open → merged by @x` for an axis
@@ -203,7 +236,7 @@ pub fn tally(count: u64, noun: Noun, partial: bool, from: &[&str], tags: &[&str]
     text
 }
 
-/// The read that shows what a line announced, where the next question is
+/// The read that shows what an `events` row announced, where the next question is
 /// obviously one: checks went red, and the next question is always why;
 /// something accumulated, and the next step is reading it, which the push
 /// never carries. Slack's is the MCP tool call an agent would make.
@@ -868,11 +901,8 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             ["inkling: 2 changes\n\
-              - slack:C0123ABCD/1786596050.245879 | 1 reply from @alice \
-              (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; \
-              slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879)\n\
-              - slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark: \
-              (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879)"]
+              - slack:C0123ABCD/1786596050.245879 | 1 reply from @alice\n\
+              - slack:C0123ABCD/1786596050.245879 | 1 reaction :white_check_mark:"]
         );
     }
 
@@ -887,10 +917,7 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert_eq!(
             sessions.texts(),
-            [
-                "inkling: slack:C0123ABCD/1786596050.245879 | 3 reactions :+1: :dart: \
-              (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879)"
-            ]
+            ["inkling: slack:C0123ABCD/1786596050.245879 | 3 reactions :+1: :dart:"]
         );
     }
 
@@ -1037,6 +1064,61 @@ mod tests {
     }
 
     #[test]
+    fn a_line_carries_only_what_reading_it_needs_and_the_reference_lacks() {
+        let line = |event: Event| super::message(&event);
+        let commented = |lines| Event {
+            lines,
+            ..on(pr(42), event(Axis::Comments, "0", "3", "@a"))
+        };
+        assert_eq!(
+            line(commented(0)),
+            "inkling: github.com/dpep/inkling#42 | 3 comments from @a"
+        );
+        assert_eq!(
+            line(commented(1)),
+            "inkling: github.com/dpep/inkling#42 | 3 comments from @a, 1 on a line"
+        );
+        assert_eq!(
+            line(commented(3)),
+            "inkling: github.com/dpep/inkling#42 | 3 comments from @a, 3 on lines"
+        );
+
+        let reply = Reference::SlackMessage {
+            channel: "C0123ABCD".into(),
+            ts: "1786596050.245879".into(),
+            thread: Some("1786596000.000001".into()),
+        };
+        assert_eq!(
+            line(on(reply, event(Axis::Replies, "0", "1", "@a"))),
+            "inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @a \
+             (thread 1786596000.000001)"
+        );
+
+        let channel = |name: Option<&str>, after: Option<&str>| Event {
+            after: after.map(String::from),
+            ..on(
+                Reference::SlackChannel {
+                    channel: "C0E48AHSN".into(),
+                    name: name.map(String::from),
+                },
+                event(Axis::Messages, "0", "2", "@a"),
+            )
+        };
+        assert_eq!(
+            line(channel(Some("incidents"), Some("1.000002"))),
+            "inkling: slack:#incidents | 2 messages from @a (C0E48AHSN, after 1.000002)"
+        );
+        assert_eq!(
+            line(channel(None, Some("1.000002"))),
+            "inkling: slack:C0E48AHSN | 2 messages from @a (after 1.000002)"
+        );
+        assert_eq!(
+            line(channel(None, None)),
+            "inkling: slack:C0E48AHSN | 2 messages from @a"
+        );
+    }
+
+    #[test]
     fn an_accumulating_axis_says_how_many_new_and_from_whom() {
         let said = |e: &Event| super::said(e);
         assert_eq!(
@@ -1095,9 +1177,8 @@ mod tests {
         let texts = sessions.texts();
         assert_eq!(texts.len(), 1);
         assert!(
-            texts[0].starts_with(
-                "inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @dpepper ("
-            ),
+            texts[0]
+                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @dpepper"),
             "{texts:?}"
         );
     }
@@ -1187,8 +1268,7 @@ mod tests {
         let texts = sessions.texts();
         assert_eq!(texts.len(), 1);
         assert!(
-            texts[0]
-                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reaction :eyes: ("),
+            texts[0].starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reaction :eyes:"),
             "{texts:?}"
         );
     }
@@ -1221,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_says_who_and_how_many_and_where_to_read_it() {
+    fn a_comment_says_who_and_how_many() {
         let mut watches = Watches::default();
         watches.watch(&pr(42), "s", forever(), now());
         watches.record(&[(pr(42), commented(&["@dpep"]))], now());
@@ -1238,10 +1318,7 @@ mod tests {
         deliver(&sessions, &mut watches);
         assert_eq!(
             sessions.texts(),
-            [
-                "inkling: github.com/dpep/inkling#42 | 2 comments from @alice and coderabbitai (bot) \
-              (gh pr view 42 --repo github.com/dpep/inkling --comments)"
-            ]
+            ["inkling: github.com/dpep/inkling#42 | 2 comments from @alice and coderabbitai (bot)"]
         );
     }
 
@@ -1305,8 +1382,7 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             [
-                "inkling: slack:#incidents | 2 messages from @alice and @dpepper \
-              (slack_read_channel channel_id=C0123ABCD oldest=1.000002)"
+                "inkling: slack:#incidents | 2 messages from @alice and @dpepper (C0123ABCD, after 1.000002)"
             ],
             "the read that shows them names the channel by id"
         );
@@ -1794,20 +1870,19 @@ mod tests {
     }
 
     #[test]
-    fn a_red_actions_job_points_at_its_log_which_is_readable_before_the_run_ends() {
+    fn a_red_actions_job_names_the_job_whose_log_says_why() {
         assert_eq!(
             went_red(Some(106192233819)),
             "inkling: github.com/dpep/inkling#3 | checks pending → failure: test / build \
-             (gh api --hostname github.com repos/dpep/inkling/actions/jobs/106192233819/logs)"
+             (job 106192233819)"
         );
     }
 
     #[test]
-    fn a_red_check_with_no_job_behind_it_points_at_the_list_of_checks() {
+    fn a_red_check_with_no_job_behind_it_names_only_the_check() {
         assert_eq!(
             went_red(None),
-            "inkling: github.com/dpep/inkling#3 | checks pending → failure: test / build \
-             (gh pr checks 3 --repo github.com/dpep/inkling)"
+            "inkling: github.com/dpep/inkling#3 | checks pending → failure: test / build"
         );
     }
 

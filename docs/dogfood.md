@@ -6,6 +6,11 @@ fixed, say where and leave the line.
 
 ## 2026-11-18
 
+- Reading pushed lines, the user found the trailing commands (`(gh pr view 42 --repo … --comments)`,
+  two `slack_read_*` calls on a reply) longer than the news. Expected one line to be cheap in a turn.
+  Fixed: the line keeps only what the reference lacks (`1 on a line`, `(job <id>)`, `(thread <ts>)`,
+  `(<id>, after <ts>)`) and the inkling skill holds the commands. Watch for an agent picking the
+  wrong read.
 - Three rounds of unsubscribe fixes each added a clause (`departed |= unsubscribed`, clearing
   `departed`, gating SessionStart on `source`) and hunt 4 found three more holes. Expected a rule
   per case to converge; it didn't. Replaced by one model in fix4-life: unsubscribe is a mute that

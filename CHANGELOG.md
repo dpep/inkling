@@ -56,12 +56,13 @@
   dropped.
   `inkling watch` prints why a reference it was just given couldn't be read, and exits 1.
 - **Each Slack bridge call logs what it cost** as `total_cost_usd`, failed calls included.
-- **Every line that counts something ends in the read that shows it.** Slack lines end in the MCP
-  call to make, with the channel's id even when the line says `#name`:
-  `slack:#incidents | 3 messages from @john and @jane (slack_read_channel channel_id=C0E48AHSN
-  oldest=1794976101.418449)`. Pull request comments that include line comments name
-  `gh api --hostname <host> --paginate repos/<o>/<r>/pulls/<n>/comments`, which `gh pr view
-  --comments` doesn't cover. `inkling events --json` carries the same as `lookup`, plus `partial`
+- **A pushed line no longer ends in a command.** It keeps only what reading the news needs and the
+  reference doesn't say: `3 comments from @a, 1 on a line` (which `gh pr view --comments` misses),
+  `(job 106193645679)` for a red Actions check instead of the `gh api …/logs` command (and nothing
+  for a red check from another app, instead of `gh pr checks`), `(thread
+  <root ts>)` for a threaded Slack message, `slack:#incidents | 3 messages from @john and @jane
+  (C0E48AHSN, after 1794976101.418449)` for a channel. The commands are in the inkling skill.
+  `inkling events` rows still end in them, and `--json` carries them as `lookup`, plus `partial`
   and `own`.
 - **`inkling events` and `inkling watch` word things as the push does.** `events` text reads
   `open → merged by @x`, `at least 40 comments from @bob`, then the read or the title; `watch`
@@ -99,7 +100,7 @@
   a terminal, or that belong to a session without the hooks, are never paused, and neither is a whole-channel watch. `inkling watch`
   marks paused watches `(paused)`. `inkling status` counts them and lists their session as `ended`.
 - **New: a watched pull request reports new comments.** `github.com/you/repo#42 | 2 comments
-  from @alice and coderabbitai (bot) (gh pr view 42 --repo github.com/you/repo --comments)` — who and
+  from @alice and coderabbitai (bot), 1 on a line` — who and
   how many, never what anybody wrote. Conversation comments, line comments and reviews with a body
   count; an edited comment doesn't, so a coverage bot rewriting its comment on every push stays
   quiet, and a deleted one is never news. Comments only you wrote stay in `events` without a push.
