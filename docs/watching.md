@@ -1132,8 +1132,8 @@ default), and Bash `curl`s to `chat.postMessage`:
 - **The react tool** (`ToolNames::react`, `slack_add_reaction`): watches
   nothing; its `channel_id`, `message_ts` and `emoji` are a receipt.
 
-The matcher has to name both MCP tools; the myclaude plugin's `hooks.json`
-needs the react tool added as well.
+The matcher has to name both MCP tools; the Claude Code plugin's `hooks.json`
+does.
 
 **The bridge's own hooks.** The `claude -p` child is a Claude Code session and
 runs the user's hooks, inkling's included — measured: a `SessionStart` hook in
