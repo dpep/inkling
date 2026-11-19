@@ -276,7 +276,7 @@ impl HookEvent {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Print where the config, state and logs live, and whether GitHub
+    /// Print which files are in use, and whether GitHub
     /// credentials resolve.
     Show,
     /// Print where the config file would be read from.
@@ -506,6 +506,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
             };
             println!("config     {}{absent}", tildify(&path));
             println!("state      {}", tildify(store.path()));
+            println!("watches    {}", tildify(watch_store(&cli.common).path()));
+            println!("waits      {}", tildify(&waits_path(&cli.common)));
             println!("logs       {}", logs_shown(&cli.common));
 
             println!();
@@ -875,11 +877,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             // Waiters coordinate through a file so N of them cost one poll.
             // With a single waiter this is the same query plus a lock and a
             // small write — the shared path is not worth a flag to avoid.
-            let waits_path = cli
-                .common
-                .waits
-                .clone()
-                .unwrap_or_else(inkling::adapters::waits_json::Waits::default_path);
+            let waits_path = waits_path(&cli.common);
             let shared = inkling::adapters::waits_json::SharedObserver::new(
                 waits_path,
                 clock.now() + TimeDelta::from_std(*timeout).unwrap_or(TimeDelta::zero()),
@@ -1954,6 +1952,13 @@ fn refused_store(error: &StoreError) -> String {
         ),
         other => other.to_string(),
     }
+}
+
+fn waits_path(common: &Common) -> PathBuf {
+    common
+        .waits
+        .clone()
+        .unwrap_or_else(inkling::adapters::waits_json::Waits::default_path)
 }
 
 fn watch_store(common: &Common) -> inkling::adapters::watches_json::WatchStore {
