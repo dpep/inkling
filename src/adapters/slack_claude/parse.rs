@@ -55,12 +55,12 @@ pub struct ChannelRead {
 /// Verbatim, 2026-11-17: `channel_messages`' prompt through one `claude -p`
 /// (haiku) on the self-DM with `oldest` set. Newest first, as the tool lists.
 #[cfg(test)]
-pub const REAL_CHANNEL_READ: &str = r#"{"channel": [{"ts": "1794976230.118559", "user_id": "U00000001", "user_name": "carol"}, {"ts": "1794976101.418449", "user_id": "U00000001", "user_name": "carol"}], "more": false}"#;
+pub const REAL_CHANNEL_READ: &str = r#"{"channel": [{"ts": "1794976230.118559", "user_id": "U00000001", "user_name": "dpepper"}, {"ts": "1794976101.418449", "user_id": "U00000001", "user_name": "dpepper"}], "more": false}"#;
 
 /// Verbatim, the same day: the baseline read (no `oldest`, limit 1), where
 /// the tool said more messages were available.
 #[cfg(test)]
-pub const REAL_CHANNEL_BASELINE: &str = r#"{"channel": [{"ts": "1794976230.118559", "user_id": "U00000001", "user_name": "carol"}], "more": true}"#;
+pub const REAL_CHANNEL_BASELINE: &str = r#"{"channel": [{"ts": "1794976230.118559", "user_id": "U00000001", "user_name": "dpepper"}], "more": true}"#;
 
 /// Verbatim: #general, which has no messages at all.
 #[cfg(test)]
@@ -147,14 +147,14 @@ fn reaction_counts<'de, D: serde::Deserializer<'de>>(
 /// 2026-11-17: `slack_read_thread` on a DM message with two reactions and no
 /// replies, through `claude -p` with haiku.
 #[cfg(test)]
-pub const REAL_THREAD: &str = r#"{"messages": [{"ts": "1771013011.519909", "user_id": "U00000001", "user_name": "carol", "reactions": {"low-priority": 1, "problem-solved": 1}}]}"#;
+pub const REAL_THREAD: &str = r#"{"messages": [{"ts": "1771013011.519909", "user_id": "U00000001", "user_name": "dpepper", "reactions": {"low-priority": 1, "problem-solved": 1}}]}"#;
 
 /// Verbatim, 2026-11-17: `activity`'s prompt through one `claude -p` (haiku),
 /// which called `slack_read_thread` then `slack_read_channel` on the self-DM.
 /// The watched message has a :dart: and no thread; a top-level message
 /// followed it.
 #[cfg(test)]
-pub const REAL_DM_ACTIVITY: &str = r#"{"messages": [{"ts": "1794976101.418449", "user_id": "U00000001", "user_name": "carol", "reactions": {"dart": 1}}], "channel": [{"ts": "1794976230.118559", "user_id": "U00000001", "user_name": "carol", "mentions": []}]}"#;
+pub const REAL_DM_ACTIVITY: &str = r#"{"messages": [{"ts": "1794976101.418449", "user_id": "U00000001", "user_name": "dpepper", "reactions": {"dart": 1}}], "channel": [{"ts": "1794976230.118559", "user_id": "U00000001", "user_name": "dpepper", "mentions": []}]}"#;
 
 pub fn parse_activity(raw: &str) -> Result<Activity, String> {
     let json = extract_json(raw)?;
@@ -297,7 +297,7 @@ mod tests {
         let entries = parse_activity(REAL_THREAD).unwrap().thread;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].ts, "1771013011.519909");
-        assert_eq!(entries[0].user_name, "carol");
+        assert_eq!(entries[0].user_name, "dpepper");
         assert_eq!(
             entries[0].reactions,
             BTreeMap::from([("low-priority".into(), 1), ("problem-solved".into(), 1)])
@@ -408,10 +408,9 @@ mod tests {
 
     #[test]
     fn an_identity_parses_with_optional_fields_missing() {
-        let me =
-            parse_identity(r#"{"id":"U012ABC345","handle":"carol","name":"Carol Diaz"}"#).unwrap();
+        let me = parse_identity(r#"{"id":"U012ABC345","handle":"dp","name":"D Pepper"}"#).unwrap();
         assert_eq!(me.id, "U012ABC345");
-        assert_eq!(me.handle, "carol");
+        assert_eq!(me.handle, "dp");
 
         let sparse = parse_identity(r#"{"id":"U012ABC345"}"#).unwrap();
         assert!(sparse.handle.is_empty());

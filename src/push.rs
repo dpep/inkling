@@ -868,7 +868,7 @@ mod tests {
             failing: None,
             head: None,
             by: Actors {
-                names: [("U1", "alice"), ("U9", "carol")]
+                names: [("U1", "alice"), ("U9", "dpepper")]
                     .iter()
                     .map(|(id, name)| (id.to_string(), name.to_string()))
                     .collect(),
@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(texts.len(), 1);
         assert!(
             texts[0]
-                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @carol"),
+                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @dpepper"),
             "{texts:?}"
         );
     }
@@ -1382,7 +1382,7 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             [
-                "inkling: slack:#incidents | 2 messages from @alice and @carol (C0123ABCD, after 1.000002)"
+                "inkling: slack:#incidents | 2 messages from @alice and @dpepper (C0123ABCD, after 1.000002)"
             ],
             "the read that shows them names the channel by id"
         );

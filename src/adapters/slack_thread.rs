@@ -223,7 +223,7 @@ mod tests {
         );
         assert_eq!(
             status.names.get("U00000001").map(String::as_str),
-            Some("carol")
+            Some("dpepper")
         );
     }
 
@@ -240,7 +240,7 @@ mod tests {
     /// Invented: this workspace has no channel message that @mentions anyone
     /// to record, so the shape is the prompt's, not a transcript's.
     const CHANNEL: &str = r#"{"messages":[
-        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"carol","reactions":{}}
+        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"dpepper","reactions":{}}
     ],"channel":[
         {"ts":"1786596100.000001","user_id":"U00000001","user_name":"alice","mentions":["U00000009"]},
         {"ts":"1786596200.000001","user_id":"U00000002","user_name":"bob","mentions":[]},
@@ -265,7 +265,7 @@ mod tests {
     }
 
     const THREAD: &str = r#"{"messages":[
-        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"carol","reactions":{}},
+        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"dpepper","reactions":{}},
         {"ts":"1786596050.245879","user_id":"U00000001","user_name":"alice","reactions":{"eyes":1}},
         {"ts":"1786596060.000001","user_id":"U00000002","user_name":"bob","reactions":{}}
     ],"channel":[]}"#;
@@ -291,11 +291,11 @@ mod tests {
     /// Invented, in the shape of the real reads: a DM thread with replies
     /// in it, then top-level messages after it.
     const DM: &str = r#"{"messages":[
-        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"carol","reactions":{}},
+        {"ts":"1786596000.123456","user_id":"U00000009","user_name":"dpepper","reactions":{}},
         {"ts":"1786596050.245879","user_id":"U00000001","user_name":"alice","reactions":{}},
         {"ts":"1786596060.000001","user_id":"U00000002","user_name":"bob","reactions":{}}
     ],"channel":[
-        {"ts":"1786596100.000001","user_id":"U00000009","user_name":"carol","mentions":[]},
+        {"ts":"1786596100.000001","user_id":"U00000009","user_name":"dpepper","mentions":[]},
         {"ts":"1786596200.000001","user_id":"U00000001","user_name":"alice","mentions":[]}
     ]}"#;
 
@@ -375,7 +375,7 @@ mod tests {
         let read = slack.read(&[message("C0123ABCD", "1786596000.123456", None)]);
         assert!(read.unwrap()[0].1.is_ok());
 
-        let channel = REAL_CHANNEL_READ.replace("\"carol\"", "\"channel_not_found\"");
+        let channel = REAL_CHANNEL_READ.replace("\"dpepper\"", "\"channel_not_found\"");
         let (slack, _) = threads(&[&channel]);
         assert!(
             slack
@@ -410,7 +410,7 @@ mod tests {
         assert!(!status.more);
         assert_eq!(
             status.names.get("U00000001").map(String::as_str),
-            Some("carol")
+            Some("dpepper")
         );
     }
 
