@@ -974,8 +974,8 @@ impl fmt::Display for Cursor {
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "{0}: a cursor now names the stream it belongs to, not just a position in \
-     one — pass the token `inkling events --json` printed, or name the reader \
+    "{0}: not a cursor, which names the stream it belongs to and a position in \
+     it, e.g. `cli:7` — pass the token `inkling events --json` printed, or name the reader \
      with --subscriber <id>"
 )]
 pub struct UnknownCursor(String);

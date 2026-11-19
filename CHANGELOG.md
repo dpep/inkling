@@ -24,6 +24,8 @@
 - **The log never quotes a Slack reply.** A malformed bridge reply is logged by its length and
   where its shape went wrong; before, the warning carried up to 120 characters of it, which could be
   what somebody wrote.
+- **A duration without a unit says so**: `serve.interval = 5` is refused with "expected a duration
+  with a unit, e.g. 5s or 2m".
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 

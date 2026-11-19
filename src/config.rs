@@ -159,15 +159,15 @@ pub struct Serve {
     /// How often it polls and delivers. Short, because CI moving is the news
     /// it exists to carry and a minute of it is a minute of a session
     /// waiting.
-    #[serde(with = "humantime_serde", default = "d_serve_interval")]
+    #[serde(deserialize_with = "duration", default = "d_serve_interval")]
     pub interval: Duration,
     /// How long with nothing to do before standing down. Generous on
     /// purpose: a session that detaches and reattaches shouldn't cost a
     /// respawn.
-    #[serde(with = "humantime_serde", default = "d_serve_idle_after")]
+    #[serde(deserialize_with = "duration", default = "d_serve_idle_after")]
     pub idle_after: Duration,
     /// A cap, so a resident process eventually picks up a newer build.
-    #[serde(with = "humantime_serde", default = "d_serve_max_lifetime")]
+    #[serde(deserialize_with = "duration", default = "d_serve_max_lifetime")]
     pub max_lifetime: Duration,
 }
 
@@ -322,6 +322,22 @@ fn expand_env(raw: &str) -> Result<String, ConfigError> {
     Ok(out)
 }
 
+/// humantime's parse, with an `expecting` that tells a bare number what it's
+/// missing — `5` reads as seconds to a person and as nothing to humantime.
+fn duration<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    struct Visitor;
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = Duration;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a duration with a unit, e.g. 5s or 2m")
+        }
+        fn visit_str<E: serde::de::Error>(self, raw: &str) -> Result<Duration, E> {
+            humantime::parse_duration(raw).map_err(|e| E::custom(format!("{raw:?}: {e}")))
+        }
+    }
+    deserializer.deserialize_str(Visitor)
+}
+
 fn d_api_url() -> String {
     "https://api.github.com/graphql".to_string()
 }
@@ -454,6 +470,14 @@ mod tests {
             parse(EXAMPLE).unwrap().serve.interval,
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn a_duration_without_a_unit_says_what_is_missing() {
+        let err = error("[serve]\ninterval = 5\n");
+        assert!(err.contains("e.g. 5s or 2m"), "{err}");
+        let err = error("[serve]\ninterval = \"5 parsecs\"\n");
+        assert!(err.contains("parsecs"), "{err}");
     }
 
     #[test]
