@@ -435,7 +435,8 @@ Slack needs no config. Two optional settings, for when the defaults don't fit:
 ```
 
 With `[slack.mcp]` set, name its send and react tools in the `PostToolUse` matcher instead of
-the connector's.
+the connector's. Its headers are passed on `claude`'s command line, so a token in one is visible
+to `ps` while a read runs.
 
 ## State
 
