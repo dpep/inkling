@@ -181,8 +181,7 @@ impl<R: Runner> SlackClaude<R> {
 }
 
 /// Slack's codes for a thread that isn't there to read. They arrive through
-/// the bridge intact (docs/slack-mcp-spike.md), so they are matched, not
-/// guessed at.
+/// the bridge intact, so they are matched, not guessed at.
 const GONE: [&str; 3] = ["thread_not_found", "message_not_found", "channel_not_found"];
 const GONE_MARK: &str = "gone";
 

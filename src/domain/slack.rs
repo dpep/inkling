@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn the_send_result_s_message_context_names_what_was_posted() {
-        // The shape of the first real send (dogfood.md); a channel named by
+        // The shape a real send returns; a channel named by
         // handle has no permalink into "the channel named" to match.
         let response = json!([{"type": "text", "text": r#"{"message_link":"https:\/\/acme.slack.com\/archives\/C0123ABCD\/p1786596050245879","message_context":{"message_ts":"1786596050.245879","channel_id":"C0123ABCD"}}"#}]);
         let input =

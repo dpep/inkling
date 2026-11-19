@@ -58,8 +58,9 @@ impl fmt::Display for CheckState {
 ///
 /// Deliberately tiny. Two threshold shapes and a settling shape cover both
 /// motivating cases; anything richer is the expression language that turns
-/// this into a rules engine (DESIGN §1 rules that out). A new predicate has
-/// to argue its way in here, as a named variant, never as a syntax.
+/// this into a rules engine, which docs/watching.md#observe-never-act rules
+/// out. A new predicate has to argue its way in here, as a named variant,
+/// never as a syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
     /// Moved at all, in any direction — whatever the next step turns out to

@@ -21,7 +21,7 @@
 //! on a case that only happens in some session configurations. See
 //! docs/watching.md.
 //!
-//! Inkling still only observes (DESIGN §1). It delivers news into a session;
+//! Inkling still only observes (docs/watching.md#observe-never-act). It delivers news into a session;
 //! what the session does about it is the session's business.
 
 use crate::adapters::session_socket::{DeliverError, SessionAddress, Written};

@@ -2,7 +2,7 @@
 //! cares about changes.
 //!
 //! This library is the `inkling` binary's internals, not a published API: it
-//! carries no semver guarantee. See `DESIGN.md` for the architecture.
+//! carries no semver guarantee. See `docs/` for the design reasoning.
 
 pub mod adapters;
 pub mod config;
