@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-18
 
 **Upgrading.** The watch store moves to version 4 on its first write; nothing to do. An older
 build now refuses a store a newer one wrote instead of wiping it, and a resident server running one
