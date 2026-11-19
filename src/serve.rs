@@ -175,7 +175,7 @@ impl Config {
         }
     }
 
-    /// Beside the run state, like every other file inkling keeps.
+    /// Beside `state.json`, like every other file inkling keeps.
     pub fn default_dir() -> PathBuf {
         crate::adapters::store_json::JsonStore::default_path()
             .parent()

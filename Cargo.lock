@@ -516,7 +516,6 @@ dependencies = [
  "clap",
  "humantime",
  "humantime-serde",
- "inkling",
  "iriq",
  "libc",
  "serde",

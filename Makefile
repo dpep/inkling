@@ -1,14 +1,14 @@
 BIN_DIR ?= $(HOME)/.claude/bin
 RELEASE := $(CURDIR)/target/release
-BINARIES := inkling slackmcp
+BINARIES := inkling
 
 .PHONY: help build test check fmt lint install uninstall clean
 
 help:
-	@echo "make build      build both binaries in release mode"
+	@echo "make build      build in release mode"
 	@echo "make check      fmt + clippy + tests, the pre-push gate"
 	@echo "make install    build, then copy into $(BIN_DIR)"
-	@echo "make uninstall  remove them"
+	@echo "make uninstall  remove it"
 
 build:
 	cargo build --release

@@ -33,9 +33,8 @@ impl CheckState {
     /// Unlike `State::is_terminal`, this is *not* permanent — a push or a
     /// re-run takes a finished suite back to pending. That's survivable here
     /// because a wait evaluates the observation in front of it and then ends.
-    /// It would not be survivable in the tracked snapshot, where terminal
-    /// means "stop polling forever", which is why check state never goes
-    /// there.
+    /// It would not be survivable in `State`, where terminal means "stop
+    /// polling forever", which is why check state never goes there.
     pub fn is_settled(self) -> bool {
         matches!(self, CheckState::Failure | CheckState::Success)
     }

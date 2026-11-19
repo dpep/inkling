@@ -4,88 +4,16 @@
 //! core never learns whether Slack is reached over MCP or the Web API, or
 //! whether state lives in a file or a database.
 
-use crate::domain::model::{Message, MessageId, ReactionName, Reference, State};
+use crate::domain::model::{Reference, State};
 use crate::domain::wait::CheckState;
 use crate::domain::watch::{Actors, Category, Discussion, FailedCheck, Head};
-use crate::domain::window::SearchWindow;
 use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashMap};
-
-/// Where to look for messages.
-///
-/// Personal scope carries the user ID rather than leaving the adapter to find
-/// it: a source that can't answer "who am I" would otherwise have to refuse
-/// the scope outright, which is exactly what used to happen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
-    /// Messages this user wrote, wherever they wrote them.
-    Personal(String),
-    Channel(String),
-}
-
-impl Scope {
-    /// Stable key for remembering how far this scope has been searched.
-    ///
-    /// Channels normalize, so `#eng` and `eng` are one scope rather than two
-    /// that each re-scan the other's history.
-    pub fn key(&self) -> String {
-        match self {
-            Scope::Personal(_) => "personal".to_string(),
-            Scope::Channel(c) => format!("channel:{}", c.trim_start_matches('#').to_lowercase()),
-        }
-    }
-}
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("slack search failed: {0}")]
     Search(String),
-    #[error("slack transport failed: {0}")]
-    Transport(String),
-}
-
-/// One search's worth of messages, and whether it exhausted the window.
-///
-/// Slack caps a search page, so a wide window over a busy channel returns a
-/// prefix. Saying so lets the caller advance its mark only as far as it
-/// actually covered, and pick the rest up next run — rather than skipping it.
-#[derive(Debug, Default)]
-pub struct Discovered {
-    pub messages: Vec<Message>,
-    pub complete: bool,
-}
-
-impl Discovered {
-    /// Everything the window held.
-    pub fn all(messages: Vec<Message>) -> Self {
-        Self {
-            messages,
-            complete: true,
-        }
-    }
-}
-
-pub trait MessageSource {
-    /// Messages in scope within the window, oldest first. May over-return;
-    /// the caller filters precisely.
-    fn discover(&self, scope: &Scope, window: &SearchWindow) -> Result<Discovered, SourceError>;
-
-    /// Current reactions for tracked messages.
-    ///
-    /// Search results don't carry reactions, so this is a separate call. It
-    /// is what supplies reconciliation's evidence — and therefore the only
-    /// thing that can establish whether an emoji was ours.
-    fn reactions(
-        &self,
-        ids: &[MessageId],
-    ) -> Result<HashMap<MessageId, Vec<ReactionName>>, SourceError>;
-
-    /// Human names for user IDs. Defaulted empty: a source that can't answer
-    /// should degrade to showing whatever the message already carried, not
-    /// fail the run over a display detail.
-    fn user_names(&self, _ids: &[String]) -> Result<HashMap<String, String>, SourceError> {
-        Ok(HashMap::new())
-    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -134,9 +62,8 @@ pub struct RefStatus {
     pub title: String,
     /// Where CI stands, or `None` when the repository runs none.
     ///
-    /// Read by `wait` and by nothing else. It deliberately never reaches the
-    /// tracked snapshot: a finished suite can go back to pending on a push,
-    /// and the snapshot's terminality means "stop polling forever".
+    /// Never part of `state`: a finished suite can go back to pending on a
+    /// push, and a terminal state means "stop polling forever".
     pub checks: Option<CheckState>,
     /// A check that is red, when one is. "Checks went red" is most of a page
     /// of investigation; "checks went red: tidy" is a command.
@@ -240,8 +167,8 @@ pub trait MessageProvider {
 /// Where a wait gets its readings.
 ///
 /// Identical in shape to `StatusProvider` and deliberately separate: a wait
-/// asks "what is true now", on behalf of someone blocked, while the run loop
-/// asks on a cron cadence. Naming the seam is what lets one waiter poll on
+/// asks "what is true now", on behalf of someone blocked, while a watch asks
+/// on its own schedule. Naming the seam is what lets one waiter poll on
 /// everyone's behalf without the callers knowing (docs/waiting.md, W3), and
 /// is where webhook delivery would land if polling ever stops being the
 /// mechanism.
@@ -268,25 +195,6 @@ impl Sleeper for RealSleeper {
     fn sleep(&self, duration: std::time::Duration) {
         std::thread::sleep(duration);
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum SinkError {
-    /// The workspace has no such emoji. Retrying won't help.
-    #[error("no such emoji in this workspace: {0}")]
-    InvalidEmoji(ReactionName),
-    /// The message is gone; drop the record.
-    #[error("message not found")]
-    MessageNotFound,
-    #[error("slack transport failed: {0}")]
-    Transport(String),
-}
-
-pub trait ReactionSink {
-    /// Add a reaction. Adding one that's already there is a success — Slack
-    /// reports no difference, which is why the ledger decision is made from
-    /// evidence beforehand rather than from this result.
-    fn add(&self, target: &MessageId, emoji: &ReactionName) -> Result<(), SinkError>;
 }
 
 #[derive(Debug, thiserror::Error)]

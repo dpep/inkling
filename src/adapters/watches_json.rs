@@ -1,12 +1,9 @@
 //! Watches, their last known standing, and the event log — one JSON file.
 //!
-//! Deliberately not `state.json`, and deliberately not `waits.json` either.
-//!
-//! Against the snapshot: check state can go back to pending on a re-run, and
-//! the snapshot's terminality means "stop polling forever" (docs/waiting.md).
-//! Against the waits file: everything in there is disposable, rebuilt by the
-//! next poll, which is why it has no quarantine and no version migration.
-//! Nothing here is. A lost baseline re-emits or swallows an event, and a lost
+//! Deliberately not `state.json` or `waits.json`. Those hold what the next
+//! lookup or poll rebuilds — Slack answers, a wait's latest reading — which
+//! is why the waits file has no quarantine and no version migration.
+//! Nothing here is disposable. A lost baseline re-emits or swallows an event, and a lost
 //! cursor replays a subscriber's history or skips it. Opposite durability
 //! contracts don't belong in one file.
 //!
@@ -1132,7 +1129,7 @@ impl WatchStore {
         Self { path: path.into() }
     }
 
-    /// `$XDG_STATE_HOME/inkling/watches.json`, beside the run state.
+    /// `$XDG_STATE_HOME/inkling/watches.json`, beside `state.json`.
     pub fn default_path() -> PathBuf {
         let mut path = crate::adapters::store_json::JsonStore::default_path();
         path.set_file_name("watches.json");

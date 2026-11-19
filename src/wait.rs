@@ -34,7 +34,7 @@ pub enum Outcome {
 
 impl Outcome {
     /// Distinct codes so a script can branch without parsing prose. 0 and 2
-    /// keep the meaning they have in `run`; the rest are this command's.
+    /// keep the meaning they have for every command; the rest are this one's.
     pub fn exit_code(self) -> i32 {
         match self {
             Outcome::Met => 0,

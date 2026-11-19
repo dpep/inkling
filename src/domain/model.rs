@@ -1,33 +1,9 @@
-//! The vocabulary everything else is expressed in: messages, the external
-//! things they reference, and how far along those things are.
+//! The vocabulary everything else is expressed in: the things a watch points
+//! at, and how far along they are.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-
-/// Identifies an enrichable message. Slack-shaped — `slack_add_reaction`
-/// wants exactly these two fields — but the domain treats it as an opaque key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct MessageId {
-    pub channel: String,
-    pub ts: String,
-}
-
-impl MessageId {
-    pub fn new(channel: impl Into<String>, ts: impl Into<String>) -> Self {
-        Self {
-            channel: channel.into(),
-            ts: ts.into(),
-        }
-    }
-}
-
-impl fmt::Display for MessageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.channel, self.ts)
-    }
-}
 
 /// A Slack emoji name, normalized. Slack reports reactions without colons but
 /// humans write them with, and casing varies; comparing raw strings would let
@@ -51,25 +27,7 @@ impl fmt::Display for ReactionName {
     }
 }
 
-/// A message worth looking at, as handed over by a message source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Message {
-    pub id: MessageId,
-    /// For display only — `id.channel` is the identifier. Empty when the
-    /// source didn't report one.
-    pub channel_name: String,
-    pub text: String,
-    pub author: String,
-    /// Display name for `author`. Empty when the source didn't report one.
-    pub author_name: String,
-    pub posted_at: DateTime<Utc>,
-    pub permalink: String,
-    /// `None` means the source could not determine them this run — which is
-    /// different from "there are none", and the reconciler treats it so.
-    pub reactions: Option<Vec<ReactionName>>,
-}
-
-/// A recognized pointer to something outside Slack.
+/// A recognized pointer to something worth watching.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Reference {
     GitHubPullRequest {

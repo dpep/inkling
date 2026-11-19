@@ -2,14 +2,21 @@
 name = "inkling"
 version = "0.3.0"
 edition = "2024"
-description = "Keep an eye on things: tells an agent when a pull request or Jira issue it cares about changes."
+rust-version = "1.88"
+description = "Tells an agent when a pull request, Jira issue or Slack message it cares about changes."
 license = "MIT"
 repository = "https://github.com/dpep/inkling"
+readme = "README.md"
+keywords = ["github", "jira", "slack", "claude", "notifications"]
+categories = ["command-line-utilities", "development-tools"]
+# The crates.io name belongs to an unrelated crate.
+publish = false
+autobins = false
+include = ["src/**", "tests/**", "README.md", "CHANGELOG.md", "LICENSE*", "Cargo.toml", "Cargo.lock"]
 
-[features]
-# Exposes the fakes in `testing` so integration tests can drive the pipeline
-# without a network.
-test-support = []
+[[bin]]
+name = "inkling"
+path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -27,8 +34,3 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 ureq = { version = "3", features = ["json"] }
-
-# Self-reference so `cargo test` turns the fakes on without anyone having to
-# remember a feature flag.
-[dev-dependencies]
-inkling = { path = ".", features = ["test-support"] }

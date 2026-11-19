@@ -1,10 +1,10 @@
-//! Inkling turns the current state of things referenced in Slack into small,
-//! persistent signals on the messages that referenced them.
+//! Inkling tells an agent when a pull request, Jira issue or Slack message it
+//! cares about changes.
 //!
-//! See `DESIGN.md` for the architecture and `PLAN.md` for what is built when.
+//! This library is the `inkling` binary's internals, not a published API: it
+//! carries no semver guarantee. See `DESIGN.md` for the architecture.
 
 pub mod adapters;
-pub mod app;
 pub mod config;
 pub mod config_edit;
 pub mod domain;
@@ -14,7 +14,7 @@ pub mod push;
 pub mod secret;
 pub mod serve;
 pub mod subprocess;
-#[cfg(any(test, feature = "test-support"))]
-pub mod testing;
+#[cfg(test)]
+mod testing;
 pub mod wait;
 pub mod watch;

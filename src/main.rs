@@ -1,12 +1,12 @@
-//! `inkling` — annotate Slack messages with the state of what they link to.
+//! `inkling` — tells an agent when a pull request, Jira issue or Slack message
+//! it cares about changes.
 
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
-use inkling::adapters::store_json::{JsonStore, Store};
+use inkling::adapters::store_json::JsonStore;
 use inkling::adapters::watches_json::{TERMINAL, Unwatched};
-use inkling::app::{Report, Run};
 use inkling::config::Config;
 use inkling::config_edit;
 use inkling::obs;
@@ -18,9 +18,10 @@ use std::path::PathBuf;
 #[command(
     name = "inkling",
     version,
-    about = "Tell an agent when a pull request or Jira issue it cares about changes.",
-    long_about = "Watches GitHub pull requests and Jira issues and reports each transition \
-once: checks going red or green, an approval, a merge, a status change.\n\n\
+    about = "Tell an agent when a pull request, Jira issue or Slack message it cares about changes.",
+    long_about = "Watches GitHub pull requests, Jira issues, and Slack messages and channels, \
+and reports each transition once: checks going red or green, an approval, a merge, a status \
+change, a reply.\n\n\
 `wait` blocks until a pull request gets somewhere; `watch` and `events` register \
 interest and read what moved later; `subscribe` and `hook` push news into a \
 Claude Code session as it happens.\n\n\
@@ -39,7 +40,8 @@ struct Common {
     /// Config file. Defaults to $XDG_CONFIG_HOME/inkling/config.toml
     #[arg(long, short, global = true)]
     config: Option<PathBuf>,
-    /// State file. Defaults to $XDG_STATE_HOME/inkling/state.json
+    /// Cached Slack lookups: channel ids, and your own user id. Defaults to
+    /// $XDG_STATE_HOME/inkling/state.json
     #[arg(long, global = true)]
     state: Option<PathBuf>,
     /// Where waiters coordinate. Defaults to $XDG_STATE_HOME/inkling/waits.json
@@ -65,28 +67,6 @@ struct Common {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Discover new messages and bring tracked ones up to date.
-    // Hidden: the Slack reactions are parked, not removed (docs/deferred.md).
-    #[command(hide = true)]
-    Run {
-        /// Channels to search, or pull requests to check now.
-        ///
-        /// A channel handle or ID narrows the run to it, turning off personal
-        /// mode. A pull request — a URL, `owner/repo#12`, or a shorter form
-        /// matching something tracked — is checked immediately, ignoring the
-        /// backoff schedule.
-        targets: Vec<String>,
-        /// Report what would happen, changing nothing in Slack or on disk.
-        #[arg(long, short = 'n')]
-        dry_run: bool,
-        /// Widen the search window to this many hours back, for a one-off
-        /// catch-up. Narrowing it will not advance the watermark.
-        #[arg(long)]
-        since_hours: Option<i64>,
-        /// Emit the run report as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Block until pull requests move.
     ///
     /// By default that means any change at all — the next step, whatever it
@@ -119,12 +99,13 @@ enum Command {
     },
     /// Watch things, and learn later what changed.
     ///
-    /// Registers interest and returns. Nothing blocks and nothing runs in the
-    /// background: `inkling events` reads what has moved since it last
-    /// looked, polling first if its readings have gone stale.
+    /// Registers interest and returns. A resident server keeps reading while
+    /// anything is watched; `inkling events` reads what has moved since it
+    /// last looked, polling first if its readings have gone stale.
     ///
-    /// With no arguments, lists what is being watched. Every watch expires at
-    /// its `--ttl`, and that expiry is the only cleanup there is.
+    /// With no arguments, lists what is being watched. A watch ends when what
+    /// it watches finishes — a pull request merged or closed, an issue done —
+    /// or can no longer be found, or at its `--ttl`, whichever comes first.
     Watch {
         /// Pull requests — a URL, `owner/repo#12`, or a shorter form matching
         /// something watched — and Jira issues, as a key like `AI-123` or a
@@ -340,7 +321,7 @@ fn main() {
         directory,
         keep_days: cli.common.log_keep_days,
         verbosity: cli.common.verbose,
-        // The run summary is printed on stdout; the terminal layer would
+        // A command's output is printed on stdout; the terminal layer would
         // otherwise say everything twice.
         quiet: cli.common.verbose == 0,
     });
@@ -359,8 +340,8 @@ fn main() {
         }
     };
     // process::exit skips destructors, which would strand whatever the
-    // background log writer still holds — including the run summary and any
-    // error that explains the exit code.
+    // background log writer still holds — including any error that explains
+    // the exit code.
     drop(_logging);
     std::process::exit(code);
 }
@@ -487,49 +468,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("logs       {}", tildify(&obs::default_log_directory()));
 
             println!();
-            println!("personal   {}", config.slack.personal);
-            println!(
-                "channels   {}",
-                if config.slack.channels.is_empty() {
-                    "none".to_string()
-                } else {
-                    config.slack.channels.join(", ")
-                }
-            );
-            println!("mine only  {}", config.filters.only_my_messages);
             println!("github     {}", credentials(&config));
-
-            // Canonical emoji vary in width, so the "also" column is padded to
-            // the widest one rather than a guess that breaks on a long name.
-            let drawn: Vec<_> = inkling::domain::model::State::ALL
-                .into_iter()
-                .filter_map(|state| config.canonical_for(state).map(|e| (state, e)))
-                .collect();
-            let widest = drawn
-                .iter()
-                .map(|(_, emoji)| emoji.as_str().len())
-                .max()
-                .unwrap_or(0);
-
-            if !drawn.is_empty() {
-                println!();
-            }
-            for (state, emoji) in drawn {
-                // The canonical is in the evidence list too; repeating it in
-                // "also" would suggest it's a second, different emoji.
-                let also: Vec<String> = config
-                    .evidence_for(state)
-                    .iter()
-                    .filter(|e| **e != emoji)
-                    .map(|e| format!(":{e}:"))
-                    .collect();
-                let canonical = format!(":{emoji}:");
-                let padded = format!("{canonical:<width$}", width = widest + 2);
-                match also.is_empty() {
-                    true => println!("{state:<10} {padded}"),
-                    false => println!("{state:<10} {padded}  also {}", also.join(" ")),
-                }
-            }
             Ok(0)
         }
         Command::Subscribe { session } => {
@@ -606,7 +545,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             }
         }
         Command::Status => {
-            let snapshot = store.load().map_err(|e| e.to_string())?;
             let now = Utc::now();
             // A newer build's store reads as empty, and zeros here would send
             // someone to watch everything again.
@@ -649,12 +587,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!();
             last_day_out(&log_directory(&cli.common), now);
 
-            // The parked Slack reactions (`run`): only for someone still
-            // running them, and after what everyone uses.
-            if snapshot.run.last_run_outcome.is_some() {
-                println!();
-                reactions_out(&snapshot, &config, now);
-            }
             Ok(0)
         }
         Command::Watch { targets, ttl, json } => {
@@ -665,10 +597,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let owner = reader(None, TERMINAL, &watches.read());
 
             if !targets.is_empty() {
-                let snapshot = store.load().map_err(|e| e.to_string())?;
-                let known = known(&snapshot, &watches.read());
+                let known = known(&watches.read());
                 let references;
-                let bridge = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
+                let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
                 let channel = |handle: &str| slack_channel(handle, &bridge, &store);
                 (references, refused) =
                     watch_targets(targets, &config.github.hosts, &known, &channel);
@@ -767,9 +698,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 return Ok(0);
             }
 
-            let snapshot = store.load().map_err(|e| e.to_string())?;
-            let known = known(&snapshot, &watches.read());
-            let bridge = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
+            let known = known(&watches.read());
+            let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
             let channel = |handle: &str| slack_channel(handle, &bridge, &store);
             let (references, refused) =
                 watch_targets(targets, &config.github.hosts, &known, &channel);
@@ -880,10 +810,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
             )
             .map_err(|e| e.to_string())?;
 
-            // Read-only, and no lock: a wait never writes either file. It
+            // Read-only, and no lock: a wait never writes the watches. It
             // reads them only to expand short references like `inkling#2`.
-            let snapshot = store.load().map_err(|e| e.to_string())?;
-            let known = known(&snapshot, &watch_store(&cli.common).read());
+            let known = known(&watch_store(&cli.common).read());
             let references = wait_targets(targets, &config.github.hosts, &known)?;
 
             let github = GitHubProvider::from_config(&config.github, token);
@@ -942,75 +871,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             );
 
             wait_out(&report, *json)?;
-            Ok(report.exit_code())
-        }
-        Command::Run {
-            targets,
-            dry_run,
-            since_hours,
-            json,
-        } => {
-            let dry_run = *dry_run || config.run.dry_run;
-            let token = Secret::resolve(
-                config.github.token_env.as_deref(),
-                config.github.token_command.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-
-            let slack = slack_claude::from_config(&config, None).map_err(|e| e.to_string())?;
-            let github = GitHubProvider::from_config(&config.github, token);
-            let clock = SystemClock;
-
-            // Still needed with an explicit channel: only_my_messages filters
-            // by author regardless of how a message was found. Before the
-            // lock, which caching the answer takes for a moment.
-            let mut config = config;
-            if config.slack.user_id.is_none() {
-                config.slack.user_id = Some(resolve_identity(&slack, &store, clock.now())?);
-            }
-
-            // One writer at a time. The snapshot is rewritten whole, so two
-            // overlapping runs would silently last-writer-win — and the
-            // casualty would be the ownership ledger, which cannot be
-            // reconstructed from anything else.
-            let lock_path = inkling::adapters::lock::FileLock::path_for(store.path());
-            let _lock = match inkling::adapters::lock::FileLock::try_acquire(&lock_path) {
-                Ok(Some(lock)) => lock,
-                Ok(None) => {
-                    // Cron overlap is expected, not a fault: the next run
-                    // picks up whatever this one leaves.
-                    tracing::info!("another run holds the state lock; leaving it to finish");
-                    return Ok(0);
-                }
-                Err(e) => return Err(e.to_string()),
-            };
-
-            let snapshot = store.load().map_err(|e| e.to_string())?;
-            let known = known(&snapshot, &watch_store(&cli.common).read());
-            let (channels, force) = classify(targets, &config.github.hosts, &known)?;
-            if !channels.is_empty() {
-                config.slack.channels = channels;
-                config.slack.personal = false;
-            } else if !force.is_empty() {
-                // Only pull requests named: "check this one now" needs no
-                // search, since the message is already tracked.
-                config.slack.channels.clear();
-                config.slack.personal = false;
-            }
-
-            let run = Run {
-                config: &config,
-                source: &slack,
-                provider: &github,
-                sink: &slack,
-                store: &store,
-                clock: &clock,
-                dry_run,
-                since: since_hours.map(|h| Utc::now() - TimeDelta::hours(h)),
-                force,
-            };
-            let report = run.execute().map_err(|e| e.to_string())?;
-            report_out(&report, dry_run, *json, cli.common.verbose)?;
             Ok(report.exit_code())
         }
     }
@@ -1122,19 +982,9 @@ fn resolve_identity<R: slack_claude::Runner>(
         }
     };
 
-    // whoami already carries the name, so seed it here rather than paying a
-    // second profile call for the one author who appears on every message.
-    let name = if me.name.trim().is_empty() {
-        me.handle
-    } else {
-        me.name
-    };
     let cached = store.update(|snapshot| {
         snapshot.user_id = Some(me.id.clone());
         snapshot.user_id_failed_at = None;
-        if !name.is_empty() {
-            snapshot.users.insert(me.id.clone(), name);
-        }
     });
     if let Err(error) = cached {
         tracing::warn!(%error, "could not cache who you are in slack; asking again next time");
@@ -1142,74 +992,23 @@ fn resolve_identity<R: slack_claude::Runner>(
     Ok(me.id)
 }
 
-/// How many tracked records to list before summarizing the rest. Enough to
-/// see everything on a normal week, short enough not to bury the summary.
-const TRACKING_LIMIT: usize = 15;
-
-/// List the tracked records, so "tracking 7" says which seven.
-///
-/// One line per reference: state, what's on it, the ref, and its title —
-/// `dpep/gqls#1` alone doesn't tell you what it is. Live records come first,
-/// since finished ones are only waiting to age out.
-fn tracking(records: &[inkling::app::Tracked]) {
-    if records.is_empty() {
-        return;
-    }
-    let (live, done): (Vec<_>, Vec<_>) = records.iter().partition(|r| !r.terminal);
-    let ordered: Vec<_> = live.into_iter().chain(done).collect();
-
-    let width = ordered
-        .iter()
-        .flat_map(|r| r.refs.iter().map(|(name, _)| name.len()))
-        .max()
-        .unwrap_or(0);
-
-    // Titles are arbitrary prose. Left whole they wrap, and a wrapped row
-    // stops being a row — the columns no longer line up with anything.
-    let used = 2 + 8 + 2 + 14 + 2 + width + 2;
-    let budget = terminal_width().saturating_sub(used).max(24);
-
-    println!("tracking");
-    for record in ordered.iter().take(TRACKING_LIMIT) {
-        let state = record.state.map_or("?", |s| s.as_str());
-        let marks = match record.applied.is_empty() {
-            true => "—".to_string(),
-            false => record
-                .applied
-                .iter()
-                .map(|e| format!(":{e}:"))
-                .collect::<Vec<_>>()
-                .join(" "),
-        };
-        for (name, title) in &record.refs {
-            let title = ellipsize(title, budget);
-            println!("  {state:<8}  {marks:<14}  {name:<width$}  {title}");
-        }
-    }
-    if ordered.len() > TRACKING_LIMIT {
-        println!("  … and {} more", ordered.len() - TRACKING_LIMIT);
-    }
-    println!();
-}
-
-/// Everything a short reference can select among: what is watched, plus what
-/// the parked Slack reactions track. Watches alone would leave `run`'s records
-/// unreachable; tracked alone made `wait 42` fail for anything not seen in Slack.
+/// Everything a short reference can select among: what is watched.
 fn known(
-    snapshot: &inkling::adapters::store_json::Snapshot,
     watches: &inkling::adapters::watches_json::Watches,
 ) -> Vec<inkling::domain::model::Reference> {
-    let tracked = snapshot.tracked.values().flat_map(|t| t.references.iter());
-    let watched = watches.watches.values().map(|w| &w.reference);
-    tracked.chain(watched).cloned().collect()
+    watches
+        .watches
+        .values()
+        .map(|w| w.reference.clone())
+        .collect()
 }
 
 /// Fill in the parts of a reference the caller left out.
 ///
 /// The one rule, for every command that takes a reference: `owner/repo#N`
 /// names a pull request completely once the host defaults, and only the forms
-/// shorter than that — `repo#N`, `#N`, `N` — need a tracked record, where a
-/// short form genuinely selects among what is tracked.
+/// shorter than that — `repo#N`, `#N`, `N` — need a watch, where a short
+/// form genuinely selects among what is watched.
 ///
 /// A rule per command is what dogfooding caught: `watch` learned the first
 /// half and `wait` did not, and both suites stayed green.
@@ -1233,8 +1032,8 @@ fn complete(
     }
 }
 
-/// Find the one tracked record a short reference selects. Exactly one match or
-/// nothing: reacting to the wrong pull request is worse than being asked for a
+/// Find the one watch a short reference selects. Exactly one match or
+/// nothing: acting on the wrong pull request is worse than being asked for a
 /// fuller reference.
 fn resolve(
     owner: &Option<String>,
@@ -1289,21 +1088,15 @@ fn resolve(
     }
 }
 
-/// Split `run`'s arguments into channels to search and pull requests to
-/// check now.
-///
-/// A bare number is resolved against what's already tracked, and only when
-/// exactly one record matches. Guessing a repository would react to the
-/// wrong pull request, which is worse than asking for a fuller reference.
 /// clap needs an owned error; `Until`'s own is already one.
 fn parse_until(arg: &str) -> Result<inkling::domain::wait::Until, String> {
     arg.parse()
         .map_err(|e: inkling::domain::wait::UnknownUntil| e.to_string())
 }
 
-/// The same targets `run` takes, minus channels — there is no such thing as
-/// waiting for a channel, and reading one as a typo'd pull request is kinder
-/// than polling something that will never resolve.
+/// Pull requests only — there is no such thing as waiting for a channel, and
+/// reading one as a typo'd pull request is kinder than polling something that
+/// will never resolve.
 fn wait_targets(
     targets: &[String],
     hosts: &[String],
@@ -2283,7 +2076,7 @@ fn slack_threads(
     config: &Config,
     state: &std::path::Path,
 ) -> Result<inkling::adapters::slack_thread::SlackThreads<slack_claude::ClaudeRunner>, String> {
-    let slack = slack_claude::from_config(config, None).map_err(|e| e.to_string())?;
+    let slack = slack_claude::from_config(config).map_err(|e| e.to_string())?;
     let config = config.clone();
     let state = state.to_path_buf();
     Ok(inkling::adapters::slack_thread::SlackThreads::new(
@@ -2292,7 +2085,7 @@ fn slack_threads(
             if let Some(id) = &config.slack.user_id {
                 return Some(id.clone());
             }
-            let slack = slack_claude::from_config(&config, None).ok()?;
+            let slack = slack_claude::from_config(&config).ok()?;
             resolve_identity(&slack, &JsonStore::new(state.clone()), SystemClock.now())
                 .map_err(|error| {
                     tracing::warn!(
@@ -2631,47 +2424,6 @@ fn event_lines(events: &[inkling::domain::watch::Event], width: usize) -> Vec<St
         .collect()
 }
 
-/// Where `run`, the parked Slack reactions, has got to.
-fn reactions_out(
-    snapshot: &inkling::adapters::store_json::Snapshot,
-    config: &Config,
-    now: DateTime<Utc>,
-) {
-    let window = inkling::domain::window::next_window(
-        &config.window,
-        snapshot.run.last_successful_discovery_at,
-        now,
-    );
-    let local = |t: DateTime<Utc>| {
-        t.with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M %Z")
-            .to_string()
-    };
-    println!(
-        "last run    {}",
-        match snapshot.run.last_run_outcome {
-            Some(outcome) => format!("{outcome:?}").to_lowercase(),
-            None => "never".into(),
-        }
-    );
-    println!(
-        "last search {}",
-        snapshot
-            .run
-            .last_successful_discovery_at
-            .map_or("never".into(), local)
-    );
-    println!(
-        "next window {} .. {}",
-        local(window.start),
-        local(window.end)
-    );
-    let live = snapshot.tracked.values().filter(|t| !t.terminal).count();
-    println!("tracked     {}", snapshot.tracked.len());
-    println!("  live      {live}");
-    println!("  done      {}", snapshot.tracked.len() - live);
-}
-
 /// What the resident server is doing, if anything.
 ///
 /// "Running" comes from the lock, because that is the only claim the kernel
@@ -2899,138 +2651,12 @@ fn wait_out(report: &inkling::wait::Report, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn report_out(report: &Report, dry_run: bool, json: bool, verbose: u8) -> Result<(), String> {
-    if json {
-        // The detail rows carry everything; a summary object keeps the common
-        // case readable.
-        let out = serde_json::json!({
-            "discovered": report.discovered,
-            "tracked": report.tracked,
-            "checked": report.checked,
-            "added": report.added.iter().map(|(id, e)| {
-                serde_json::json!({"message": id.to_string(), "emoji": e.to_string()})
-            }).collect::<Vec<_>>(),
-            "skipped": report.skipped,
-            "failed": report.failed,
-            "terminal": report.terminal,
-            "dry_run": dry_run,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-        );
-        return Ok(());
-    }
-
-    if dry_run {
-        for detail in &report.details {
-            let channel = if detail.channel_name.is_empty() {
-                detail.id.channel.clone()
-            } else {
-                format!("#{}", detail.channel_name)
-            };
-            let posted = detail
-                .posted_at
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M %Z");
-            let who = if detail.author.is_empty() {
-                String::new()
-            } else {
-                format!(" by {}", detail.author)
-            };
-            println!("{channel}  {posted}{who}");
-            println!("  link     {}", detail.permalink);
-
-            for (reference, author) in &detail.references {
-                // The person who posted the link often isn't the person who
-                // wrote the code; saying so only when they differ keeps the
-                // common case quiet.
-                let author = match author.as_str() {
-                    "" => String::new(),
-                    a if a.eq_ignore_ascii_case(&detail.author) => String::new(),
-                    a => format!(" (opened by {a})"),
-                };
-                println!("  ref      {reference}{author}");
-            }
-            let states: Vec<String> = detail.states.iter().map(ToString::to_string).collect();
-            println!("  state    {}", states.join(", "));
-            println!(
-                "  existing {}",
-                match &detail.existing {
-                    Some(names) if names.is_empty() => "none".to_string(),
-                    Some(names) => names
-                        .iter()
-                        .map(|n| format!(":{n}:"))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    None => "unknown".to_string(),
-                }
-            );
-            println!(
-                "  action   {}",
-                match (&detail.plan.add, &detail.plan.satisfied_by) {
-                    (Some(emoji), _) => format!("add :{emoji}:"),
-                    // Usually an alias, so naming the canonical here would be
-                    // a claim about a reaction that isn't on the message.
-                    (None, Some(found)) => format!("nothing (already signaled by :{found}:)"),
-                    (None, None) => "nothing (no signal for this state)".to_string(),
-                }
-            );
-            println!();
-        }
-    }
-
-    // A discovery failure isn't a per-record failure, so the counters below
-    // all read zero while the run exits nonzero. Say it outright.
-    if report.discovery_failed() {
-        println!("discovery FAILED — the search window was not covered; see the log");
-    }
-
-    if verbose > 0 {
-        tracking(&report.tracking);
-    }
-
-    for reference in &report.unmatched {
-        println!("{reference}: nothing tracked references it");
-    }
-
-    // "checked 0" alone reads the same whether nothing was due or nothing was
-    // found, so say how many were eligible and when the next one comes up.
-    let checked = match report.next_check {
-        Some(next) => {
-            let wait = next
-                .signed_duration_since(Utc::now())
-                .max(TimeDelta::zero());
-            format!(
-                "checked {}/{} (next in {})",
-                report.checked,
-                report.live,
-                humanize(wait)
-            )
-        }
-        None => format!("checked {}/{}", report.checked, report.live),
-    };
-
-    let verb = if dry_run { "would add" } else { "added" };
-    println!(
-        "discovered {} · {checked} · {verb} {} · skipped {} · failed {} · tracking {} ({} done)",
-        report.discovered,
-        report.added.len(),
-        report.skipped,
-        report.failed,
-        report.tracked,
-        report.terminal,
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge, news,
         noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
     };
-    use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
     use inkling::domain::watch::{Receipt, Sighting, Standing};
     use inkling::watch::Polled;
@@ -3392,12 +3018,12 @@ mod tests {
 
     #[test]
     fn a_shorter_form_selects_what_is_already_watched() {
-        // Found by dogfooding: short forms matched only what the Slack
-        // reactions tracked, so with those parked `wait 3` never worked.
+        // Found by dogfooding: short forms once matched only what the Slack
+        // reactions tracked, so `wait 3` never worked.
         let now = chrono::Utc::now();
         let mut watches = Watches::default();
         watches.watch(&pr(3), "cli", now + chrono::TimeDelta::hours(1), now);
-        let known = super::known(&Snapshot::default(), &watches);
+        let known = super::known(&watches);
 
         for target in ["inkling#3", "#3", "3"] {
             for (command, resolved) in each_command(target, &known) {
@@ -3771,7 +3397,6 @@ mod tests {
     fn a_channel_cached_by_name_is_one_watch_however_it_is_named() {
         let dir = std::env::temp_dir().join(format!("inkling-channel-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        use inkling::adapters::store_json::Store;
         let store = super::JsonStore::new(dir.join("state.json"));
         let mut snapshot = store.load().unwrap_or_default();
         snapshot
