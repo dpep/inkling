@@ -177,6 +177,8 @@ enum Command {
     /// Stop pushing to this session. It stays attached, so its watches keep
     /// being read and the prompt hook still shows what moved.
     Unsubscribe {
+        /// The session id to detach from. Defaults to the one Claude Code
+        /// exports.
         #[arg(long)]
         session: Option<String>,
     },
@@ -251,7 +253,8 @@ impl HookEvent {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Print the effective config — defaults plus whatever the file changes.
+    /// Print where the config, state and logs live, and whether GitHub
+    /// credentials resolve.
     Show,
     /// Print where the config file would be read from.
     Path,
@@ -428,7 +431,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 "{}",
                 config_edit::get(&document, key).map_err(|e| format!(
                     "{e}\n  the file only holds what you've changed; \
-                     `inkling config` shows effective values"
+                     anything absent takes its default"
                 ))?
             );
             return Ok(0);

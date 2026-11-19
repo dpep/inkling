@@ -155,8 +155,8 @@ pub enum Resolution {
 
 /// The lifecycle position of a whole set of references.
 ///
-/// The minimum, which is the same fold reconciliation uses for a message
-/// holding several links: one closed pull request pins the group down.
+/// The minimum: the group is only as far along as its least advanced member,
+/// so one closed pull request pins the group down.
 pub fn aggregate(observations: &[Observation]) -> Option<State> {
     observations.iter().map(|o| o.state).min()
 }
@@ -314,8 +314,8 @@ mod tests {
 
     #[test]
     fn one_closed_sibling_precludes_the_whole_wait() {
-        // Same aggregation reconcile uses: Closed ranks lowest, so it pins
-        // the minimum and the group can never reach the threshold.
+        // Closed ranks lowest, so it pins the minimum and the group can
+        // never reach the threshold.
         let refs = [seen(1, State::Merged), seen(2, State::Closed)];
         assert_eq!(
             resolve(Until::Reached(State::Merged), &refs, None),
