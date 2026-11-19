@@ -20,7 +20,7 @@ Inkling observes; it never acts. What to do about the news is up to whoever read
 ## Requires
 
 - macOS or Linux. Inkling talks to Claude Code over Unix sockets, so Windows isn't supported.
-- A Rust toolchain, 1.85 or later (edition 2024), to build it.
+- A Rust toolchain, 1.88 or later, to build it.
 - Claude Code, for news pushed into a session. `wait`, `watch` and `events` work without it.
 - For GitHub: [`gh`](https://cli.github.com), authenticated (`gh auth login`).
 - For Jira: Atlassian's `acli`, on `PATH` and authenticated.

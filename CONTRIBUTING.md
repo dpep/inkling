@@ -11,7 +11,7 @@ make install   # release build, copied into BIN_DIR (default ~/.claude/bin)
 tests need no network: GitHub, Jira and Slack are faked, and recorded
 responses live beside the adapters that parse them.
 
-A Rust toolchain of 1.85 or later is enough. `gh`, `acli` and Claude Code are
+A Rust toolchain of 1.88 or later is enough. `gh`, `acli` and Claude Code are
 only needed to run Inkling against the real services.
 
 ## Try it without touching your own setup
