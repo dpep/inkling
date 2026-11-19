@@ -1,13 +1,10 @@
-//! Run state on disk: one JSON file, written atomically.
+//! What Slack lookups have taught us, on disk: one small JSON file, written
+//! atomically, holding answers that cost a bridge call and never change.
 //!
-//! Not a database. Steady state is a few hundred live records, the access
-//! pattern is load-all/save-all, and being able to read and hand-edit the file
-//! at 2am is worth more than query support. The `Store` trait is the seam if
-//! that stops being true.
+//! A file written by 0.3.0 or earlier also held the Slack reactions' ledger;
+//! serde skips those fields on load, and the next cache write drops them.
 
 use crate::adapters::lock::FileLock;
-use crate::domain::model::{MessageId, ReactionName};
-use crate::domain::model::{Reference, State};
 use crate::ports::StoreError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,19 +17,10 @@ pub const VERSION: u32 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub version: u32,
-    #[serde(default)]
-    pub run: RunState,
-    /// Tracked messages, keyed by `channel:ts`.
-    #[serde(default)]
-    pub tracked: BTreeMap<String, TrackedMessage>,
-    /// Channel handle to ID. IDs never change, and resolving one costs a
-    /// bridge call, so this is worth carrying between runs.
+    /// Channel name to ID. IDs never change, and resolving one costs a
+    /// bridge call, so this is worth carrying between processes.
     #[serde(default)]
     pub channels: BTreeMap<String, String>,
-    /// User ID to real name. Slack search only reports usernames, and a
-    /// profile call per person is worth making exactly once.
-    #[serde(default)]
-    pub users: BTreeMap<String, String>,
     /// Whose credentials these are, resolved once rather than configured.
     #[serde(default)]
     pub user_id: Option<String>,
@@ -40,79 +28,6 @@ pub struct Snapshot {
     /// process would otherwise pay again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id_failed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunState {
-    /// How far each scope has been searched, keyed by `Scope::key`.
-    ///
-    /// Per scope rather than one watermark, because they aren't
-    /// interchangeable: a channel added today has never been searched, and a
-    /// shared watermark would tell it the last few minutes were already
-    /// covered — so it would find nothing until someone posted again.
-    #[serde(default)]
-    pub scopes: BTreeMap<String, DateTime<Utc>>,
-    /// Most recent successful discovery in any scope. Display only.
-    #[serde(default)]
-    pub last_successful_discovery_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub last_run_started_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub last_run_outcome: Option<Outcome>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    Success,
-    /// Discovery worked, but at least one record failed. Retried next run.
-    Partial,
-    /// Discovery itself failed; the watermark must not advance.
-    Failure,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackedMessage {
-    pub id: MessageId,
-    #[serde(default)]
-    pub permalink: String,
-    /// Display only, captured at discovery so printing a record later needs
-    /// no extra lookup.
-    #[serde(default)]
-    pub channel_name: String,
-    /// Slack user ID of whoever posted.
-    #[serde(default)]
-    pub author: String,
-    #[serde(default)]
-    pub author_name: String,
-    pub references: Vec<Reference>,
-    #[serde(default)]
-    pub last_state: Option<State>,
-    /// Reference display string to pull-request title, refreshed on each
-    /// check. Kept so a record can be listed without looking it up again —
-    /// most tracked records aren't due on any given run.
-    #[serde(default)]
-    pub titles: BTreeMap<String, String>,
-    /// What Inkling itself added — never what a human did. Only written when
-    /// evidence showed the emoji absent beforehand.
-    #[serde(default)]
-    pub applied: Vec<ReactionName>,
-    pub posted_at: DateTime<Utc>,
-    pub first_seen: DateTime<Utc>,
-    pub last_checked: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub terminal: bool,
-}
-
-impl TrackedMessage {
-    pub fn key(&self) -> String {
-        self.id.to_string()
-    }
-}
-
-pub trait Store {
-    fn load(&self) -> Result<Snapshot, StoreError>;
-    fn save(&self, snapshot: &Snapshot) -> Result<(), StoreError>;
 }
 
 pub struct JsonStore {
@@ -140,11 +55,11 @@ impl JsonStore {
         &self.path
     }
 
-    /// Change a cached value under the run lock: load, change, save. Nothing
+    /// Change a cached value under the lock: load, change, save. Nothing
     /// slow belongs inside `change` — do the lookup first, then this.
     ///
-    /// Doesn't wait for a run, which holds the lock for minutes: a cache that
-    /// can't be written costs a lookup next time, nothing more.
+    /// Doesn't wait for the lock: a cache that can't be written costs a
+    /// lookup next time, nothing more.
     pub fn update<T>(&self, change: impl FnOnce(&mut Snapshot) -> T) -> Result<T, StoreError> {
         let _lock = FileLock::try_acquire(&FileLock::path_for(&self.path))
             .map_err(|e| StoreError::Write(e.to_string()))?
@@ -155,9 +70,8 @@ impl JsonStore {
         Ok(outcome)
     }
 
-    /// Move a file we can't read out of the way rather than overwriting it —
-    /// it's the only copy of the ownership ledger, and worth keeping around
-    /// for a look even when it's unparseable.
+    /// Move a file we can't read out of the way rather than overwriting it,
+    /// so it's still there for a look.
     fn quarantine(&self) -> Option<PathBuf> {
         for n in 0..100 {
             let candidate = self.path.with_extension(format!("corrupt-{n}"));
@@ -168,10 +82,8 @@ impl JsonStore {
         }
         None
     }
-}
 
-impl Store for JsonStore {
-    fn load(&self) -> Result<Snapshot, StoreError> {
+    pub fn load(&self) -> Result<Snapshot, StoreError> {
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(raw) => raw,
             // A missing file is a first run, not a failure.
@@ -191,11 +103,7 @@ impl Store for JsonStore {
             Ok(snapshot) => Ok(snapshot),
             Err(_) => {
                 let moved = self.quarantine();
-                tracing::error!(
-                    backup = ?moved,
-                    "state file was unreadable; starting fresh (ownership ledger lost, \
-                     so nothing already applied will be claimed)"
-                );
+                tracing::error!(backup = ?moved, "state file was unreadable; starting fresh");
                 Ok(Snapshot {
                     version: VERSION,
                     ..Snapshot::default()
@@ -204,7 +112,7 @@ impl Store for JsonStore {
         }
     }
 
-    fn save(&self, snapshot: &Snapshot) -> Result<(), StoreError> {
+    pub fn save(&self, snapshot: &Snapshot) -> Result<(), StoreError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| StoreError::Write(e.to_string()))?;
         }
@@ -212,7 +120,7 @@ impl Store for JsonStore {
             serde_json::to_string_pretty(snapshot).map_err(|e| StoreError::Write(e.to_string()))?;
 
         // Temp file plus rename, so a crash mid-write can't leave a truncated
-        // state file. The watermark and the tracked set commit together.
+        // state file.
         let temp = self.path.with_extension("tmp");
         std::fs::write(&temp, json).map_err(|e| StoreError::Write(e.to_string()))?;
         std::fs::rename(&temp, &self.path).map_err(|e| StoreError::Write(e.to_string()))
@@ -243,66 +151,68 @@ mod tests {
         }
     }
 
-    fn tracked() -> TrackedMessage {
-        TrackedMessage {
-            id: MessageId::new("C1", "1786596050.245879"),
-            permalink: "https://example.slack.com/p1".into(),
-            channel_name: "inkling".into(),
-            author: "U1".into(),
-            author_name: "Daniel Pepper".into(),
-            references: vec![Reference::GitHubPullRequest {
-                host: "github.com".into(),
-                owner: "dpep".into(),
-                repo: "gqls".into(),
-                number: 1,
-            }],
-            last_state: Some(State::Approved),
-            titles: BTreeMap::new(),
-            applied: vec![ReactionName::new("white_check_mark")],
-            posted_at: "2026-08-12T21:21:16Z".parse().unwrap(),
-            first_seen: "2026-08-12T21:30:00Z".parse().unwrap(),
-            last_checked: Some("2026-08-12T21:30:00Z".parse().unwrap()),
-            terminal: false,
-        }
-    }
-
     #[test]
     fn a_missing_file_reads_as_a_first_run() {
         let dir = TempDir::new("missing");
         let snapshot = JsonStore::new(dir.file()).load().unwrap();
         assert_eq!(snapshot.version, VERSION);
-        assert!(snapshot.tracked.is_empty());
-        assert!(snapshot.run.last_successful_discovery_at.is_none());
+        assert!(snapshot.channels.is_empty());
+        assert!(snapshot.user_id.is_none());
     }
 
     #[test]
-    fn a_snapshot_round_trips_including_the_ledger() {
+    fn a_snapshot_round_trips() {
         let dir = TempDir::new("roundtrip");
         let store = JsonStore::new(dir.file());
 
         let mut snapshot = Snapshot {
             version: VERSION,
+            user_id: Some("U1".into()),
             ..Snapshot::default()
         };
-        let message = tracked();
-        snapshot.tracked.insert(message.key(), message);
         snapshot.channels.insert("inkling".into(), "C1".into());
-        snapshot.run.last_successful_discovery_at = Some("2026-08-12T21:30:00Z".parse().unwrap());
-        snapshot.run.last_run_outcome = Some(Outcome::Success);
 
         store.save(&snapshot).unwrap();
         assert_eq!(store.load().unwrap(), snapshot);
     }
 
     #[test]
+    fn a_file_from_before_the_reactions_were_removed_keeps_its_caches() {
+        // 0.3.0 kept the reactions' ledger here too. Its caches still count;
+        // the ledger is skipped, and gone after the next write.
+        let dir = TempDir::new("ledger");
+        std::fs::write(
+            dir.file(),
+            r#"{"version": 1,
+                "run": {"scopes": {"personal": "2026-08-12T21:30:00Z"}, "last_run_outcome": "success"},
+                "tracked": {"C1:1786596050.245879": {"id": {"channel": "C1", "ts": "1786596050.245879"},
+                    "references": [], "applied": ["rocket"], "posted_at": "2026-08-12T21:21:16Z",
+                    "first_seen": "2026-08-12T21:30:00Z", "last_checked": null}},
+                "channels": {"inkling": "C1"},
+                "users": {"U1": "Someone"},
+                "user_id": "U1"}"#,
+        )
+        .unwrap();
+        let store = JsonStore::new(dir.file());
+
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.user_id.as_deref(), Some("U1"));
+        assert_eq!(snapshot.channels["inkling"], "C1");
+        assert!(!dir.file().with_extension("corrupt-0").exists());
+
+        store.update(|_| ()).unwrap();
+        let written = std::fs::read_to_string(dir.file()).unwrap();
+        assert!(!written.contains("tracked"), "{written}");
+    }
+
+    #[test]
     fn a_corrupt_file_is_moved_aside_rather_than_overwritten() {
-        // It holds the only copy of the ownership ledger.
         let dir = TempDir::new("corrupt");
         let store = JsonStore::new(dir.file());
         std::fs::write(dir.file(), "{not json at all").unwrap();
 
         let snapshot = store.load().unwrap();
-        assert!(snapshot.tracked.is_empty());
+        assert!(snapshot.channels.is_empty());
         assert!(dir.file().with_extension("corrupt-0").exists());
     }
 
@@ -310,7 +220,7 @@ mod tests {
     fn a_newer_version_refuses_rather_than_clobbering() {
         let dir = TempDir::new("future");
         let store = JsonStore::new(dir.file());
-        std::fs::write(dir.file(), r#"{"version": 999, "tracked": {}}"#).unwrap();
+        std::fs::write(dir.file(), r#"{"version": 999, "channels": {}}"#).unwrap();
 
         assert!(matches!(
             store.load(),
@@ -339,28 +249,32 @@ mod tests {
     fn a_cache_write_keeps_what_another_writer_saved_meanwhile() {
         // Found by the hunt: `watch slack:#new` loaded the state, spent a
         // bridge call resolving the channel, and saved its stale copy over
-        // whatever `inkling run` had written in between — ledger included.
+        // whatever another process had written in between.
         let dir = TempDir::new("merge");
         let store = JsonStore::new(dir.file());
         let stale = store.load().unwrap();
-        let mut ran = stale.clone();
-        ran.tracked.insert(tracked().key(), tracked());
-        store.save(&ran).unwrap();
+        let mut other = stale.clone();
+        other.user_id = Some("U1".into());
+        store.save(&other).unwrap();
 
         store
             .update(|s| s.channels.insert("general".into(), "C1".into()))
             .unwrap();
 
         let now = store.load().unwrap();
-        assert_eq!(now.tracked.len(), 1, "run's write survived");
+        assert_eq!(
+            now.user_id.as_deref(),
+            Some("U1"),
+            "the other write survived"
+        );
         assert_eq!(now.channels["general"], "C1");
     }
 
     #[test]
-    fn a_cache_write_waits_out_no_run() {
+    fn a_cache_write_waits_out_no_lock() {
         let dir = TempDir::new("held");
         let store = JsonStore::new(dir.file());
-        let _run = crate::adapters::lock::FileLock::try_acquire(
+        let _held = crate::adapters::lock::FileLock::try_acquire(
             &crate::adapters::lock::FileLock::path_for(store.path()),
         )
         .unwrap()

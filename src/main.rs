@@ -4,7 +4,7 @@ use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use inkling::adapters::github::GitHubProvider;
 use inkling::adapters::slack_claude;
-use inkling::adapters::store_json::{JsonStore, Store};
+use inkling::adapters::store_json::JsonStore;
 use inkling::adapters::watches_json::{TERMINAL, Unwatched};
 use inkling::config::Config;
 use inkling::config_edit;
@@ -635,8 +635,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let owner = reader(None, TERMINAL, &watches.read());
 
             if !targets.is_empty() {
-                let snapshot = store.load().map_err(|e| e.to_string())?;
-                let known = known(&snapshot, &watches.read());
+                let known = known(&watches.read());
                 let references;
                 let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
                 let channel = |handle: &str| slack_channel(handle, &bridge, &store);
@@ -737,8 +736,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 return Ok(0);
             }
 
-            let snapshot = store.load().map_err(|e| e.to_string())?;
-            let known = known(&snapshot, &watches.read());
+            let known = known(&watches.read());
             let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
             let channel = |handle: &str| slack_channel(handle, &bridge, &store);
             let (references, refused) =
@@ -850,10 +848,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
             )
             .map_err(|e| e.to_string())?;
 
-            // Read-only, and no lock: a wait never writes either file. It
+            // Read-only, and no lock: a wait never writes the watches. It
             // reads them only to expand short references like `inkling#2`.
-            let snapshot = store.load().map_err(|e| e.to_string())?;
-            let known = known(&snapshot, &watch_store(&cli.common).read());
+            let known = known(&watch_store(&cli.common).read());
             let references = wait_targets(targets, &config.github.hosts, &known)?;
 
             let github = GitHubProvider::from_config(&config.github, token);
@@ -1023,19 +1020,9 @@ fn resolve_identity<R: slack_claude::Runner>(
         }
     };
 
-    // whoami already carries the name, so seed it here rather than paying a
-    // second profile call for the one author who appears on every message.
-    let name = if me.name.trim().is_empty() {
-        me.handle
-    } else {
-        me.name
-    };
     let cached = store.update(|snapshot| {
         snapshot.user_id = Some(me.id.clone());
         snapshot.user_id_failed_at = None;
-        if !name.is_empty() {
-            snapshot.users.insert(me.id.clone(), name);
-        }
     });
     if let Err(error) = cached {
         tracing::warn!(%error, "could not cache who you are in slack; asking again next time");
@@ -1043,16 +1030,15 @@ fn resolve_identity<R: slack_claude::Runner>(
     Ok(me.id)
 }
 
-/// Everything a short reference can select among: what is watched, plus what
-/// the parked Slack reactions track. Watches alone would leave `run`'s records
-/// unreachable; tracked alone made `wait 42` fail for anything not seen in Slack.
+/// Everything a short reference can select among: what is watched.
 fn known(
-    snapshot: &inkling::adapters::store_json::Snapshot,
     watches: &inkling::adapters::watches_json::Watches,
 ) -> Vec<inkling::domain::model::Reference> {
-    let tracked = snapshot.tracked.values().flat_map(|t| t.references.iter());
-    let watched = watches.watches.values().map(|w| &w.reference);
-    tracked.chain(watched).cloned().collect()
+    watches
+        .watches
+        .values()
+        .map(|w| w.reference.clone())
+        .collect()
 }
 
 /// Fill in the parts of a reference the caller left out.
@@ -2715,7 +2701,6 @@ mod tests {
         Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge, news,
         noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
     };
-    use inkling::adapters::store_json::Snapshot;
     use inkling::adapters::watches_json::Watches;
     use inkling::domain::watch::{Receipt, Sighting, Standing};
     use inkling::watch::Polled;
@@ -3082,7 +3067,7 @@ mod tests {
         let now = chrono::Utc::now();
         let mut watches = Watches::default();
         watches.watch(&pr(3), "cli", now + chrono::TimeDelta::hours(1), now);
-        let known = super::known(&Snapshot::default(), &watches);
+        let known = super::known(&watches);
 
         for target in ["inkling#3", "#3", "3"] {
             for (command, resolved) in each_command(target, &known) {
@@ -3456,7 +3441,6 @@ mod tests {
     fn a_channel_cached_by_name_is_one_watch_however_it_is_named() {
         let dir = std::env::temp_dir().join(format!("inkling-channel-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        use inkling::adapters::store_json::Store;
         let store = super::JsonStore::new(dir.join("state.json"));
         let mut snapshot = store.load().unwrap_or_default();
         snapshot
