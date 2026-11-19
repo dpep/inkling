@@ -3,6 +3,9 @@
 ## Unreleased
 
 - **Install with Homebrew**: `brew install dpep/tools/inkling`.
+- **Relative paths work.** `--config`, `--state`, `--watches`, `--waits` and `--log-dir` are
+  resolved against the directory you ran from. Before, a relative path sent the resident server to
+  a file under `/`, and push silently never happened.
 
 ## 0.4.0 — 2026-11-18
 

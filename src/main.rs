@@ -65,6 +65,29 @@ struct Common {
     log_keep_days: usize,
 }
 
+impl Common {
+    /// Every path flag made absolute against `cwd`, once, so everything
+    /// downstream — including a spawned server, which runs from `/` — names
+    /// the same files.
+    fn anchored(mut self, cwd: &std::path::Path) -> Self {
+        for path in [
+            &mut self.config,
+            &mut self.state,
+            &mut self.waits,
+            &mut self.watches,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *path = cwd.join(&*path);
+        }
+        if let Some(dir) = self.log_dir.as_mut().filter(|dir| *dir != "off") {
+            *dir = cwd.join(&*dir).display().to_string();
+        }
+        self
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Block until pull requests move.
@@ -303,7 +326,10 @@ fn main() {
     // every other command in a pipeline.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Ok(cwd) = std::env::current_dir() {
+        cli.common = cli.common.anchored(&cwd);
+    }
 
     let directory = match cli.common.log_dir.as_deref() {
         Some("off") => None,
@@ -2681,6 +2707,34 @@ mod tests {
             shown(&["inkling", "config"]),
             super::tildify(&inkling::obs::default_log_directory())
         );
+    }
+
+    #[test]
+    fn relative_path_flags_are_anchored_to_the_working_directory() {
+        // A spawned server runs from `/`, so a relative path would name a
+        // different file there.
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "inkling",
+            "status",
+            "--config=c.toml",
+            "--state=s.json",
+            "--waits=wt.json",
+            "--watches=/abs/w.json",
+            "--log-dir=logs",
+        ])
+        .unwrap();
+        let common = cli.common.anchored(std::path::Path::new("/work"));
+        let path = |p: &Option<std::path::PathBuf>| p.as_ref().unwrap().display().to_string();
+        assert_eq!(path(&common.config), "/work/c.toml");
+        assert_eq!(path(&common.state), "/work/s.json");
+        assert_eq!(path(&common.waits), "/work/wt.json");
+        assert_eq!(path(&common.watches), "/abs/w.json");
+        assert_eq!(common.log_dir.as_deref(), Some("/work/logs"));
+
+        let off = super::Cli::try_parse_from(["inkling", "status", "--log-dir=off"]).unwrap();
+        let common = off.common.anchored(std::path::Path::new("/work"));
+        assert_eq!(common.log_dir.as_deref(), Some("off"));
     }
 
     use super::{
