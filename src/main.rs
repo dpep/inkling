@@ -451,10 +451,13 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let document = config_edit::load(&path).map_err(|e| e.to_string())?;
             println!(
                 "{}",
-                config_edit::get(&document, key).map_err(|e| format!(
-                    "{e}\n  the file only holds what you've changed; \
-                     anything absent takes its default"
-                ))?
+                config_edit::get(&document, key).map_err(|e| match e {
+                    config_edit::EditError::NoSuchKey(_) => format!(
+                        "{e}\n  the file only holds what you've changed; \
+                         anything absent takes its default"
+                    ),
+                    e => e.to_string(),
+                })?
             );
             return Ok(0);
         }
@@ -507,6 +510,16 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
             println!();
             println!("github     {}", credentials(&config));
+
+            let document = config_edit::load(&path).map_err(|e| e.to_string())?;
+            let retired = config_edit::retired_present(&document);
+            if !retired.is_empty() {
+                println!();
+                println!("retired    these keys have no effect; to remove them:");
+                for key in retired {
+                    println!("  inkling config set {key} \"\"");
+                }
+            }
             Ok(0)
         }
         Command::Subscribe { session } => {

@@ -69,13 +69,27 @@ pub fn retired(key: &str) -> bool {
     })
 }
 
+/// The retired keys this file still holds.
+pub fn retired_present(document: &DocumentMut) -> Vec<&'static str> {
+    RETIRED
+        .iter()
+        .copied()
+        .filter(|key| lookup(document, key).is_some())
+        .collect()
+}
+
+fn lookup<'a>(document: &'a DocumentMut, key: &str) -> Option<&'a Item> {
+    key.split('.')
+        .try_fold(document.as_item(), |item, segment| item.get(segment))
+}
+
 /// Read one key, as written in the file.
 pub fn get(document: &DocumentMut, key: &str) -> Result<String, EditError> {
-    let mut item: &Item = document.as_item();
-    for segment in key.split('.') {
-        item = item
-            .get(segment)
-            .ok_or_else(|| EditError::NoSuchKey(key.to_string()))?;
+    let item = lookup(document, key).ok_or_else(|| EditError::NoSuchKey(key.to_string()))?;
+    if retired(key) {
+        return Err(EditError::Retired {
+            key: key.to_string(),
+        });
     }
     match item {
         Item::Value(value) => Ok(render(value)),
@@ -438,10 +452,22 @@ idle_after = "5m"
             get(&d, "window.overlap"),
             Err(EditError::NoSuchKey(_))
         ));
-        assert_eq!(get(&d, "slack.channels").unwrap(), "#eng");
+        assert!(matches!(
+            get(&d, "slack.channels"),
+            Err(EditError::Retired { .. })
+        ));
         let dir = scratch("retired");
         let path = dir.join("config.toml");
         save(&path, &d).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retired_keys_in_the_file_are_named() {
+        let d: DocumentMut = "[status.merged]\nx = 1\n[slack]\nuser_id = \"U1\"\nchannels = []\n"
+            .parse()
+            .unwrap();
+        assert_eq!(retired_present(&d), ["status", "slack.channels"]);
+        assert!(retired_present(&doc()).is_empty());
     }
 }

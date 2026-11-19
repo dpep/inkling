@@ -12,6 +12,8 @@
   parent tables (which broke the `slack.mcp.tools.search` cleanup below with "missing field
   server") or an empty config file; removing a table's last key drops the table, keeping the
   file's opening comment. It says when the key wasn't set, or was retired.
+- **`inkling config` names retired keys** still in your file, with the command that removes each;
+  `config get` on one says it's retired instead of printing its value.
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 
