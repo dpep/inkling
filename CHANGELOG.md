@@ -2,23 +2,30 @@
 
 ## Unreleased
 
-**Upgrading.** Nothing to do. Config keys that only the Slack reactions read — `[window]`,
-`[tracking]`, `[filters]`, `[status]`, `[run]`, `slack.personal`, `slack.channels` — are ignored, so
-an old config keeps loading. A `slackmcp` left in your `BIN_DIR` is no longer updated; delete it.
+**Upgrading.** An old config still loads: keys only the Slack reactions read (`[window]`,
+`[tracking]`, `[filters]`, `[status]`, `[run]`, `slack.personal`, `slack.channels`,
+`slack.mcp.tools.search`) are ignored. `make install` no longer installs `slackmcp`, so delete a
+leftover `~/.claude/bin/slackmcp` (or wherever your `BIN_DIR` points) by hand. If you installed the
+Claude Code plugin from anywhere but `dpep/claude`, uninstall that copy first, or every hook fires
+twice.
 
 ### Changed
 
 - **The Claude Code plugin has a public home.** `/plugin marketplace add dpep/claude`, then
-  `/plugin install inkling@dpep`, gets the four hooks and the inkling skill. If you installed the
-  plugin from anywhere else, uninstall that copy first so its hooks don't run twice.
-- **Install from GitHub with Cargo**: `cargo install --git https://github.com/dpep/inkling`. The
-  README now starts from what you need and how to install, and the design history (`DESIGN.md`,
-  `PLAN.md`, the dogfood log) is gone from the tree; git history keeps it.
+  `/plugin install inkling@dpep`, gets the four hooks and the inkling skill.
+- **Install from GitHub with Cargo**: `cargo install --git https://github.com/dpep/inkling`.
+- **Building needs Rust 1.88 or later**, now declared as `rust-version` in `Cargo.toml`.
+- **`state.json` only caches Slack lookups**: channel name to id, and your own Slack user id. An
+  older file still loads; the rest of it is dropped on the next write.
+- **The docs describe Inkling as it is.** The README starts from requirements and install.
+  `DESIGN.md`, `PLAN.md`, the dogfood log and the Slack-app notes are gone from the tree (git
+  history keeps them); the reasoning that still applies lives in `docs/`.
 
 ### Removed
 
 - **The Slack reactions**: `inkling run`, the `slackmcp` binary, and their config. Hidden and
-  undocumented since 0.3.0; watching a Slack message or channel is unaffected.
+  undocumented since 0.3.0. Watching a Slack message or channel is unaffected.
+- **The `test-support` Cargo feature.** Only the reactions' integration tests used it.
 
 ## 0.3.0 — 2026-11-18
 
