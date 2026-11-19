@@ -13,7 +13,8 @@ twice.
 
 - **The Claude Code plugin has a public home.** `/plugin marketplace add dpep/claude`, then
   `/plugin install inkling@dpep`, gets the four hooks and the inkling skill.
-- **Install from GitHub with Cargo**: `cargo install --git https://github.com/dpep/inkling`.
+- **Published on crates.io as `inkling-dev`**: `cargo install inkling-dev`. The command is still
+  `inkling`; the plain name on crates.io belongs to an unrelated crate.
 - **Building needs Rust 1.88 or later**, now declared as `rust-version` in `Cargo.toml`.
 - **`state.json` only caches Slack lookups**: channel name to id, and your own Slack user id. An
   older file still loads; the rest of it is dropped on the next write.

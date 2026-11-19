@@ -104,18 +104,15 @@ is more surface, not less.
 **Revisit if** Slack reads turn out to be wanted only "when I ask" rather
 than on a schedule.
 
-## Homebrew and crates.io
+## Homebrew
 
-**Deferred, 2026-11-18.** Inkling installs with `cargo install --git`.
+**Deferred, 2026-11-18.** Inkling installs with `cargo install inkling-dev`
+(crates.io's `inkling` is an unrelated Ink markup library, so the package
+carries a suffix and the binary keeps the name). Homebrew needs a tap formula
+pinning a release tarball; nothing stops it now the repository is public, and
+it waits for someone who wants it.
 
-- **Homebrew** needs a tap formula pinning a release tarball. Nothing stops
-  it now the repository is public; it waits for someone who wants it.
-- **crates.io** has an unrelated `inkling` (an Ink markup library).
-  Publishing means a different package name with the binary still called
-  `inkling` — a name is permanent once published, so pick it deliberately,
-  not at release time.
-
-**Revisit when** someone asks for `brew install` or `cargo install inkling-…`.
+**Revisit when** someone asks for `brew install`.
 
 ## Becoming a real Slack app
 

@@ -1,5 +1,5 @@
 [package]
-name = "inkling"
+name = "inkling-dev"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
@@ -9,10 +9,14 @@ repository = "https://github.com/dpep/inkling"
 readme = "README.md"
 keywords = ["github", "jira", "slack", "claude", "notifications"]
 categories = ["command-line-utilities", "development-tools"]
-# The crates.io name belongs to an unrelated crate.
-publish = false
 autobins = false
-include = ["src/**", "tests/**", "README.md", "CHANGELOG.md", "LICENSE*", "Cargo.toml", "Cargo.lock"]
+include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE*", "Cargo.toml", "Cargo.lock"]
+
+# The crates.io name `inkling` belongs to an unrelated crate; the binary and
+# library keep it.
+[lib]
+name = "inkling"
+path = "src/lib.rs"
 
 [[bin]]
 name = "inkling"

@@ -509,7 +509,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "inkling"
+name = "inkling-dev"
 version = "0.3.0"
 dependencies = [
  "chrono",

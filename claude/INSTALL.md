@@ -4,7 +4,7 @@ Inkling runs on macOS and Linux. Install the binary first; everything below
 needs it on `PATH`:
 
 ```sh
-cargo install --git https://github.com/dpep/inkling
+cargo install inkling-dev
 ```
 
 ## The plugin (recommended)
