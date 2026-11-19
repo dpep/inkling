@@ -430,8 +430,6 @@ Everything lives in `~/.local/state/inkling/`:
 - [docs/waiting.md](docs/waiting.md): the design behind `inkling wait`.
 - [docs/watching.md](docs/watching.md): the design behind `watch`, `events`, and push.
 - [docs/deferred.md](docs/deferred.md): what was decided against, and what would change the answer.
-- [docs/dogfood.md](docs/dogfood.md): what using Inkling on its own pull requests has taught us.
-- [DESIGN.md](DESIGN.md) and [PLAN.md](PLAN.md): history. The v1 design, when Inkling annotated Slack messages.
 
 ## Development
 

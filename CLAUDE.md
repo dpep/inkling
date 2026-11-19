@@ -56,4 +56,5 @@ don't wait for a retro.
 - Design reasoning lives in `docs/` (`waiting.md`, `watching.md`, `deferred.md`).
   Read the relevant one before changing its subject; record departures there.
 - Inkling observes; it does not act. No `--then`, no rules, no callbacks
-  (DESIGN §1). Delivering news into a session is the furthest it goes.
+  (docs/watching.md, "Observe, never act"). Delivering news into a session is
+  the furthest it goes.
