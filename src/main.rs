@@ -658,7 +658,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
                 let channel = |handle: &str| slack_channel(handle, &bridge, &store);
                 (references, refused) =
-                    watch_targets(targets, &config.github.hosts, &known, &channel);
+                    watch_targets(targets, "watch", &config.github.hosts, &known, &channel);
                 for problem in &refused {
                     println!("{problem}");
                 }
@@ -758,7 +758,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             let bridge = slack_claude::from_config(&config).map_err(|e| e.to_string())?;
             let channel = |handle: &str| slack_channel(handle, &bridge, &store);
             let (references, refused) =
-                watch_targets(targets, &config.github.hosts, &known, &channel);
+                watch_targets(targets, "unwatch", &config.github.hosts, &known, &channel);
             for problem in &refused {
                 println!("{problem}");
             }
@@ -1102,6 +1102,33 @@ fn resolve(
     number: u64,
     known: &[inkling::domain::model::Reference],
 ) -> Result<inkling::domain::model::Reference, String> {
+    let mut matches = matching(owner, repo, number, known);
+
+    let given = match (owner, repo) {
+        (Some(o), Some(r)) => format!("{o}/{r}#{number}"),
+        (_, Some(r)) => format!("{r}#{number}"),
+        _ => format!("#{number}"),
+    };
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!(
+            "{given}: nothing watched matches it — give the full reference, \
+             e.g. github.com/owner/repo#{number}"
+        )),
+        _ => {
+            let names: Vec<String> = matches.iter().map(ToString::to_string).collect();
+            Err(format!("{given} is ambiguous: {}", names.join(", ")))
+        }
+    }
+}
+
+/// The watched pull requests a reference, short or full, could mean.
+fn matching(
+    owner: &Option<String>,
+    repo: &Option<String>,
+    number: u64,
+    known: &[inkling::domain::model::Reference],
+) -> Vec<inkling::domain::model::Reference> {
     use inkling::domain::model::Reference::GitHubPullRequest;
 
     let mut matches: Vec<_> = known
@@ -1130,23 +1157,7 @@ fn resolve(
         .collect();
     matches.sort();
     matches.dedup();
-
-    let given = match (owner, repo) {
-        (Some(o), Some(r)) => format!("{o}/{r}#{number}"),
-        (_, Some(r)) => format!("{r}#{number}"),
-        _ => format!("#{number}"),
-    };
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(format!(
-            "{given}: nothing watched matches it — give the full reference, \
-             e.g. github.com/owner/repo#{number}"
-        )),
-        _ => {
-            let names: Vec<String> = matches.iter().map(ToString::to_string).collect();
-            Err(format!("{given} is ambiguous: {}", names.join(", ")))
-        }
-    }
+    matches
 }
 
 /// clap needs an owned error; `Until`'s own is already one.
@@ -1164,8 +1175,14 @@ fn wait_targets(
     known: &[inkling::domain::model::Reference],
 ) -> Result<Vec<inkling::domain::model::Reference>, String> {
     let (channels, references) = classify(targets, hosts, known)?;
-    if let Some(channel) = channels.first() {
-        return Err(format!("{channel}: wait takes pull requests, not channels"));
+    if let Some(word) = channels.first() {
+        if word.starts_with('#') || slack_claude::looks_like_channel_id(word) {
+            return Err(format!("{word}: wait takes pull requests, not channels"));
+        }
+        return Err(format!(
+            "{word}: not a pull request — wait takes a URL, owner/repo#12, \
+             or a shorter form matching something watched"
+        ));
     }
     // A Jira issue has no merge ladder to threshold against, so `--until`
     // could say nothing about one. Watching it is the answer that exists.
@@ -1981,6 +1998,7 @@ fn watch_store(common: &Common) -> inkling::adapters::watches_json::WatchStore {
 /// reported, and still change the exit code.
 fn watch_targets(
     targets: &[String],
+    verb: &str,
     hosts: &[String],
     known: &[inkling::domain::model::Reference],
     channel: &dyn Fn(&str) -> Result<inkling::domain::model::Reference, String>,
@@ -1988,7 +2006,7 @@ fn watch_targets(
     let mut references = Vec::new();
     let mut refused = Vec::new();
     for target in targets {
-        match watch_target(target, hosts, known, channel) {
+        match watch_target(target, verb, hosts, known, channel) {
             Ok(reference) => references.push(reference),
             Err(problem) => refused.push(problem),
         }
@@ -2001,8 +2019,10 @@ fn watch_targets(
 /// Its own function rather than `classify` only because the answer is one
 /// reference and a channel is resolved; the rule that completes a short
 /// reference is `complete`, shared with every other command.
+/// `verb` is the command asking — `watch` or `unwatch` — for its refusals.
 fn watch_target(
     target: &str,
+    verb: &str,
     hosts: &[String],
     known: &[inkling::domain::model::Reference],
     channel: &dyn Fn(&str) -> Result<inkling::domain::model::Reference, String>,
@@ -2021,11 +2041,19 @@ fn watch_target(
             channel(&handle)
         }
         Target::Channel(word) => Err(format!(
-            "{word}: watch takes pull requests, Jira issues, Slack messages and \
+            "{word}: {verb} takes pull requests, Jira issues, Slack messages and \
              Slack channels — a channel is #name, its id, or its link"
         )),
         Target::Reference(Reference::SlackChannel { channel: id, .. }) => channel(&id),
         Target::Reference(reference) => Ok(reference),
+        // What isn't watched can't be unwatched, however fully it's named.
+        Target::Partial {
+            owner,
+            repo,
+            number,
+        } if verb == "unwatch" && matching(&owner, &repo, number, known).is_empty() => {
+            Err(format!("{target}: you aren't watching that"))
+        }
         Target::Partial {
             owner,
             repo,
@@ -3047,7 +3075,7 @@ mod tests {
         vec![
             (
                 "watch",
-                watch_target(target, &hosts(), known, &named).map(|r| r.to_string()),
+                watch_target(target, "watch", &hosts(), known, &named).map(|r| r.to_string()),
             ),
             ("wait", wait_targets(&one, &hosts(), known).map(names)),
             (
@@ -3181,7 +3209,7 @@ mod tests {
         // Regression: a typo in the second argument cost the watch
         // on the first one, which was the whole reason for running it.
         let targets = ["dpep/inkling#3".to_string(), "42".to_string()];
-        let (references, refused) = watch_targets(&targets, &hosts(), &[], &named);
+        let (references, refused) = watch_targets(&targets, "watch", &hosts(), &[], &named);
 
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].to_string(), "github.com/dpep/inkling#3");
@@ -3487,7 +3515,7 @@ mod tests {
     fn a_slack_message_can_be_watched_but_not_waited_on() {
         let permalink = "https://acme.slack.com/archives/C0123ABCD/p1786596050245879";
         assert_eq!(
-            watch_target(permalink, &hosts(), &[], &named),
+            watch_target(permalink, "watch", &hosts(), &[], &named),
             Ok(slack_message("C0123ABCD", "1786596050.245879"))
         );
         let error = wait_targets(&[permalink.to_string()], &hosts(), &[]).unwrap_err();
@@ -3520,17 +3548,37 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                watch_target(target, &hosts(), &[], &named).map(|r| r.to_string()),
+                watch_target(target, "watch", &hosts(), &[], &named).map(|r| r.to_string()),
                 Ok(watched.to_string()),
                 "{target}"
             );
         }
-        let error = watch_target("eng", &hosts(), &[], &named).unwrap_err();
+        let error = watch_target("eng", "watch", &hosts(), &[], &named).unwrap_err();
         assert!(error.contains("#name"), "a bare word is a typo: {error}");
         for target in ["#eng", "https://acme.slack.com/archives/C0123ABCD"] {
             let error = wait_targets(&[target.to_string()], &hosts(), &[]).unwrap_err();
             assert!(error.contains("not channels"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_refusal_names_the_command_and_the_real_reason() {
+        let error = watch_target("zzz", "unwatch", &hosts(), &[], &named).unwrap_err();
+        assert!(error.contains("zzz: unwatch takes"), "{error}");
+
+        // Not a channel, so don't call it one.
+        let error = wait_targets(&["nonsense".to_string()], &hosts(), &[]).unwrap_err();
+        assert!(error.contains("nonsense: not a pull request"), "{error}");
+        assert!(!error.contains("channel"), "{error}");
+
+        // Nothing matches because nothing is watched: a fuller reference
+        // wouldn't help.
+        for target in ["42", "inkling#42", "dpep/inkling#42"] {
+            let error = watch_target(target, "unwatch", &hosts(), &[], &named).unwrap_err();
+            assert!(error.contains("you aren't watching that"), "{error}");
+        }
+        let error = watch_target("42", "watch", &hosts(), &[], &named).unwrap_err();
+        assert!(error.contains("give the full reference"), "{error}");
     }
 
     #[test]
@@ -3638,8 +3686,14 @@ mod tests {
             ts: "1786596050.245879".into(),
             thread: None,
         };
-        let pull = super::watch_target("dpep/inkling#3", &hosts(), &[], &|_: &str| unreachable!())
-            .unwrap();
+        let pull = super::watch_target(
+            "dpep/inkling#3",
+            "watch",
+            &hosts(),
+            &[],
+            &|_: &str| unreachable!(),
+        )
+        .unwrap();
         let now = chrono::Utc::now();
         store
             .update(now, |w| {

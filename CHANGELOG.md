@@ -15,6 +15,9 @@
 - **`inkling config` names retired keys** still in your file, with the command that removes each;
   `config get` on one says it's retired instead of printing its value.
 - **`inkling config` shows every file in use**, `watches.json` and `waits.json` included.
+- **Refusals name the right command and reason.** `unwatch zzz` no longer says "watch takes…";
+  `wait nonsense` says it isn't a pull request rather than calling it a channel; `unwatch 42` for
+  something not watched says so instead of asking for a fuller reference.
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 
