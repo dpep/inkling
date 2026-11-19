@@ -13,8 +13,8 @@ as one line, mid-turn, without anyone asking:
 inkling: github.com/dpep/inkling#7 | checks pending → failure: test / build (job 106193645679)
 ```
 
-You rarely ask for any of it. Hooks watch whatever the session touches: the pull request it
-opened, the branch it pushed, the Slack message it posted.
+You don't have to say what to watch, either. Hooks pick up whatever the session touches: the pull
+request it opened, the branch it pushed, the Slack message it posted.
 
 It works just as well for a script or a person at a terminal: `wait` blocks until a pull request
 gets somewhere, and `watch` plus `events` lets you check back later.
