@@ -89,7 +89,7 @@ without infecting state that has to survive. The cost is a second source of
 truth about "current state of a PR", accepted because a wait genuinely wants
 different freshness: someone is blocked *right now*.
 
-What would change my mind: if waits become numerous, hours-long, and
+What would change this: if waits become numerous, hours-long, and
 machine-spawned, N sleeping processes plus a lease dance starts to look like
 a worse daemon, and an actual daemon (or a push-driven design where webhooks
 replace polling entirely) becomes right. The

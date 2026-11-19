@@ -1,12 +1,13 @@
 # Watching
 
-Status: built. Shorter than [waiting.md](waiting.md) on purpose — that
-document argued a concurrency model from scratch, and this one reuses it.
+Status: built. The design behind `watch`, `events`, push and the hooks, with
+the measurements behind each decision. It reuses the concurrency model
+[waiting.md](waiting.md) argued, so read that first if you're new.
 
 `inkling watch <ref>` registers interest and returns. `inkling events` prints
-what has moved since it last looked, and nothing at all when nothing has. The
-consumer this is shaped for is a Claude Code `UserPromptSubmit` hook running
-`inkling events --subscriber <session-id>` on every prompt.
+what has moved since it last looked, and nothing at all when nothing has. A
+subscribed Claude Code session has each transition pushed into it instead,
+mid-turn; the `UserPromptSubmit` hook pulls whatever the push didn't deliver.
 
 ## Observe, never act
 
@@ -103,7 +104,7 @@ What it costs, plainly:
   `success` forever. Nobody is waiting for that news and the watch expires
   within three days.
 - **`success → pending` after a push is still a message.** A push *is* a
-  re-run, and the brief for `wait --until checks` is that a re-run is
+  re-run, and `wait --until checks` already treats a re-run as
   legitimate news, so it stays. Telling a push-triggered run apart from a
   manual one needs the head commit in `Standing`, which is a third axis to
   keep and diff for one line of output.
@@ -144,12 +145,12 @@ rollup to be final would have held back news that was already actionable by
 2.5 to 4 minutes on a toy run — a real test suite makes that its own length —
 and a warning that logs may not be ready would have been false.
 
-**What was built: the push names the command that works now.** When the red
-check is an Actions job, the line ends in `gh api --hostname <host>
-repos/<owner>/<repo>/actions/jobs/<id>/logs` instead of `gh pr checks`. (Since
-2026-11-18 the push says only `(job <id>)` and the skill holds the command; see
-[The line carries facts, not commands](#the-line-carries-facts-not-commands).
-`inkling events` still spells it out.) An
+**What was built: the line names the job, whose log works now.** When the
+red check is an Actions job, the push ends in `(job <id>)`, and `inkling
+events` ends in `gh api --hostname <host>
+repos/<owner>/<repo>/actions/jobs/<id>/logs` instead of `gh pr checks` (the
+skill holds the same command; see [The line carries facts, not
+commands](#the-line-carries-facts-not-commands)). An
 Actions check run's id is its job's id, so this is two more fields in the
 existing query (`databaseId`, and the check suite's app) — measured at one
 rate-limit point for a three-reference batch with or without them. It is
@@ -281,8 +282,9 @@ again, in a new place. They share `Reference`, `State`, `CheckState`,
 
 ## Who polls
 
-No daemon, for waiting.md's reasons. The poll step is **one function** —
-`watch::Poller::poll` — that any caller may invoke; nothing owns it. It reads
+No daemon to manage, for waiting.md's reasons: the resident server below
+starts and stops itself, and owns nothing. The poll step is **one function**
+— `watch::Poller::poll` — that any caller may invoke. It reads
 the watches that are due by [the schedule](#how-often-a-watch-is-read); the
 resident server calls it when one comes due, and `events` calls it under a
 non-blocking lock so concurrent hooks don't stampede. A shared short-lived
@@ -311,8 +313,8 @@ case either way:
 
 The fresh path is the one a hook runs on nearly every prompt, and 7ms is
 free. The polling path is one GitHub round trip — its cost is GitHub's, not
-ours — but 2.2s is not a price to pay per session, and that is the argument
-for a poller outside the session paying it once for everyone.
+ours — but 2.2s is not a price to pay per session, and that is why the
+resident server pays it once for everyone.
 
 `poll` itself takes **no** lock. Correctness belongs to the store: `record`
 runs inside the data lock and compares against the baseline it finds there,
@@ -430,8 +432,7 @@ baseline, `departed`, `tried_at`, `own`).
 - **Version 2 is everything up to the first release with this rule:** channel
   watches, comment counts, `departed`, `tried_at`, per-reader `receipts`,
   `receipt_for`, `lines`, `after`, and watches keyed by `Reference::key`
-  (older keys are rekeyed on read). The tripwire caught the last four landing
-  from two other lanes while this rule was being merged.
+  (older keys are rekeyed on read).
 - **Version 3 adds `misses`** (see "A conversation never finishes") and
   `unsubscribed`; a version 2 file reads as having missed nothing and nobody
   muted.
@@ -503,7 +504,7 @@ so a departed session is noticed when a watch is next due or at `SessionEnd`,
 rather than within 15s; and `wait` keeps its own interval — it is a
 foreground loop somebody is waiting on, and is not counted in `status`.
 
-## Where this departed from the brief
+## Smaller decisions
 
 - **`watch` reads its targets immediately** rather than purely registering and
   returning. It is one batched query, a few hundred milliseconds. Without it
@@ -514,11 +515,10 @@ foreground loop somebody is waiting on, and is not counted in `status`.
 - **`--json` emits an array, not `{cursor, events}`.** The cursor is the last
   event's `seq`, so a wrapper would be a second copy of a number already in
   the rows. Nothing changed means nothing printed, in every format.
-- **Events were global, not per-subscriber.** ~~A watch records no owner, so
-  every subscriber sees every transition.~~ Reversed. It was listed as the
-  first thing to revisit, and push is what made it wrong: a transition
-  arriving in a prompt is ignorable, and one arriving *inside a turn* in a
-  session that can't act on it is not. Watches now carry owners.
+- **Events are per reader, not global.** The first version recorded no
+  owner, so every subscriber saw every transition. Push made that wrong: a
+  transition arriving in a prompt is ignorable, and one arriving *inside a
+  turn* in a session that can't act on it is not. Watches carry owners.
 - **Bare `inkling events` reads your own stream, not the whole log.** It used
   to mean `--since 0`. With every read naming a reader, the reader you get
   when you don't say is the session you are in, or `cli` at a terminal — so
@@ -543,8 +543,8 @@ foreground loop somebody is waiting on, and is not counted in `status`.
 
 ## Push delivery, and who pays for it
 
-Built. The three things the first version of this document said had to be
-settled first, and what each one settled as:
+Three questions had to be settled before push could be built. How each one
+settled:
 
 - **A socket path outlives the session that exported it**, so a stored
   address needs a liveness answer. It gets two. The address is pinned to the
@@ -597,8 +597,8 @@ considered and rejected:
 - **The hook can't name the pull request for the usual spelling.** Measured on
   the scratch probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
   runs it: `gh pr merge 3 --repo …` prints **nothing** and exits 0, and `gh pr
-  ready 3` prints `✓ Pull request dpep/inkling-ci-probe#3 is marked as "ready
-  for review"`, which is not a URL. `post-tool` reads references only from
+  ready 3` prints `✓ Pull request owner/repo#3 is marked as "ready for
+  review"`, which is not a URL. `post-tool` reads references only from
   URLs, so it would recognise a self-merge only when the session happened to
   paste one. A suppression that fires depending on how a command was spelled
   is one nobody can predict; making it reliable is the look-it-up lookup under
@@ -618,21 +618,19 @@ considered and rejected:
   parent's session id, so a merge a subagent ran would be withheld from a
   parent that may not know it happened.
 
-`gh pr merge` does not return early, contrary to what this document used to
-say: the second `merge` in the measurement above answered `already merged`.
+(`gh pr merge` does not return early: the second `merge` in the measurement
+above answered `already merged`.)
 
-**Who did it is now said, and still decides nothing.** Since 2026-10-06 a
-state transition names whoever caused the state it ended in: `draft → merged
-by @dpep`, `open → approved by @alice and review-bot (bot)`. Only the end state:
-naming who readied a PR on its way to merged answered a question nobody asked.
-The actors come from `mergedBy`, each reviewer's latest review and the last
-ready/draft toggle — free in the same query, measured at one rate-limit point
-either way. A reader
-asked, of a collapsed `draft → approved`, whether their own tooling had moved
-it. The actor is GitHub's login, so a session and its person both read as
-`@dpep`; that is why it informs the reader rather than gating a push, and the
-reasons above stand.
-The confirmation argument was wrong; the decision survives without it.
+**Who did it is said, and still decides nothing.** A state transition names
+whoever caused the state it ended in: `draft → merged by @dpep`, `open →
+approved by @alice and review-bot (bot)`. Only the end state: naming who
+readied a PR on its way to merged answers a question nobody asked. The actors
+come from `mergedBy`, each reviewer's latest review and the last ready/draft
+toggle — free in the same query, measured at one rate-limit point either way.
+It was added because a reader asked, of a collapsed `draft → approved`,
+whether their own tooling had moved it. The actor is GitHub's login, so a
+session and its person both read as `@dpep`; that is why it informs the
+reader rather than gating a push, and the reasons above stand.
 
 What would change this: real use still showing sessions told about
 their own actions once the start rule is in — `gh pr close`, say, or a
@@ -647,8 +645,8 @@ transition never appears at its next prompt. It is not lost: it is in the log
 for 72 hours, addressed to that reader, and `events --since <owner>:<seq>`
 returns it.
 
-The alternative was argued by the socket adapter's author: success must not
-advance, and pull stays the only thing that moves a cursor. That spends the
+The alternative: success must not advance, and pull stays the only thing
+that moves a cursor. That spends the
 feed's one promise — each transition once — on every transition, to cover a
 case that only arises in some session configurations. A separate
 pushed-through mark, so pull could still show but label what was pushed, was
@@ -767,7 +765,7 @@ session posts. So a closed session kept paying for news nobody could hear.
 
 ## The line carries facts, not commands
 
-Changed 2026-11-18, at the user's request. Each pushed line used to end in the
+Changed 2026-11-18. Each pushed line used to end in the
 full command that reads it — `(gh pr view 42 --repo github.com/you/repo
 --comments)`, `(slack_read_thread channel_id=… message_ts=…; slack_read_channel
 …)` — often longer than the news. Most of it is a template the reference
@@ -1264,8 +1262,7 @@ at its last event, as before.
 
 ## Slack channels
 
-Built 2026-11-17, at the user's request: *tell me when anything new is posted
-in #incidents.* The earlier objection — a channel is a stream, and any filter
+Built 2026-11-17, for *tell me when anything new is posted in #incidents.* The earlier objection — a channel is a stream, and any filter
 is a guess — is answered by not filtering: every new top-level message is the
 news, and the person who asked for it decides it is worth hearing. That is
 also why it is explicit only: `inkling watch '#incidents'`, `inkling watch
@@ -1384,17 +1381,17 @@ and posting to make one was off limits.
 
 ## Known gap: the Jira fixtures
 
-`acli` 1.3.19 on the development machine could not create, read or search
-anything in the sandbox project — `workitem create` was refused for permissions, `workitem
-view` reported the issue invisible, and every JQL search failed to parse.
-Upgrading needs a Homebrew tap trusted first, which was not done unasked.
+The `acli` (1.3.19) available while this was built could not create, read
+or search anything in a sandbox project: `workitem create` was refused for
+permissions, `workitem view` reported the issue invisible, and every JQL
+search failed to parse.
 
 So the **refusal** fixture is recorded from the live binary — exit 1, empty
 stdout, `✗ Error: Issue does not exist or you do not have permission to see
 it.` on stderr — and the **success** fixtures are built from Jira's
 documented REST issue resource. The house rule is that fixtures invented
 ahead of a real transcript are hopes, not fixtures; that rule is being bent
-here, and the first real `inkling watch AI-123` is the test. The parser
+here, and the first real `inkling watch` of a Jira issue is the test. The parser
 branches on the first character rather than trying one shape and falling back
 (serde reads a struct from a JSON array positionally, so a list "parses" into
 an issue with every field defaulted), and unrecognized output is reported
@@ -1468,7 +1465,7 @@ message**. The feed is complete either way — every transition is in the log fo
 72 hours addressed to its readers — so the next prompt, or the server's next
 tick, picks up what this one didn't.
 
-The daemon's tick is bounded but not short: one `acli` per watched issue at 5s
+The server's tick is bounded but not short: one `acli` per watched issue at 5s
 each, a GitHub request at 30s, and delivery at up to 6s per attached session.
 Measured with a hung `acli`: ticks every 5.01s, `longest_tick_ms=5016`, still
 serving. Nothing a session waits on is inside that — delivery happens between
@@ -1484,7 +1481,7 @@ Two things are deliberately left:
   errors now reach the log the reason is one `inkling logs` away. Backoff needs
   state that a doomed child never gets to write, which is more machinery than
   the fault is worth.
-- **Deleting `serve.lock` lets two daemons run at once**, each pushing. The push
+- **Deleting `serve.lock` lets two servers run at once**, each pushing. The push
   budget is what bounds the damage; a lock generation number would prevent it,
   and nothing has ever deleted that file except a person.
 
@@ -1523,9 +1520,9 @@ pair disagrees says where it went:
   watched things move slower than a 72h TTL and the feature is answering a
   question nobody has. Count events per watch registered.
 - **`why="events"` dominates and `elapsed_ms` is large.** The hook is paying
-  for the poll on the prompt path. That is the case for the shared poller,
-  and `elapsed_ms` is the number that makes it — already ~1.65s at 14
-  references, against 7ms for a prompt that finds the readings fresh.
+  for the poll on the prompt path, so the resident server isn't running when
+  it should be. `elapsed_ms` is what that costs — ~1.65s at 14 references,
+  against 7ms for a prompt that finds the readings fresh.
 - **`failures` is routinely non-zero.** Either credentials are wrong or watches
   outlive what they point at. The `reference` on the warning says which.
 - **`cursor_before == cursor_after` every time**, across many sessions: nobody
@@ -1533,7 +1530,7 @@ pair disagrees says where it went:
   stored cursor is machinery without a user.
 - **`returned` is often greater than one.** Several transitions arriving in a
   single prompt means the refresh interval is coarser than the thing being
-  watched moves — argues for a shorter default, or for push.
+  watched moves, or the session isn't subscribed.
 - **`read < watched` persistently for Jira.** N subprocesses per poll is
   failing some of the time, and batching stops being optional.
 - **`pushed … outcome="written"` is high and `events read` is always 0.**
