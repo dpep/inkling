@@ -1054,7 +1054,7 @@ mod tests {
 
     #[test]
     fn a_build_installed_during_a_nap_takes_over_before_another_tick() {
-        // Found by the hunt: the old server woke, ticked with the old code
+        // Regression: the old server woke, ticked with the old code
         // against a store the new build had already written, and only then
         // looked at its executable.
         let scratch = Scratch::new("installed-napping");
@@ -1455,7 +1455,7 @@ mod tests {
 
     #[test]
     fn a_server_records_itself_before_its_first_tick() {
-        // Found by dogfooding: `inkling status` straight after the `watch` that
+        // Regression: `inkling status` straight after the `watch` that
         // spawned a server said `serving no`. A tick can take a second, and the
         // claim on the lock is news before then.
         let scratch = Scratch::new("claims");

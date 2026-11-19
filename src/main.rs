@@ -1010,8 +1010,8 @@ fn known(
 /// shorter than that — `repo#N`, `#N`, `N` — need a watch, where a short
 /// form genuinely selects among what is watched.
 ///
-/// A rule per command is what dogfooding caught: `watch` learned the first
-/// half and `wait` did not, and both suites stayed green.
+/// One rule for every command: with a rule per command, `watch` learned the
+/// first half and `wait` did not, and both suites stayed green.
 fn complete(
     owner: Option<String>,
     repo: Option<String>,
@@ -2686,7 +2686,7 @@ mod tests {
 
     #[test]
     fn only_a_return_to_the_session_undoes_an_unsubscribe() {
-        // Found by the hunt: a compaction's SessionStart re-attached it.
+        // Regression: a compaction's SessionStart re-attached it.
         // A /clear needs no rule: Claude Code gives it a new session id.
         assert!(super::unmutes_at_start("startup"));
         assert!(super::unmutes_at_start("resume"));
@@ -2699,7 +2699,7 @@ mod tests {
 
     #[test]
     fn the_prompt_hook_leaves_refreshing_to_a_running_server() {
-        // Found by the hunt: a refresh abandoned at its budget left `acli`
+        // Regression: a refresh abandoned at its budget left `acli`
         // children running, four more on every prompt.
         let dir = std::env::temp_dir().join(format!("inkling-prompt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2725,7 +2725,7 @@ mod tests {
             .unwrap();
         ticked(serve.interval);
         assert!(!super::refreshes_at_prompt(&serve, &watches, now, floor));
-        // Found by the hunt: a server winding down holds the lock but no
+        // Regression: a server winding down holds the lock but no
         // longer ticks, and the prompt went quiet with it.
         ticked(serve.interval * 3);
         assert!(
@@ -2889,9 +2889,8 @@ mod tests {
 
     /// One argument, put through every command that takes a reference.
     ///
-    /// The level the dogfood finding was at: each command was tested against
-    /// its own idea of what a reference is, so `watch` learning a form and
-    /// `wait` not learning it looked green both times.
+    /// Runs a target through every command, so one learning a form the others
+    /// don't fails here rather than passing in each command's own suite.
     fn each_command(
         target: &str,
         known: &[inkling::domain::model::Reference],
@@ -2963,8 +2962,8 @@ mod tests {
 
     #[test]
     fn every_command_accepts_the_same_reference() {
-        // Found by dogfooding: `watch dpep/inkling#7` was accepted seconds
-        // before `wait dpep/inkling#7` was refused. `owner/repo#N` names a
+        // Regression: `watch dpep/inkling#7` was accepted and
+        // `wait dpep/inkling#7` refused. `owner/repo#N` names a
         // pull request completely once the host defaults, and which command
         // you are running has nothing to do with it.
         for target in [
@@ -3018,7 +3017,7 @@ mod tests {
 
     #[test]
     fn a_shorter_form_selects_what_is_already_watched() {
-        // Found by dogfooding: short forms once matched only what the Slack
+        // Regression: short forms once matched only what the Slack
         // reactions tracked, so `wait 3` never worked.
         let now = chrono::Utc::now();
         let mut watches = Watches::default();
@@ -3038,7 +3037,7 @@ mod tests {
 
     #[test]
     fn one_unresolvable_reference_does_not_stop_the_others() {
-        // Found by dogfooding: a typo in the second argument cost the watch
+        // Regression: a typo in the second argument cost the watch
         // on the first one, which was the whole reason for running it.
         let targets = ["dpep/inkling#3".to_string(), "42".to_string()];
         let (references, refused) = watch_targets(&targets, &hosts(), &[], &named);
@@ -3079,7 +3078,7 @@ mod tests {
 
     #[test]
     fn watching_one_thing_reports_only_on_that_thing() {
-        // Found by dogfooding: watching a new pull request printed "already
+        // Regression: watching a new pull request printed "already
         // merged — nothing left to watch" for two older ones the same poll
         // happened to finish. One poll reads every live watch, so it does
         // somebody else's housekeeping too; the log already says so.
@@ -3111,7 +3110,7 @@ mod tests {
 
     #[test]
     fn a_watch_missing_at_its_first_reading_is_a_typo_not_a_wait() {
-        // Found by the hunt: a mistyped pull request was reported unreadable
+        // Regression: a mistyped pull request was reported unreadable
         // and kept, to end as `gone` a few polls later.
         let now = chrono::Utc::now();
         let mut watches = Watches::default();

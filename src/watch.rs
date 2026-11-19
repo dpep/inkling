@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn github_news_is_recorded_and_pushed_before_the_slack_reads_begin() {
-        // Found by the hunt: a red PR sat in memory for a minute or more
+        // Regression: a red PR sat in memory for a minute or more
         // while the same poll waited on `claude -p` for a Slack message.
         use crate::serve::Work;
         let h = Harness::new("quick-first");
@@ -1202,7 +1202,7 @@ mod tests {
 
     #[test]
     fn a_slack_read_is_claimed_before_it_is_paid_for() {
-        // Found by the hunt: `tried_at` was stamped after the read, so a
+        // Regression: `tried_at` was stamped after the read, so a
         // second poller during a minute-long read paid for it again.
         let h = Harness::new("claimed");
         h.slack.replied(&slack(), &[]);
@@ -1238,7 +1238,7 @@ mod tests {
 
     #[test]
     fn each_slack_reading_is_recorded_as_it_lands_and_stamped_when_it_was_read() {
-        // Found by the hunt: every reading waited for the last read of the
+        // Regression: every reading waited for the last read of the
         // poll, and was stamped with the time the first one began.
         let h = Harness::new("per-read");
         h.slack.replied(&slack(), &[]);

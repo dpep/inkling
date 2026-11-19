@@ -1443,7 +1443,7 @@ mod tests {
 
     #[test]
     fn a_draft_marked_ready_waits_for_the_next_prompt() {
-        // Dogfooded on #14: `gh pr ready` woke the session that ran it. Out of
+        // Regression: `gh pr ready` woke the session that ran it. Out of
         // draft is a start, like a suite starting; review is what follows.
         let mut watches = drafted();
         moved(&mut watches, State::Open);

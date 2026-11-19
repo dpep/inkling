@@ -1453,7 +1453,7 @@ mod tests {
 
     #[test]
     fn a_push_costs_a_session_two_events_rather_than_three() {
-        // The dogfood finding, at the level a session felt it: pushing a commit
+        // The same gap, at the level a session sees it: pushing a commit
         // put `checks success → none` and `none → pending` in the turn before
         // the `pending → success` that was the news. What is left is what a
         // poll that never saw the gap would have reported.
@@ -2015,7 +2015,7 @@ mod tests {
 
     #[test]
     fn a_reader_nothing_can_reach_has_nothing_to_report() {
-        // The leftover dogfooding found in `inkling status`: detached, watching
+        // A leftover that cluttered `inkling status`: detached, watching
         // nothing, owed nothing. Its cursor is kept for a week in case the
         // session comes back, but it is a row that says nothing every time.
         let mut watches = Watches::default();
@@ -2537,9 +2537,9 @@ mod tests {
 
     #[test]
     fn a_session_that_ends_after_watching_again_still_pauses() {
-        // Found by the hunt: watching cleared the departure without an
+        // Regression: watching cleared the departure without an
         // address to show for it, so the real SessionEnd found nothing to
-        // detach and the watch was read, at 2¢ a time, until its deadline.
+        // detach and the watch was read, at a cost, until its deadline.
         let mut watches = watching(State::Open);
         ended(&mut watches, "s-1");
         watches.watch(&pr(3), "s-1", forever(), now());
@@ -2608,7 +2608,7 @@ mod tests {
 
     #[test]
     fn unsubscribing_mutes_and_nothing_else() {
-        // Found by the hunt: unsubscribe dropped the address, so a session
+        // Regression: unsubscribe dropped the address, so a session
         // that died afterwards was never probed and its watches never paused.
         let mut watches = watching(State::Open);
         watches.attach("s-1", address("/tmp/s"), now());
@@ -2644,7 +2644,7 @@ mod tests {
     fn unsubscribing_a_session_taken_for_ended_mutes_it_and_leaves_it_paused() {
         // A probe can take a live session for gone; its unsubscribe must
         // still hold when its next hook attaches it again. An ended session's
-        // watches stay paused (a hunt found them un-paused).
+        // watches stay paused (a regression un-paused them).
         let mut watches = watching(State::Open);
         watches.attach("s-1", address("/tmp/s"), now());
         watches.detach("s-1");
@@ -2677,7 +2677,7 @@ mod tests {
 
     #[test]
     fn a_reader_quiet_for_a_week_keeps_what_it_is_still_owed() {
-        // Found by the hunt: a `--ttl 30d` watch, nobody asking for eight
+        // Regression: a `--ttl 30d` watch, nobody asking for eight
         // days, then a transition an hour old was dropped with its reader.
         let mut watches = Watches::default();
         watches.watch(&pr(3), "s-1", now() + TimeDelta::days(30), now());
