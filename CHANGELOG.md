@@ -21,6 +21,9 @@
 - **Help text:** `wait --help` lists every `--until` value (`draft`, `open`, `approved`, `merged`
   as well as `changed`, `done`, `checks`); `unsubscribe` no longer contradicts itself about
   detaching.
+- **The log never quotes a Slack reply.** A malformed bridge reply is logged by its length and
+  where its shape went wrong; before, the warning carried up to 120 characters of it, which could be
+  what somebody wrote.
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 

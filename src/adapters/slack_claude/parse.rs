@@ -69,7 +69,7 @@ pub const REAL_EMPTY_CHANNEL: &str = r#"{"channel": [], "more": false}"#;
 pub fn parse_channel_read(raw: &str) -> Result<ChannelRead, String> {
     let json = extract_json(raw)?;
     let read: ChannelRead =
-        serde_json::from_str(&json).map_err(|e| format!("channel response: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| unexpected("channel response", &e))?;
     Ok(ChannelRead {
         channel: sane(read.channel),
         ..read
@@ -159,7 +159,7 @@ pub const REAL_DM_ACTIVITY: &str = r#"{"messages": [{"ts": "1794976101.418449", 
 pub fn parse_activity(raw: &str) -> Result<Activity, String> {
     let json = extract_json(raw)?;
     let read: Activity =
-        serde_json::from_str(&json).map_err(|e| format!("thread response: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| unexpected("thread response", &e))?;
     Ok(Activity {
         thread: sane(read.thread),
         channel: read.channel.map(sane),
@@ -178,7 +178,7 @@ pub struct Identity {
 
 pub fn parse_identity(raw: &str) -> Result<Identity, String> {
     let json = extract_json(raw)?;
-    serde_json::from_str(&json).map_err(|e| format!("profile response: {e}"))
+    serde_json::from_str(&json).map_err(|e| unexpected("profile response", &e))
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,7 +191,7 @@ struct ChannelResponse {
 pub fn parse_channel_id(raw: &str) -> Result<Option<String>, String> {
     let json = extract_json(raw)?;
     let response: ChannelResponse =
-        serde_json::from_str(&json).map_err(|e| format!("channel response: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| unexpected("channel response", &e))?;
     Ok(response.id.filter(|id| !id.is_empty()))
 }
 
@@ -206,7 +206,7 @@ fn extract_json(raw: &str) -> Result<String, String> {
 
     let start = trimmed
         .find('{')
-        .ok_or_else(|| format!("no JSON object in bridge output: {}", preview(trimmed)))?;
+        .ok_or_else(|| format!("no JSON object in bridge output ({})", size(trimmed)))?;
 
     let mut depth = 0usize;
     let mut in_string = false;
@@ -236,16 +236,27 @@ fn extract_json(raw: &str) -> Result<String, String> {
     // Unbalanced braces mean the reply was cut off. Reporting that beats
     // returning an empty list, which would read as "nothing to do".
     Err(format!(
-        "truncated JSON in bridge output: {}",
-        preview(trimmed)
+        "truncated JSON in bridge output ({})",
+        size(trimmed)
     ))
 }
 
-fn preview(s: &str) -> String {
-    let cleaned = s.replace('\n', " ");
-    match cleaned.char_indices().nth(120) {
-        Some((cut, _)) => format!("{}…", &cleaned[..cut]),
-        None => cleaned,
+/// The reply's length and nothing of its text: errors are logged, and the
+/// text may be what somebody wrote in Slack.
+fn size(s: &str) -> String {
+    format!("{} chars", s.chars().count())
+}
+
+/// A reply of the wrong shape, for the same reason: serde quotes the value it
+/// didn't expect.
+fn unexpected(what: &str, error: &serde_json::Error) -> String {
+    match error.classify() {
+        serde_json::error::Category::Data => format!(
+            "{what}: wrong shape at line {} column {}",
+            error.line(),
+            error.column()
+        ),
+        _ => format!("{what}: {error}"),
     }
 }
 
@@ -278,6 +289,18 @@ mod tests {
     fn prose_instead_of_json_is_an_error() {
         let error = parse_channel_read("I could not find any messages.").unwrap_err();
         assert!(error.contains("no JSON object"), "{error}");
+    }
+
+    #[test]
+    fn a_malformed_reply_is_described_not_quoted() {
+        // It is logged, and it may be what somebody wrote in Slack.
+        let error = parse_channel_read("the launch slipped to friday").unwrap_err();
+        assert!(!error.contains("friday"), "{error}");
+        assert!(error.contains("28 chars"), "{error}");
+        let error = parse_channel_read(r#"{"text":"the launch slipped"#).unwrap_err();
+        assert!(!error.contains("launch"), "{error}");
+        let error = parse_channel_read(r#"{"channel":"the launch slipped"}"#).unwrap_err();
+        assert!(!error.contains("launch"), "{error}");
     }
 
     #[test]
