@@ -114,7 +114,7 @@ deliberate: you have no inbox, and you've often finished before the news lands.
 
 ## When something looks wrong
 
-- `inkling status` shows whether the background server is running, who is
+- `inkling status` shows whether the resident server is running, who is
   subscribed, and what is watched.
 - `inkling logs -n 50` shows every poll, transition, push and hook. It answers
   "why wasn't I told" and "why was I told".
