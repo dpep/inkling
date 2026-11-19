@@ -123,8 +123,8 @@ enum Command {
     },
     /// Watch things, and learn later what changed.
     ///
-    /// Registers interest and returns. A resident server keeps reading while
-    /// anything is watched; `inkling events` reads what has moved since it
+    /// Registers interest and returns. For a subscribed session a resident
+    /// server keeps reading; `inkling events` reads what has moved since it
     /// last looked, polling first if its readings have gone stale.
     ///
     /// With no arguments, lists what is being watched. A watch ends when what
@@ -2813,6 +2813,11 @@ mod tests {
         let off = super::Cli::try_parse_from(["inkling", "status", "--log-dir=off"]).unwrap();
         let common = off.common.anchored(std::path::Path::new("/work"));
         assert_eq!(common.log_dir.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn the_readme_shows_what_config_init_writes() {
+        assert!(include_str!("../README.md").contains(super::STARTER_CONFIG));
     }
 
     #[test]

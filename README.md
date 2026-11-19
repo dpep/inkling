@@ -86,8 +86,9 @@ Naming the send tool is what makes posting a message watch it, and naming the re
 session's own reactions from waking it. With a different `[slack.mcp]` server, name its tools
 instead.
 
-The manual route doesn't include the inkling skill. Pushed lines still arrive; `inkling events`
-shows the command to read more beside each one.
+The manual route doesn't include the inkling skill; [claude/INSTALL.md](claude/INSTALL.md) says
+how to install it by hand. Without it, pushed lines still arrive, and `inkling events` shows the
+command to read more beside each one.
 
 No config file is needed either way: GitHub credentials come from `gh auth token`, Jira goes
 through `acli`, and Slack through Claude Code's connector.
@@ -145,7 +146,7 @@ inkling watch you/repo#42 AI-123    # a pull request and a Jira issue
 inkling watch https://acme.slack.com/archives/C0123ABCD/p1786596050245879
 inkling watch '#incidents' --ttl 7d  # a whole Slack channel
 inkling watch you/repo#42 --ttl 2h  # default is 72h
-inkling watch                       # what's being watched
+inkling watch                       # what's watched, and how long each has left before its TTL
 inkling unwatch 42                  # short forms work once it is watched; or --all
 inkling events                      # what's moved, and nothing when nothing has
 ```
@@ -327,9 +328,14 @@ them and lists their session as `ended`.
 
 ### The resident server
 
-One `inkling` per machine does the polling. `subscribe` or `watch` starts it when there's
-something to serve, and it exits about five minutes after there isn't. Nothing to install, start,
-or restart; `inkling status` says whether one is up.
+One `inkling` per machine does the polling, for subscribed sessions only. `subscribe` or `watch`
+starts it once a subscribed session is watching something that can still move, and it exits
+about five minutes after none is. Nothing to install, start, or restart; `inkling status` says
+whether one is up.
+
+A `watch` from a plain terminal starts nothing in the background. There, `inkling events` does the
+reading itself: before it answers, it reads upstream any watch that is due and whose last reading
+is more than a minute old (`--refresh`).
 
 A watch is read at 1/24 of how long it has been quiet: every minute while it is moving, hourly
 once it has sat still for a day. It goes back to every minute the moment a session touches it
@@ -415,13 +421,18 @@ inkling config set github.token_env ''   # empty removes the key
 `~/.config/inkling/config.toml`):
 
 ```toml
-[github]
-token_command = "gh auth token"  # or token_env = "GITHUB_TOKEN"
-# ignore_checks = ["merge-lock"] # exact check names that never make a pull request red
+# Inkling — tells an agent when something it cares about changes.
+# Every field here has a default; this file is a starting point, not a schema.
 
+[github]
+token_command = "gh auth token"   # or token_env = "GITHUB_TOKEN"
+# Exact check names that never turn a pull request red or hold it pending.
+# ignore_checks = ["merge-lock"]
+
+# The resident server, started by `subscribe` or `watch` when needed.
 [serve]
-# interval     = "15s"  # the shortest nap; otherwise it sleeps until a watch is due
-# idle_after   = "5m"   # how long with nothing to do before it stands down
+# interval = "15s"      # the shortest nap; otherwise it sleeps until a watch is due
+# idle_after = "5m"     # how long with nothing to do before it stands down
 # max_lifetime = "24h"  # so a rebuilt binary eventually gets picked up
 ```
 
@@ -449,8 +460,8 @@ Everything lives in `$XDG_STATE_HOME/inkling/` (usually `~/.local/state/inkling/
   holds session tokens. Deleting it forgets every watch and every place.
 - `waits.json` coordinates `inkling wait` processes.
 - `state.json` caches your Slack identity and channel names.
-- The resident server's lock and status file sit beside them, so `--watches` moves the whole lot
-  somewhere else.
+- The resident server's lock and status file sit beside `watches.json`, so `--watches` moves them
+  with it. `--waits` and `--state` move their own files.
 
 ## Design notes
 
