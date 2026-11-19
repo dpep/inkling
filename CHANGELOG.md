@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — 2026-11-19
 
 - **Install with Homebrew**: `brew install dpep/tools/inkling`.
 - **Relative paths work.** `--config`, `--state`, `--watches`, `--waits` and `--log-dir` are
