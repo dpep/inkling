@@ -4,13 +4,17 @@
 
 Tells a Claude Code session when a pull request, Jira issue or Slack message it cares about changes.
 
-A pull request's checks go red or green, somebody comments on it, it gets approved, it merges; a
-Jira issue moves column; somebody replies to a Slack message you posted, or posts in a channel
-you're watching. The news lands in the session as one line, mid-turn, without anyone asking:
+Think inotify or watchman, but for things that live on someone else's server. CI goes red or
+green, a reviewer approves, a pull request merges, a Jira issue moves column, somebody replies to
+the Slack message you posted or posts in a channel you're watching. The news lands in the session
+as one line, mid-turn, without anyone asking:
 
 ```
 inkling: github.com/dpep/inkling#7 | checks pending → failure: test / build (job 106193645679)
 ```
+
+You rarely ask for any of it. Hooks watch whatever the session touches: the pull request it
+opened, the branch it pushed, the Slack message it posted.
 
 It works just as well for a script or a person at a terminal: `wait` blocks until a pull request
 gets somewhere, and `watch` plus `events` lets you check back later.
@@ -36,11 +40,8 @@ cargo install --git https://github.com/dpep/inkling
 ```
 
 Or clone the repository and run `cargo install --path .`. Either puts `inkling` in
-`~/.cargo/bin`, which the hooks expect to find on `PATH`. It isn't on crates.io (the name is
-taken) or Homebrew yet.
-
-Working on Inkling itself? `make install` builds a release binary and copies it into `BIN_DIR`
-(default `~/.claude/bin`; `make install BIN_DIR=…` to change it).
+`~/.cargo/bin`. Make sure that's on your `PATH`: the hooks call `inkling` by name. It isn't on
+crates.io (the name is taken) or Homebrew yet.
 
 ## Quick start
 
@@ -152,7 +153,7 @@ instead. Each line is worded as its push is, and ends in the read that shows wha
 else the title:
 
 ```
-github.com/dpep/inkling#3  checks    pending → failure: test / build  (gh pr checks 3 --repo github.com/dpep/inkling)
+github.com/dpep/inkling#3  checks    pending → failure: buildkite/main  (gh pr checks 3 --repo github.com/dpep/inkling)
 github.com/dpep/inkling#3  comments  2 comments from @alice and coderabbitai (bot)  (gh pr view 3 --repo github.com/dpep/inkling --comments)
 github.com/dpep/inkling#3  state     open → merged by @dpep  Fix the thing
 AI-123                     status    To Do → In Progress  Ship the widget
@@ -189,7 +190,7 @@ Three axes, each moving on its own:
 - `checks`: pending, success or failure, and which check went red.
 - `comments`: how many, and who wrote the new ones. Conversation comments, line comments, and
   reviews with something to say all count; bots say `(bot)`. Never what anybody wrote: to read
-  it, run the command a push ends in.
+  it, run the command its `events` row ends in.
 
 An edited comment isn't new, so a coverage bot rewriting its comment on every push stays quiet,
 and a deleted one is never news. Comments only you wrote are in `events` but aren't pushed. An
@@ -257,7 +258,7 @@ A cursor names the stream as well as the position, so it can't point at somebody
 ```sh
 inkling events                          # what's new for me
 inkling events --subscriber abc-123     # ...for that session; Inkling keeps the place
-inkling events --since abc-123:12       # ...from a place you kept; the id as `status` shows it will do
+inkling events --since abc-123:12       # ...from a cursor you kept; it never moves
 inkling events --json                   # every row carries the cursor it leaves you at, and `lookup`
 inkling events --ndjson                 # one object per line
 ```
@@ -278,8 +279,20 @@ The `session-start` hook subscribes for you, and `session-end` detaches the sess
 
 A subscribed session gets each transition pushed in as a line starting `inkling:`. Everything due
 at once arrives as one message, a line per change, so a merge queue landing fifteen pull requests
-costs one turn. A red check is held for one more reading, about a minute, and dropped if the
-checks moved on: some CI marks a build red while a retry is still running.
+costs one turn.
+
+A push costs the session a turn, so only what it can act on is pushed. Everything else waits in
+`events` for the next prompt:
+
+- A start: CI beginning (`… → pending`) or a draft marked ready (`draft → open`). The verdict that
+  follows is pushed.
+- The session's own doing: comments only you wrote, a reaction the session added, a channel round
+  only it posted in. (A reply it posted isn't news at all.)
+- Less of something: a removed reaction.
+- Anything past five messages in five minutes to one session.
+
+A red check is held for one more reading, about a minute, and dropped if the checks moved on: some
+CI marks a build red while a retry is still running.
 
 A line carries what reading the news needs and the reference doesn't say, not the command. A red
 Actions job names its job (`(job 106193645679)`), whose log GitHub serves as soon as that job
@@ -383,7 +396,7 @@ inkling logs | tztr
 Every field has a working default. To change one:
 
 ```sh
-inkling config              # effective values
+inkling config              # which files are in use, and whether credentials work
 inkling config path
 inkling config init         # write a starter file
 inkling config get github.token_command
@@ -391,11 +404,12 @@ inkling config set github.ignore_checks 'merge-lock, label-policy'
 inkling config set github.token_env ''   # empty removes the key
 ```
 
-`config` shows effective values; `get` and `set` operate on the file. Types are inferred
+`get` and `set` operate on the file, which holds only what you've changed. Types are inferred
 (`true`/`false`, integers, comma-separated lists, otherwise a string, which is what durations like
 `20m` need). Comments survive edits, and an edit that would make the config invalid is refused.
 
-`inkling config init` writes `~/.config/inkling/config.toml`:
+`inkling config init` writes `$XDG_CONFIG_HOME/inkling/config.toml` (usually
+`~/.config/inkling/config.toml`):
 
 ```toml
 [github]
@@ -408,9 +422,24 @@ token_command = "gh auth token"  # or token_env = "GITHUB_TOKEN"
 # max_lifetime = "24h"  # so a rebuilt binary eventually gets picked up
 ```
 
+Slack needs no config. Two optional settings, for when the defaults don't fit:
+
+```toml
+[slack]
+# user_id = "U012ABC345"  # you, for spotting @mentions; looked up and cached when omitted
+
+# [slack.mcp]             # read through this MCP server instead of Claude Code's connector
+# server  = "my-slack"    # its tools are then mcp__my-slack__<tool>
+# url     = "https://…/mcp"
+# headers = { Authorization = "Bearer ${SLACK_TOKEN}" }  # ${VAR} reads the environment
+```
+
+With `[slack.mcp]` set, name its send and react tools in the `PostToolUse` matcher instead of
+the connector's.
+
 ## State
 
-Everything lives in `~/.local/state/inkling/`:
+Everything lives in `$XDG_STATE_HOME/inkling/` (usually `~/.local/state/inkling/`):
 
 - `watches.json` holds watches, events, readers and their cursors. It is written `0600` because it
   holds session tokens. Deleting it forgets every watch and every place.
