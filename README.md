@@ -118,7 +118,7 @@ github.com/dpep/inkling#3  comments  2 comments from @alice and coderabbitai (bo
 github.com/dpep/inkling#3  state     open → merged by @dpep  Fix the thing
 AI-123                     status    To Do → In Progress  Ship the widget
 slack:C0123ABCD/1786596050.245879  replies    2 replies from @alice and @bob  (slack_read_thread channel_id=C0123ABCD message_ts=1786596050.245879; slack_read_channel channel_id=C0123ABCD oldest=1786596050.245879)
-slack:#incidents                   messages   3 messages from @john and @jane  (slack_read_channel channel_id=C0E48AHSN oldest=1794976101.418449)
+slack:#incidents                   messages   3 messages from @john and @jane  (slack_read_channel channel_id=C0E00000A oldest=1794976101.418449)
 ```
 
 Up to three people are named; past that they are counted, bots apart:
@@ -204,7 +204,7 @@ first time and is remembered; the watch is then `slack:#incidents`, which
 `unwatch` takes back.
 
 The news is who posted and how many — `slack:#incidents | 3 messages from
-@john and @jane (C0E48AHSN, after 1794976101.418449)`, or `12 messages from
+@john and @jane (C0E00000A, after 1794976101.418449)`, or `12 messages from
 7 people` — never what they wrote. The channel's id and the newest message
 seen before are what a read of exactly the round needs. A
 round where only this session posted is in `events` but isn't pushed. Replies inside a

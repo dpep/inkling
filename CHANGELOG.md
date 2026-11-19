@@ -52,7 +52,7 @@ watch it, add the Slack tools to the `PostToolUse` matcher (below).
 - **Pushed lines carry facts, not commands.** A line keeps only what reading the news needs and
   the reference doesn't say: `(job 106193645679)` for a red Actions check instead of the `gh api
   …/logs` command, nothing for a red check from another app instead of `gh pr checks`, `1 on a
-  line` for comments, `(thread <root ts>)`, `(C0E48AHSN, after <ts>)`. The commands are in the
+  line` for comments, `(thread <root ts>)`, `(C0E00000A, after <ts>)`. The commands are in the
   inkling skill; `inkling events` rows still end in them, and `--json` carries them as `lookup`,
   plus `partial` and `own`.
 - **One push per round.** Everything due to a session at once arrives as one message, a line per

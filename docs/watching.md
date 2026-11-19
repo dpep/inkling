@@ -121,7 +121,7 @@ told about.
 
 ## Red arrives before its logs do — or seems to
 
-Dogfooded 2026-09-20 on myclaude#3: `checks pending → failure` was pushed the
+Dogfooded 2026-09-20 on a pull request: `checks pending → failure` was pushed the
 moment the first job went red, and the obvious next step, reading the log,
 had to wait on `gh run watch`. The two fixes on the table were to push red
 only once every check had finished, or to push at once and warn that the logs
@@ -196,8 +196,8 @@ twice on the same commit and both runs sit there under the same name, and the
 older one keeps its conclusion for good. GitHub's `statusCheckRollup.state`
 sums all of them, so it stays red for a job that has since been re-run green.
 
-Measured 2026-09-22 on dpep/inkling-ci-probe#8 — an in-flight run superseded
-on the same head commit (the pull request was reopened under a
+Measured 2026-09-22 on #8 of a scratch probe repository (since deleted) — an
+in-flight run superseded on the same head commit (the pull request was reopened under a
 `cancel-in-progress` concurrency group), its replacement green:
 
 | view | says |
@@ -342,7 +342,7 @@ read counts as a failed one.
 The event log is bounded by age (72h) rather than by what every live
 subscriber has passed: one dead session must not be able to pin it. It was
 24h; three days lets a session resumed after a weekend still read Friday's
-news, and costs little — this machine's live store, 2026-09-20, held about
+news, and costs little — a live store, 2026-09-20, held about
 50 events a day in a 26KB file.
 A watch's default `--ttl` is the same constant (`watches_json::WATCH_TTL`),
 so a watch never outlives what it reported.
@@ -595,7 +595,7 @@ Withholding a push from the session that *caused* the transition was
 considered and rejected:
 
 - **The hook can't name the pull request for the usual spelling.** Measured on
-  the probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
+  the scratch probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
   runs it: `gh pr merge 3 --repo …` prints **nothing** and exits 0, and `gh pr
   ready 3` prints `✓ Pull request dpep/inkling-ci-probe#3 is marked as "ready
   for review"`, which is not a URL. `post-tool` reads references only from
@@ -937,7 +937,7 @@ was found.
     is someone else's conversation.
   - **A group DM is a channel here.** Its id is `G…` or `C…`, so nothing local
     tells it apart, and the read's header that might (`Channel: DM (D…)` for
-    an IM) was never seen for one: this workspace has no group DM to read.
+    an IM) was never seen for one: the test workspace has no group DM to read.
     So a group DM gets the mention rule. What would change this: one real
     read of a group DM's header, which makes a third rule a string match.
 - **A reply's replies are the later ones.** A permalink to a reply carries
@@ -1030,7 +1030,7 @@ retried every tick. Two things follow:
   and the replies count can fall. Fine for a DM or a mention; a channel watch
   reports it as "at least" instead (Slack channels, below).
 - **How a mention is printed is unseen.** The prompt asks for ids "written
-  `<@U…>`"; no message in this workspace mentions anyone, so whether the read
+  `<@U…>`"; no message in the test workspace mentions anyone, so whether the read
   tool prints the id or a display name is untested. If it prints a name, the
   model has no id to give and a mention reads as none. The first channel
   watch that should have caught one is the test.
@@ -1296,14 +1296,14 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
   without a second read.
 - **The handle is resolved once.** `#name` goes through the bridge's
   `search_channels` lookup and is cached in `state.json` with the rest of the
-  channel cache, so `#general` and `C0E48AHSN` are one watch named
+  channel cache, so `#general` and `C0E00000A` are one watch named
   `slack:#general`. An id the cache doesn't know is named by its id until the
   name turns up. The watch is keyed by the id (`Reference::key`), so either
   form stops it, in either order; the name is display only.
 - **Threaded replies don't count.** `read_channel` lists top-level messages
   only, and a thread reply is that thread's news — watch the message for it. A
   reply also sent to the channel (`reply_broadcast`) is top-level and does
-  count. Not seen live: this workspace has no threads to look at.
+  count. Not seen live: the test workspace has no threads to look at.
 - **What the session posted is a receipt.** A round whose new messages the
   session posted, as the hook saw, is recorded and not pushed, as for replies.
 - **It never finishes.** It lives until its `--ttl`. The default 72h suits a
@@ -1331,7 +1331,7 @@ call per page; nobody has needed it.
 
 **Fixtures.** Recorded from the bridge on the self-DM (a read with `oldest`,
 and a baseline that said `more`) and on #general, which has no messages at
-all. No transition has been seen live — nobody else posts in this workspace,
+all. No transition has been seen live — nobody else posts in the test workspace,
 and posting to make one was off limits.
 
 ## Not built, and what would change that
@@ -1384,9 +1384,9 @@ and posting to make one was off limits.
 
 ## Known gap: the Jira fixtures
 
-`acli` 1.3.19 on this machine cannot create, read or search anything in the
-sandbox project — `workitem create` is refused for permissions, `workitem
-view` reports the issue invisible, and every JQL search fails to parse.
+`acli` 1.3.19 on the development machine could not create, read or search
+anything in the sandbox project — `workitem create` was refused for permissions, `workitem
+view` reported the issue invisible, and every JQL search failed to parse.
 Upgrading needs a Homebrew tap trusted first, which was not done unasked.
 
 So the **refusal** fixture is recorded from the live binary — exit 1, empty
@@ -1415,7 +1415,7 @@ erases the user's prompt, and on `SessionStart` it blocks the session. So
 `swallowing` is where every hook ends — above the config load, and catching
 panics, because those are the two failures the hook body never gets to see.
 
-The bounds, measured 2026-09-20 on this machine, 30 runs each:
+The bounds, measured 2026-09-20 on a development machine, 30 runs each:
 
 | | |
 | --- | --- |

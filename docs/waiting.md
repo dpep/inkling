@@ -256,7 +256,7 @@ Each lands on its own, with the tree green and a changelog entry.
   rollup as a repository without CI. It is also what a repository *with* CI
   reports for the few seconds after a push, before its first check run
   exists, so a wait started then precluded at 0s (dpep/inkling#13). Measured
-  on the probe repository: after a push the head had no rollup for 2–4s, then
+  on a scratch probe repository (since deleted): after a push the head had no rollup for 2–4s, then
   `PENDING`; across 52 PR openings in dpep repos the Actions suite appeared
   2–7s after, with one at 54s. The discriminator is the repository's history:
   each batch asks every repository once for its last five pull requests'
