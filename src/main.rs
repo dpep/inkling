@@ -107,7 +107,8 @@ enum Command {
         targets: Vec<String>,
         /// What to wait for. The default, `changed`, returns on the next
         /// move in any direction. `done` is either terminal state, merged or
-        /// closed; `checks` is CI finishing, green or red.
+        /// closed; `checks` is CI finishing, green or red. Or a state to
+        /// reach at least, in order: `draft`, `open`, `approved`, `merged`.
         #[arg(long, short, default_value = "changed", value_parser = parse_until)]
         until: inkling::domain::wait::Until,
         /// Give up after this long, e.g. 90s, 30m, 2h.
@@ -197,10 +198,12 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Stop pushing to this session. It stays attached, so its watches keep
-    /// being read and the prompt hook still shows what moved.
+    /// Stop pushing to this session.
+    ///
+    /// It stays attached, so its watches keep being read and the prompt hook
+    /// still shows what moved.
     Unsubscribe {
-        /// The session id to detach from. Defaults to the one Claude Code
+        /// The session id to stop pushing to. Defaults to the one Claude Code
         /// exports.
         #[arg(long)]
         session: Option<String>,
@@ -2802,6 +2805,34 @@ mod tests {
         let off = super::Cli::try_parse_from(["inkling", "status", "--log-dir=off"]).unwrap();
         let common = off.common.anchored(std::path::Path::new("/work"));
         assert_eq!(common.log_dir.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn wait_help_names_every_until_it_accepts() {
+        use clap::CommandFactory;
+        let mut cli = super::Cli::command();
+        let help = cli
+            .find_subcommand_mut("wait")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for name in inkling::domain::wait::Until::NAMES {
+            assert!(help.contains(&format!("`{name}`")), "{name}: {help}");
+        }
+    }
+
+    #[test]
+    fn unsubscribe_help_says_the_session_stays_attached() {
+        use clap::CommandFactory;
+        let mut cli = super::Cli::command();
+        let unsubscribe = cli.find_subcommand_mut("unsubscribe").unwrap();
+        // One line in `inkling --help`; the rest only in its own.
+        assert_eq!(
+            unsubscribe.get_about().unwrap().to_string(),
+            "Stop pushing to this session"
+        );
+        let help = unsubscribe.render_long_help().to_string();
+        assert!(!help.contains("detach"), "{help}");
     }
 
     #[test]

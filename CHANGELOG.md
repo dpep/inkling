@@ -18,6 +18,9 @@
 - **Refusals name the right command and reason.** `unwatch zzz` no longer says "watch takes…";
   `wait nonsense` says it isn't a pull request rather than calling it a channel; `unwatch 42` for
   something not watched says so instead of asking for a fuller reference.
+- **Help text:** `wait --help` lists every `--until` value (`draft`, `open`, `approved`, `merged`
+  as well as `changed`, `done`, `checks`); `unsubscribe` no longer contradicts itself about
+  detaching.
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 
