@@ -1088,9 +1088,9 @@ mod tests {
     #[test]
     fn the_pull_request_author_comes_back_with_the_state() {
         let json = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",
-            "reviewDecision":null,"author":{"login":"dpep","name":"Daniel Pepper"}}}}}"#;
+            "reviewDecision":null,"author":{"login":"dpep","name":"Sam Rivera"}}}}}"#;
         let status = interpret(&[pr("x", 1)], &parse(json))[0].1.clone().unwrap();
-        assert_eq!(status.author, "Daniel Pepper", "a name beats a login");
+        assert_eq!(status.author, "Sam Rivera", "a name beats a login");
 
         // Bots and name-less accounts still identify as something.
         let bare = r#"{"data":{"r0":{"pullRequest":{"isDraft":false,"state":"OPEN",

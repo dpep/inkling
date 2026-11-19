@@ -231,10 +231,10 @@ mod tests {
     #[test]
     fn a_slack_channel_is_named_by_its_handle_when_known() {
         let channel = |name: Option<&str>| Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: name.map(Into::into),
         };
         assert_eq!(channel(Some("general")).to_string(), "slack:#general");
-        assert_eq!(channel(None).to_string(), "slack:C0E48AHSN");
+        assert_eq!(channel(None).to_string(), "slack:C0E00000A");
     }
 }

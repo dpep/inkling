@@ -1363,7 +1363,7 @@ mod tests {
         let before = channel(0, Some("1.000001"), &[], false);
         let after = seen_message(channel(0, Some("1.000002"), &[("1.000002", "U9")], false));
         let moved = changed(Some(&before), &after);
-        assert_eq!(moved[0].detail.as_deref(), Some("@dpepper"));
+        assert_eq!(moved[0].detail.as_deref(), Some("@carol"));
         assert_eq!(moved[0].made, Made::Posted(ts(&["1.000002"])));
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
             failing: None,
             head: None,
             by: Actors {
-                names: [("U1", "alice"), ("U2", "bob"), ("U9", "dpepper")]
+                names: [("U1", "alice"), ("U2", "bob"), ("U9", "carol")]
                     .iter()
                     .map(|(id, name)| (id.to_string(), name.to_string()))
                     .collect(),

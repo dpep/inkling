@@ -1334,7 +1334,7 @@ mod tests {
     #[test]
     fn a_channel_by_id_and_by_name_is_one_watch_and_either_stops_it() {
         let channel = |name: Option<&str>| Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: name.map(Into::into),
         };
         let mut watches = Watches::default();
@@ -2552,7 +2552,7 @@ mod tests {
         // A deliberate standing interest, not something a session touched:
         // its news keeps accruing for the owner to pull or resume into.
         let channel = Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: Some("incidents".into()),
         };
         let mut watches = Watches::default();
@@ -2795,13 +2795,13 @@ mod tests {
         // A store from before channels were keyed by id can hold one watch
         // by name and another by id; rekeying must not drop either's readers.
         let channel = |name: Option<&str>| Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: name.map(Into::into),
         };
         let mut by_name = Watches::default();
         by_name.watch(&channel(Some("general")), "b", forever(), now());
         let posted = Receipt::Posted {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             ts: "1.1".into(),
         };
         by_name.receipt("b", &posted, now());
@@ -2816,7 +2816,7 @@ mod tests {
             by_name.watches.into_values().next().unwrap(),
         );
         old.watches.insert(
-            "slack:C0E48AHSN".into(),
+            "slack:C0E00000A".into(),
             by_id.watches.into_values().next().unwrap(),
         );
 
@@ -2825,7 +2825,7 @@ mod tests {
             panic!("parses")
         };
         assert_eq!(watches.watches.len(), 1);
-        let watch = &watches.watches["slack:C0E48AHSN"];
+        let watch = &watches.watches["slack:C0E00000A"];
         assert_eq!(watch.reference, channel(Some("general")));
         assert_eq!(watch.owners, ["a".to_string(), "b".to_string()].into());
         assert_eq!(watch.deadline, forever());

@@ -811,7 +811,7 @@ mod tests {
     fn a_channel_is_read_from_the_newest_message_its_last_reading_saw() {
         let h = Harness::new("channel");
         let general = Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: Some("general".into()),
         };
         h.slack
@@ -855,7 +855,7 @@ mod tests {
         // A flaky empty first read must not turn a channel's history into news.
         let h = Harness::new("empty-first");
         let general = Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: None,
         };
         h.watch(&general);

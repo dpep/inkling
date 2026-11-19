@@ -1969,7 +1969,7 @@ fn watch_target(
 /// A Slack channel by `#name` or by id, named when that is known.
 ///
 /// The name is display only: a watch is keyed by the id, so `#general` and
-/// `C0E48AHSN` are one watch whichever came first. An id takes the name the
+/// `C0E00000A` are one watch whichever came first. An id takes the name the
 /// cache has for it. A name nobody has resolved yet costs one bridge call, kept in
 /// `state.json` with the rest of the channel cache.
 fn slack_channel<R: slack_claude::Runner>(
@@ -3401,14 +3401,14 @@ mod tests {
         let mut snapshot = store.load().unwrap_or_default();
         snapshot
             .channels
-            .insert("general".into(), "C0E48AHSN".into());
+            .insert("general".into(), "C0E00000A".into());
         store.save(&snapshot).unwrap();
         // Never run: both forms are answered from the cache.
         let slack =
             super::slack_claude::SlackClaude::new(super::slack_claude::ClaudeRunner::default());
 
         let by_name = super::slack_channel("#General", &slack, &store).unwrap();
-        let by_id = super::slack_channel("C0E48AHSN", &slack, &store).unwrap();
+        let by_id = super::slack_channel("C0E00000A", &slack, &store).unwrap();
         assert_eq!(by_name, by_id);
         assert_eq!(by_id.to_string(), "slack:#general");
         std::fs::remove_dir_all(&dir).unwrap();

@@ -368,8 +368,8 @@ mod tests {
     #[test]
     fn the_form_inkling_prints_is_accepted_back() {
         assert_eq!(
-            parse_reference("slack:D1MG8KWNR/1771013011.519909"),
-            Some(message("D1MG8KWNR", "1771013011.519909", None))
+            parse_reference("slack:D0000000A/1771013011.519909"),
+            Some(message("D0000000A", "1771013011.519909", None))
         );
     }
 
@@ -393,21 +393,21 @@ mod tests {
     #[test]
     fn a_channel_link_or_id_names_the_whole_conversation() {
         let general = Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: None,
         };
         for arg in [
-            "https://dpepper.slack.com/archives/C0E48AHSN",
-            "https://dpepper.slack.com/archives/C0E48AHSN/",
-            "slack:C0E48AHSN",
+            "https://acme.slack.com/archives/C0E00000A",
+            "https://acme.slack.com/archives/C0E00000A/",
+            "slack:C0E00000A",
         ] {
             assert_eq!(parse_channel(arg), Some(general.clone()), "{arg}");
         }
         for arg in [
-            "https://dpepper.slack.com/archives/C0E48AHSN/p1786596050245879",
-            "https://dpepper.slack.com/archives/general",
+            "https://acme.slack.com/archives/C0E00000A/p1786596050245879",
+            "https://acme.slack.com/archives/general",
             "slack:#general",
-            "C0E48AHSN",
+            "C0E00000A",
         ] {
             assert_eq!(parse_channel(arg), None, "{arg}");
         }
@@ -573,10 +573,10 @@ mod tests {
 
     #[test]
     fn a_dm_to_a_user_lands_in_a_dm_channel() {
-        let response = json!("https://acme.slack.com/archives/D1MG8KWNR/p1786596050245879");
+        let response = json!("https://acme.slack.com/archives/D0000000A/p1786596050245879");
         assert_eq!(
-            posted_via_tool(&sent("U0E48AHQA", "hi"), &response),
-            Some(message("D1MG8KWNR", "1786596050.245879", None))
+            posted_via_tool(&sent("U00000001", "hi"), &response),
+            Some(message("D0000000A", "1786596050.245879", None))
         );
     }
 }

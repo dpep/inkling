@@ -523,7 +523,7 @@ mod tests {
         // Resolving a handle costs a bridge call, so an ID must never take
         // that path.
         assert!(looks_like_channel_id("C012XYZ6789"));
-        assert!(looks_like_channel_id("D0AS6PZ20AF"));
+        assert!(looks_like_channel_id("D0000000B"));
         assert!(!looks_like_channel_id("inkling"));
         assert!(!looks_like_channel_id("eng-prs"));
         assert!(!looks_like_channel_id("Coding"), "mixed case is a handle");

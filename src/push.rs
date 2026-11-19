@@ -868,7 +868,7 @@ mod tests {
             failing: None,
             head: None,
             by: Actors {
-                names: [("U1", "alice"), ("U9", "dpepper")]
+                names: [("U1", "alice"), ("U9", "carol")]
                     .iter()
                     .map(|(id, name)| (id.to_string(), name.to_string()))
                     .collect(),
@@ -1050,7 +1050,7 @@ mod tests {
 
         // A channel shows `#name`; the read needs its id.
         let incidents = Reference::SlackChannel {
-            channel: "C0E48AHSN".into(),
+            channel: "C0E00000A".into(),
             name: Some("incidents".into()),
         };
         let posted = Event {
@@ -1059,7 +1059,7 @@ mod tests {
         };
         assert_eq!(
             lookup(&posted),
-            "slack_read_channel channel_id=C0E48AHSN oldest=1794976101.418449"
+            "slack_read_channel channel_id=C0E00000A oldest=1794976101.418449"
         );
     }
 
@@ -1098,7 +1098,7 @@ mod tests {
             after: after.map(String::from),
             ..on(
                 Reference::SlackChannel {
-                    channel: "C0E48AHSN".into(),
+                    channel: "C0E00000A".into(),
                     name: name.map(String::from),
                 },
                 event(Axis::Messages, "0", "2", "@a"),
@@ -1106,15 +1106,15 @@ mod tests {
         };
         assert_eq!(
             line(channel(Some("incidents"), Some("1.000002"))),
-            "inkling: slack:#incidents | 2 messages from @a (C0E48AHSN, after 1.000002)"
+            "inkling: slack:#incidents | 2 messages from @a (C0E00000A, after 1.000002)"
         );
         assert_eq!(
             line(channel(None, Some("1.000002"))),
-            "inkling: slack:C0E48AHSN | 2 messages from @a (after 1.000002)"
+            "inkling: slack:C0E00000A | 2 messages from @a (after 1.000002)"
         );
         assert_eq!(
             line(channel(None, None)),
-            "inkling: slack:C0E48AHSN | 2 messages from @a"
+            "inkling: slack:C0E00000A | 2 messages from @a"
         );
     }
 
@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(texts.len(), 1);
         assert!(
             texts[0]
-                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @dpepper"),
+                .starts_with("inkling: slack:C0123ABCD/1786596050.245879 | 1 reply from @carol"),
             "{texts:?}"
         );
     }
@@ -1382,7 +1382,7 @@ mod tests {
         assert_eq!(
             sessions.texts(),
             [
-                "inkling: slack:#incidents | 2 messages from @alice and @dpepper (C0123ABCD, after 1.000002)"
+                "inkling: slack:#incidents | 2 messages from @alice and @carol (C0123ABCD, after 1.000002)"
             ],
             "the read that shows them names the channel by id"
         );
