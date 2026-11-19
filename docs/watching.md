@@ -8,10 +8,31 @@ what has moved since it last looked, and nothing at all when nothing has. The
 consumer this is shaped for is a Claude Code `UserPromptSubmit` hook running
 `inkling events --subscriber <session-id>` on every prompt.
 
+## Observe, never act
+
+Inkling says what changed and stops. That line holds everything else in
+place:
+
+- **It runs nothing.** No `--then`, no rules, no callbacks, no filters on what
+  is worth knowing. The shell already composes — `inkling wait 42 && deploy` —
+  and the moment Inkling can run a command it is a generic automation
+  platform, which it will not become.
+- **Delivering news into a session that asked is the furthest it goes.** A
+  subscribed session has transitions pushed into it (below). That is still
+  observation: it tells someone who asked what happened, and never does
+  anything about it.
+- **The judgment is Inkling's own.** GitHub, Jira, Slack and Claude are
+  transports. Whether a pull request counts as approved, or a check as red,
+  is decided by deterministic code against structured data, never by a model.
+
+A request that would cross the line — a callback, a rule language, a reaction
+on someone's behalf — is a proposal to change this section, argued here, not
+a flag added quietly.
+
 ## The model
 
-Inkling's chain is `Reference → State → signal`. Slack reactions and `wait`
-are two sinks; this is a third. The one new idea:
+Inkling's chain is `Reference → State → signal`. `wait` is one way to consume
+it; this is another. The one new idea:
 
 > A **standing** is where a reference is now. An **event** is the difference
 > between two standings. Subscribers are told differences, never standings.
@@ -49,7 +70,7 @@ Two more have since joined it, each one sentence long:
   merges a pull request is told `open → merged` seconds later. Inkling names
   who, as a login, but a login can't tell a session from its person, and it
   costs one line, once: the finished
-  watch then removes itself. Revisited against the dogfood log and kept — see
+  watch then removes itself. Revisited against real use and kept — see
   [Your own actions](#your-own-actions-arrive-as-news-and-that-stays).
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
   deadline (`--ttl`, 72h), and a finished reference — merged, closed, Done —
@@ -100,7 +121,7 @@ told about.
 
 ## Red arrives before its logs do — or seems to
 
-Dogfooded 2026-09-20 on myclaude#3: `checks pending → failure` was pushed the
+Dogfooded 2026-09-20 on a pull request: `checks pending → failure` was pushed the
 moment the first job went red, and the obvious next step, reading the log,
 had to wait on `gh run watch`. The two fixes on the table were to push red
 only once every check had finished, or to push at once and warn that the logs
@@ -175,8 +196,8 @@ twice on the same commit and both runs sit there under the same name, and the
 older one keeps its conclusion for good. GitHub's `statusCheckRollup.state`
 sums all of them, so it stays red for a job that has since been re-run green.
 
-Measured 2026-09-22 on dpep/inkling-ci-probe#8 — an in-flight run superseded
-on the same head commit (the pull request was reopened under a
+Measured 2026-09-22 on #8 of a scratch probe repository (since deleted) — an
+in-flight run superseded on the same head commit (the pull request was reopened under a
 `cancel-in-progress` concurrency group), its replacement green:
 
 | view | says |
@@ -242,9 +263,9 @@ the same reduced set, so the state and the check it names can't disagree.
 
 Its own file, `watches.json`, and the reasoning cuts both ways.
 
-Against `state.json`: check state is not permanently terminal — a re-run takes
-red back to pending — and the tracked snapshot's terminality means *stop
-polling forever*. waiting.md settled that; nothing has changed.
+Against `state.json`: that file is a cache — who you are in Slack, channel
+names — and anything in it can be looked up again. A watch's baseline and a
+reader's cursor can't, so they don't belong beside it.
 
 Against `waits.json`, which was the more tempting merge: a wait is arguably a
 watch with a blocking reader, and both want a reference list, a shared poll
@@ -321,7 +342,7 @@ read counts as a failed one.
 The event log is bounded by age (72h) rather than by what every live
 subscriber has passed: one dead session must not be able to pin it. It was
 24h; three days lets a session resumed after a weekend still read Friday's
-news, and costs little — this machine's live store, 2026-09-20, held about
+news, and costs little — a live store, 2026-09-20, held about
 50 events a day in a 26KB file.
 A watch's default `--ttl` is the same constant (`watches_json::WATCH_TTL`),
 so a watch never outlives what it reported.
@@ -484,11 +505,6 @@ foreground loop somebody is waiting on, and is not counted in `status`.
 
 ## Where this departed from the brief
 
-- **The cron `run` does not poll watches.** The brief offered it as one of two
-  options; a 20-minute cadence is far too stale for CI, and mid-build the
-  direction firmed up around a short-lived shared poller instead. Making the
-  cron the owner would have put the poll step behind a schedule that no other
-  caller could use.
 - **`watch` reads its targets immediately** rather than purely registering and
   returning. It is one batched query, a few hundred milliseconds. Without it
   the baseline is whatever the next `events` sees, and any transition in that
@@ -521,9 +537,6 @@ foreground loop somebody is waiting on, and is not counted in `status`.
   contexts or without them, so it is free — same request, same point. Only the
   `CheckRun` half of the union is parsed, so a repository still on legacy
   commit statuses reports red with no name, as before.
-- **Jira is not detected in Slack prose.** `AI-123` in a message would become
-  a tracked record the reaction loop has no emoji mapping for. Watching a
-  ticket is opt-in, on the command line.
 - **`acli` was kept as the Jira substrate** — it is installed and
   authenticated, and the alternative is a token this tool would own and have
   to protect for a read it gets for free. See the gap below.
@@ -543,10 +556,11 @@ settled first, and what each one settled as:
 - **Exactly-once across push and pull.** One cursor per reader, moved
   forwards by whichever got there first. A successful push advances it, so
   the next prompt doesn't repeat what the session was already told.
-- **Whether this crosses DESIGN §1.** The argument, made rather than assumed:
-  inkling says what changed and stops. It runs nothing and decides nothing,
-  and the feed leaves nothing out. DESIGN §1 now names delivering news into a
-  session that asked as the furthest this goes.
+- **Whether this crosses the observe-only line.** The argument, made rather
+  than assumed: inkling says what changed and stops. It runs nothing and
+  decides nothing, and the feed leaves nothing out. [Observe, never
+  act](#observe-never-act) names delivering news into a session that asked as
+  the furthest this goes.
 
 **A push is for something you can act on.** A push costs the session a turn;
 a pull costs nothing. Dogfooding #8 showed the difference: the auto-watch
@@ -581,7 +595,7 @@ Withholding a push from the session that *caused* the transition was
 considered and rejected:
 
 - **The hook can't name the pull request for the usual spelling.** Measured on
-  the probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
+  the scratch probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
   runs it: `gh pr merge 3 --repo …` prints **nothing** and exits 0, and `gh pr
   ready 3` prints `✓ Pull request dpep/inkling-ci-probe#3 is marked as "ready
   for review"`, which is not a URL. `post-tool` reads references only from
@@ -620,7 +634,7 @@ it. The actor is GitHub's login, so a session and its person both read as
 reasons above stand.
 The confirmation argument was wrong; the decision survives without it.
 
-What would change this: the dogfood log still showing sessions told about
+What would change this: real use still showing sessions told about
 their own actions once the start rule is in — `gh pr close`, say, or a
 self-merge line that someone calls noise rather than a receipt — *and* the
 hook able to name the pull request those commands were about.
@@ -774,7 +788,7 @@ command: those are pulled when wanted, not pushed into a turn.
 
 - **The cost is a step.** A session that hasn't loaded the skill has to before
   it can act; that is no network call, but it is one the old line didn't need.
-- **What would change this:** dogfood lines where a push arrived and the agent
+- **What would change this:** reports of a push arriving and the agent
   guessed the wrong read, or went to `events` for it.
 
 ## Watching what a session touched
@@ -923,7 +937,7 @@ was found.
     is someone else's conversation.
   - **A group DM is a channel here.** Its id is `G…` or `C…`, so nothing local
     tells it apart, and the read's header that might (`Channel: DM (D…)` for
-    an IM) was never seen for one: this workspace has no group DM to read.
+    an IM) was never seen for one: the test workspace has no group DM to read.
     So a group DM gets the mention rule. What would change this: one real
     read of a group DM's header, which makes a third rule a string match.
 - **A reply's replies are the later ones.** A permalink to a reply carries
@@ -1016,7 +1030,7 @@ retried every tick. Two things follow:
   and the replies count can fall. Fine for a DM or a mention; a channel watch
   reports it as "at least" instead (Slack channels, below).
 - **How a mention is printed is unseen.** The prompt asks for ids "written
-  `<@U…>`"; no message in this workspace mentions anyone, so whether the read
+  `<@U…>`"; no message in the test workspace mentions anyone, so whether the read
   tool prints the id or a display name is untested. If it prints a name, the
   model has no id to give and a mention reads as none. The first channel
   watch that should have caught one is the test.
@@ -1102,7 +1116,7 @@ process for five minutes: each try is paid.
 default), and Bash `curl`s to `chat.postMessage`:
 
 - **The MCP tool:** the result's `message_context` names the channel id and
-  ts outright (recorded from the first real send, dogfood.md), even when the
+  ts outright (recorded from the first real send), even when the
   call named the channel by handle. Without one, the channel is the call's
   `channel_id` and the result is searched for a permalink into that channel
   (a DM to a user id lands in a `D` channel, so there any DM permalink
@@ -1118,8 +1132,8 @@ default), and Bash `curl`s to `chat.postMessage`:
 - **The react tool** (`ToolNames::react`, `slack_add_reaction`): watches
   nothing; its `channel_id`, `message_ts` and `emoji` are a receipt.
 
-The matcher has to name both MCP tools; the myclaude plugin's `hooks.json`
-needs the react tool added as well.
+The matcher has to name both MCP tools; the Claude Code plugin's `hooks.json`
+does.
 
 **The bridge's own hooks.** The `claude -p` child is a Claude Code session and
 runs the user's hooks, inkling's included — measured: a `SessionStart` hook in
@@ -1282,14 +1296,14 @@ and pushed as `slack:#incidents | 3 messages from @john and @jane`.
   without a second read.
 - **The handle is resolved once.** `#name` goes through the bridge's
   `search_channels` lookup and is cached in `state.json` with the rest of the
-  channel cache, so `#general` and `C0E48AHSN` are one watch named
+  channel cache, so `#general` and `C0E00000A` are one watch named
   `slack:#general`. An id the cache doesn't know is named by its id until the
   name turns up. The watch is keyed by the id (`Reference::key`), so either
   form stops it, in either order; the name is display only.
 - **Threaded replies don't count.** `read_channel` lists top-level messages
   only, and a thread reply is that thread's news — watch the message for it. A
   reply also sent to the channel (`reply_broadcast`) is top-level and does
-  count. Not seen live: this workspace has no threads to look at.
+  count. Not seen live: the test workspace has no threads to look at.
 - **What the session posted is a receipt.** A round whose new messages the
   session posted, as the hook saw, is recorded and not pushed, as for replies.
 - **It never finishes.** It lives until its `--ttl`. The default 72h suits a
@@ -1317,7 +1331,7 @@ call per page; nobody has needed it.
 
 **Fixtures.** Recorded from the bridge on the self-DM (a read with `oldest`,
 and a baseline that said `more`) and on #general, which has no messages at
-all. No transition has been seen live — nobody else posts in this workspace,
+all. No transition has been seen live — nobody else posts in the test workspace,
 and posting to make one was off limits.
 
 ## Not built, and what would change that
@@ -1326,7 +1340,7 @@ and posting to make one was off limits.
   deletes and reposts instead of editing — some coverage reporters do —
   pushes on every push, since a new comment is new. `github.ignore_checks` is
   the precedent if one earns it: a list of logins whose comments are counted
-  and never told. What would change this: a dogfood line naming the bot.
+  and never told. What would change this: a report naming the bot.
 - **Who reacted.** Needs the Web API (`reactions.get`) — see the Slack app in
   docs/deferred.md.
 
@@ -1342,7 +1356,7 @@ and posting to make one was off limits.
   with a number and a repo but no reference it is willing to build. It could
   — `--repo owner/repo` plus a number is complete — but `gh pr checks 7` in a
   repository with a tracked upstream is not, and resolving it means asking.
-  What would change this: dogfood lines about a `gh pr` command that should
+  What would change this: reports of a `gh pr` command that should
   have watched something and didn't.
 - **Tools other than Bash and the Slack send tool.** An Edit that writes a PR
   number, an MCP call to GitHub. The Slack send tool was the second one that
@@ -1350,9 +1364,9 @@ and posting to make one was off limits.
 - **Choosing which events push, or are recorded at all.** One hardcoded rule
   decides what is worth a turn. A `[push]` table naming axes or transitions
   is the obvious next step and is deliberately not here: every knob is a
-  guess until the dogfood log shows two people wanting different answers, or
+  guess until real use shows two people wanting different answers, or
   one rule that is right for PRs and wrong for Jira. What would change this:
-  lines in docs/dogfood.md that say "woke me for nothing" or "didn't wake me
+  reports that say "woke me for nothing" or "didn't wake me
   and should have" that one rule can't settle both ways. The first "woke me
   for nothing" (#14, ready and merge) was settled by the one rule, not by a
   knob.
@@ -1370,15 +1384,15 @@ and posting to make one was off limits.
 
 ## Known gap: the Jira fixtures
 
-`acli` 1.3.19 on this machine cannot create, read or search anything in the
-sandbox project — `workitem create` is refused for permissions, `workitem
-view` reports the issue invisible, and every JQL search fails to parse.
+`acli` 1.3.19 on the development machine could not create, read or search
+anything in the sandbox project — `workitem create` was refused for permissions, `workitem
+view` reported the issue invisible, and every JQL search failed to parse.
 Upgrading needs a Homebrew tap trusted first, which was not done unasked.
 
 So the **refusal** fixture is recorded from the live binary — exit 1, empty
 stdout, `✗ Error: Issue does not exist or you do not have permission to see
 it.` on stderr — and the **success** fixtures are built from Jira's
-documented REST issue resource. PLAN.md's rule is that fixtures invented
+documented REST issue resource. The house rule is that fixtures invented
 ahead of a real transcript are hopes, not fixtures; that rule is being bent
 here, and the first real `inkling watch AI-123` is the test. The parser
 branches on the first character rather than trying one shape and falling back
@@ -1401,7 +1415,7 @@ erases the user's prompt, and on `SessionStart` it blocks the session. So
 `swallowing` is where every hook ends — above the config load, and catching
 panics, because those are the two failures the hook body never gets to see.
 
-The bounds, measured 2026-09-20 on this machine, 30 runs each:
+The bounds, measured 2026-09-20 on a development machine, 30 runs each:
 
 | | |
 | --- | --- |
@@ -1527,7 +1541,7 @@ pair disagrees says where it went:
   either good news or the loss case above happening silently. The way to tell
   them apart is a session that says it wasn't told about something the log
   says was written to it. That is the one failure mode this design chose, and
-  it is the line in docs/dogfood.md to watch for.
+  it is the report to watch for.
 - **`detached` is non-zero on most ticks.** Addresses are going stale faster
   than sessions are subscribing — probably `SessionEnd` not firing, or socket
   paths being reused faster than `SocketIdentity` expects.

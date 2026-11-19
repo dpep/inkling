@@ -5,8 +5,8 @@ record where the build departed from it.
 
 The idea: `inkling wait <pr>` blocks until a condition on that pull request is
 met, then exits with a code that says how it resolved. Callers are people,
-agents, and scripts — agents especially, which today fake this with polling
-loops around `gh pr view` or repeated `inkling run`.
+agents, and scripts — agents especially, which otherwise fake this with
+polling loops around `gh pr view`.
 
 The two motivating uses, verbatim:
 
@@ -15,59 +15,54 @@ The two motivating uses, verbatim:
 
 ## What this is, conceptually
 
-Inkling's chain is `Message → [Reference] → State → signal`. Waiting reuses
-only the back half: a wait is about a *reference*, not a message. No Slack, no
-discovery, no reactions — a wait never touches the bridge, which is the slow
-and flaky part (docs/deferred.md measured ~15s per call, 29 of 35 failures on
-first attempt). The pieces a wait does reuse are exactly the ones already
-pure and adapter-free: `Reference`, `State` and its ordering
-(src/domain/model.rs), the batched `StatusProvider` (src/ports.rs,
-src/adapters/github.rs), and the target parsing that `inkling run <pr-url>`
-already does for its `force` list (src/main.rs).
+Inkling's chain is `Reference → State → signal`. A wait is about a
+*reference*, a pull request, and nothing else. No Slack — a wait never touches
+the claude → Slack bridge, which is the slow and flaky part (docs/deferred.md
+measured ~15s per call, 29 of 35 failures on first attempt). The pieces a wait
+reuses are the ones already pure and adapter-free: `Reference`, `State` and
+its ordering (src/domain/model.rs), the batched `StatusProvider`
+(src/ports.rs, src/adapters/github.rs), and the reference parsing every
+command shares (src/main.rs).
 
 So the core abstraction, in a sentence: **a wait is a bounded observation loop
 over references, evaluating an ordered-threshold predicate against each
-observation.** The existing product is the same observation applied lazily on
-a cron cadence; a wait is the same observation applied eagerly on behalf of
-someone who is blocked. Two cadences, one domain.
+observation.** It is the same observation everything else in Inkling makes,
+applied eagerly on behalf of someone who is blocked.
 
 What a wait is *not*: an action. It performs nothing on completion — no
 `--then <cmd>`, no hooks, no callbacks. The shell already composes:
 `inkling wait 42 && deploy`. The moment a wait can run a command, Inkling is a
-generic automation platform, which is a standing non-goal (DESIGN §1).
-Callbacks stay "maybe one day," and one day may never come.
+generic automation platform, which it will not become (see [Observe, never
+act](watching.md#observe-never-act)). Callbacks stay "maybe one day," and one
+day may never come.
 
 ## The actual hard problem: the concurrency model
 
 The blocking API is trivial — a loop, a sleep, a deadline. The hard part is
-that Inkling today is a cron-invoked, single-writer, short-lived process, and
-"N callers block until a condition is met" breaks every one of those
-adjectives. Worse, the single-writer story is thinner than DESIGN §4 claims:
-the advisory `fs2` lock it describes was never built — `fs2` is not in
-Cargo.toml and `store_json.rs` has no locking. Today's safety is atomic
-rename plus the fact that cron runs rarely overlap. Whole-snapshot
-load-modify-save with no lock means two concurrent writers silently
-last-writer-win.
+that Inkling was a single-writer, short-lived process, and "N callers block
+until a condition is met" breaks both of those adjectives. Its state file had
+no lock at all: its safety was atomic rename plus the fact that two runs
+rarely overlapped. Whole-snapshot load-modify-save with no lock means two
+concurrent writers silently last-writer-win.
 
 Three shapes were considered:
 
 **A daemon.** Waiters connect to a long-lived process that owns all polling.
 This is the textbook answer and the wrong one here: it adds a second mode of
 operation (start it, health-check it, restart it), a client/server protocol,
-and lifecycle management — for a personal CLI whose whole operational story is
-"cron runs it, the state file is hand-readable at 2am." docs/deferred.md
+and lifecycle management — for a CLI whose whole operational story was "run
+it, and the state file is hand-readable at 2am." docs/deferred.md
 already rejected a persistent process once for the bridge, partly because
 fresh processes *are* the recovery mechanism. Same reasoning applies.
 
 **N full processes contending on the store.** Each waiter runs something like
 the existing run loop. This fails the dedup requirement outright (N waiters =
 N× polling), and it puts N writers on a snapshot that has no lock and no
-merge — the reaction ledger, which is irrecoverable by design (DESIGN §2),
-would be the casualty.
+merge.
 
 **Cooperative short-lived processes — chosen.** Waiters are ordinary CLI
-processes that coordinate through a small shared file, `waits.json`, separate
-from `state.json`:
+processes that coordinate through a small shared file of their own,
+`waits.json`:
 
 - Each waiter registers a *watch*: references, predicate, deadline.
 - One waiter at a time holds a *poller lease* (pid + heartbeat timestamp in
@@ -84,25 +79,19 @@ from `state.json`:
   wait must have anyway *is* the cleanup mechanism — the orphan-record error
   is defined out of existence rather than handled.
 
-All `waits.json` access is load-modify-save under a real file lock (the
-`fs2`-style lock DESIGN promised, finally built — for this file). Writes are
-tiny and infrequent: register, heartbeat, observations, deregister.
+All `waits.json` access is load-modify-save under a real file lock. Writes
+are tiny and infrequent: register, heartbeat, observations, deregister.
 
-Why a separate file rather than the snapshot: the cron run never reads or
-writes `waits.json` and waiters never touch `state.json`, so the wait feature
-adds **zero** write contention to the existing product, and the two files can
-have different freshness and locking stories without either infecting the
-other. The cost is a second source of truth about "current state of a PR" —
-accepted, because the two consumers genuinely want different freshness. The
-backoff in src/domain/schedule.rs encodes "nobody is looking at an aging
-Slack message"; a wait is the opposite fact — someone is blocked *right now*.
-Unifying them would mean threading a second purpose through the schedule
-module and the tracked snapshot for no caller's benefit.
+Why a file of its own: nothing in it is authoritative — every entry is
+rebuilt by the next poll — so it can have its own freshness and locking story
+without infecting state that has to survive. The cost is a second source of
+truth about "current state of a PR", accepted because a wait genuinely wants
+different freshness: someone is blocked *right now*.
 
 What would change my mind: if waits become numerous, hours-long, and
 machine-spawned, N sleeping processes plus a lease dance starts to look like
-a worse daemon, and an actual daemon (or the hosted push-driven version,
-DESIGN §13, where webhooks replace polling entirely) becomes right. The
+a worse daemon, and an actual daemon (or a push-driven design where webhooks
+replace polling entirely) becomes right. The
 wait loop is shaped for that future: its single seam is an `observe()` step,
 and webhook delivery would slot in behind it.
 
@@ -119,8 +108,7 @@ inkling wait <pr>... [--until merged|approved|open|done|checks] [--timeout 30m]
   ordered enum whose declaration order is the ordering, so this predicate is
   `observed >= threshold` — nearly free. `--until merged` (the default) is
   `>= Merged`, i.e. `== Merged`, since Merged is the top.
-- Several PRs means all of them: fold with `min`, exactly the aggregation
-  reconcile already uses, then compare once. `min(states) >= threshold` is
+- Several PRs means all of them: fold with `min`, then compare once. `min(states) >= threshold` is
   "every reference has reached the threshold." No new machinery.
 - **Precluded** falls out of the same ordering: an observation that is
   terminal but below the threshold can never satisfy it. Since Merged is the
@@ -144,9 +132,8 @@ shape ever demands entry, it should have to argue its way into this section.
 
 "Wait for CI" is the motivating example and Inkling models no CI state at
 all. `State` has no rung for it and couldn't: check status is not a position
-on the merge ladder (a PR can be approved with failing checks), it's the
-attention-axis problem from DESIGN §2 all over again. It needs its own tiny
-lifecycle:
+on the merge ladder (a PR can be approved with failing checks). It is a second
+axis, not another rung, and needs its own tiny lifecycle:
 
 ```
 CheckState { Pending, Failure, Success }     // terminal: Failure, Success
@@ -161,13 +148,12 @@ Costs, itemized:
   no checks, queued, in-progress, a re-run — need recorded fixtures, W0.
 - **Domain**: the enum, its terminality, and the predicate arm. Small.
 - **A real semantic wrinkle**: check terminality is not permanent. A new push
-  or a re-run takes a red rollup back to pending. The tracked snapshot's
-  invariant — terminal means stop polling forever — does not hold for checks.
-  This is the strongest reason checks state must **never enter the tracked
-  snapshot**: confined to the ephemeral wait loop, the wrinkle costs nothing
+  or a re-run takes a red rollup back to pending. The pull request
+  lifecycle's invariant — terminal means stop polling forever — does not hold
+  for checks. Confined to the ephemeral wait loop, the wrinkle costs nothing
   (each poll evaluates the current observation; the first terminal one ends
-  the wait, which is right for "so I can respond"). Let into `state.json`,
-  it breaks a load-bearing invariant of the reconcile loop.
+  the wait, which is right for "so I can respond"). Anything that stores
+  check state has to treat its terminality as provisional.
 - **Not modelled**: individual checks. `--until checks` answers "did CI
   finish, and green or red" via the rollup. "Wait for the deploy job
   specifically" is out of scope; the rollup is the line.
@@ -187,9 +173,9 @@ milestone rather than padding the first one.
 ## Exit codes and output
 
 Agents and scripts must distinguish outcomes without parsing prose.
-`run` uses 0/success, 1/partial, 2/failure, and the top-level error path
-exits 2 (src/main.rs); `wait` keeps 0 and 2 meaning the same and claims new
-codes rather than overloading 1:
+The top-level error path exits 2 (src/main.rs), and 1 means a partial
+result; `wait` keeps 0 and 2 meaning the same and claims new codes rather
+than overloading 1:
 
 | code | meaning |
 | --- | --- |
@@ -199,7 +185,7 @@ codes rather than overloading 1:
 | 4 | timed out, still undecided |
 | 5 | reference vanished — 404/not-visible; fails fast on the first poll rather than burning the timeout on a typo |
 
-Stdout is one JSON object, mirroring `run --json`'s style: outcome, final
+With `--json`, stdout is one JSON object: outcome, final
 observed state per reference, checks state when asked for, seconds waited
 (whole seconds — a poll-interval-derived duration has no sub-second
 precision), polls made. Progress chatter goes to the log layer, not stdout.
@@ -209,15 +195,13 @@ being optional-and-infinite; an unbounded wait is a hung agent.
 
 ## What this costs the existing product
 
-- **Code**: almost nothing changes. Reconcile, schedule, window, the ledger,
-  and the bridge are untouched. New: a pure `domain/wait.rs` (predicate +
-  fold), an app-level wait loop, `CheckState`, one provider field, and the
-  `waits.json` adapter.
-- **The missing lock gets urgent.** Two overlapping cron runs can already
-  silently clobber `state.json`; a household where `inkling` processes
-  routinely run for minutes makes hand-run-during-wait the normal case, not
-  the rare one. The waits file gets a lock from day one; `state.json` should
-  get the one DESIGN already promised, as its own small change.
+- **Code**: nothing existing changes, and the bridge is untouched. New: a
+  pure `domain/wait.rs` (predicate + fold), an app-level wait loop,
+  `CheckState`, one provider field, and the `waits.json` adapter.
+- **The missing lock gets urgent.** Once `inkling` processes routinely run
+  for minutes, overlapping ones are the normal case, not the rare one. The
+  waits file gets a lock from day one; `state.json` gets one as its own small
+  change.
 - **Logs interleave.** Two processes appending to the same daily log file
   (src/obs.rs) is currently impossible and becomes routine. Line-buffered
   appends are probably fine; worth one look, not a redesign.
@@ -226,12 +210,7 @@ being optional-and-infinite; an unbounded wait is a hung agent.
   ~120 points, and the lease means fan-out adds waiters, not queries.
 - **Conceptual surface.** The pitch grows a clause: Inkling observes external
   lifecycles — and now lets you block on one. That is a real widening, but it
-  stays on the observe side of the observe/act line, and the reaction feature
-  keeps its freshness contract (cron cadence) unchanged. The temptation to
-  resist: letting a wait's fresh observations update tracked records "since
-  we have them." That couples the 15-second world to the 20-minute world for
-  a signal nobody asked to be fresher, and it puts a second writer on the
-  ledger. Rejected.
+  stays on the observe side of the observe/act line.
 
 Not building any of it is also on the table for one piece: if real usage is
 always one waiter per PR, the W3 lease machinery is coordination without
@@ -239,7 +218,7 @@ load, and `wait` should stay a self-contained polling loop forever.
 
 ## Milestones
 
-PLAN.md's rules apply: each lands independently, tree green, changelog entry.
+Each lands on its own, with the tree green and a changelog entry.
 
 - **W0 — fixtures and numbers. Done.** All four rollup shapes recorded from
   the live API and kept as constants in `src/adapters/github.rs`'s tests:
@@ -259,12 +238,11 @@ PLAN.md's rules apply: each lands independently, tree green, changelog entry.
 
 ### Where the build departed from the design
 
-- **The lock is `flock` via `libc`, not `fs2`.** PLAN's dependency budget
-  named `fs2`, but `libc` is already a direct dependency and the mechanism is
-  a dozen lines. It also gets the property a hand-rolled lockfile misses: the
-  kernel releases the lock when the process dies, so a `kill -9` can't leave
-  a stale one. `state.json` got the lock DESIGN §4 always promised, as its
-  own change.
+- **The lock is `flock` via `libc`, not `fs2`.** The plan named `fs2`, but
+  `libc` is already a direct dependency and the mechanism is a dozen lines.
+  It also gets the property a hand-rolled lockfile misses: the kernel
+  releases the lock when the process dies, so a `kill -9` can't leave a stale
+  one. `state.json` got the same lock, as its own change.
 - **A partial reading is not judged.** Not in the design, and load-bearing: a
   waiter whose shared readings cover only some of its references would fold
   `min` over the subset and could report met while the missing reference is
@@ -278,7 +256,7 @@ PLAN.md's rules apply: each lands independently, tree green, changelog entry.
   rollup as a repository without CI. It is also what a repository *with* CI
   reports for the few seconds after a push, before its first check run
   exists, so a wait started then precluded at 0s (dpep/inkling#13). Measured
-  on the probe repository: after a push the head had no rollup for 2–4s, then
+  on a scratch probe repository (since deleted): after a push the head had no rollup for 2–4s, then
   `PENDING`; across 52 PR openings in dpep repos the Actions suite appeared
   2–7s after, with one at 54s. The discriminator is the repository's history:
   each batch asks every repository once for its last five pull requests'
@@ -364,18 +342,18 @@ collector.
 - **Waits cluster on Slack-side conditions.** If what people actually ask is
   "wait until someone reacts / replies," the GitHub-only design missed the
   point — and the answer is probably still no, because a 15s flaky bridge is
-  a terrible substrate for a tight poll loop; that demand feeds the Slack
-  app roadmap instead.
+  a terrible substrate for a tight poll loop; that demand feeds [a real Slack
+  app](deferred.md#becoming-a-real-slack-app) instead.
 - **One waiter per PR, always.** Then W3 never earns itself: drop the lease,
   keep `wait` a self-contained loop, delete this doc's hardest section.
 - **Dozens of concurrent long waits.** The cooperative model is the wrong
-  side of the daemon line; revisit alongside the hosted push-driven design
-  rather than growing a bespoke daemon here.
+  side of the daemon line; revisit alongside a push-driven design rather
+  than growing a bespoke daemon here.
 - **Predicate pressure.** Repeated asks for a specific check, an author
   filter, a label — evidence the one-word vocabulary is too small. The
   answer is a named flag per proven case, never an expression language; if a
   flag can't express it, that's the signal this belongs in a different tool.
 - **`--then` requests keep coming.** Hold the line: the shell composes. If
   agents genuinely can't (no persistent shell), that's a fact about agent
-  harnesses worth designing for deliberately — as a proposed change to the
-  automation non-goal, not a quiet flag.
+  harnesses worth designing for deliberately — as a proposed change to
+  [Observe, never act](watching.md#observe-never-act), not a quiet flag.

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+**Upgrading.** Nothing to do. Config keys that only the Slack reactions read — `[window]`,
+`[tracking]`, `[filters]`, `[status]`, `[run]`, `slack.personal`, `slack.channels` — are ignored, so
+an old config keeps loading. A `slackmcp` left in your `BIN_DIR` is no longer updated; delete it.
+
+### Changed
+
+- **The Claude Code plugin has a public home.** `/plugin marketplace add dpep/claude`, then
+  `/plugin install inkling@dpep`, gets the four hooks and the inkling skill. If you installed the
+  plugin from anywhere else, uninstall that copy first so its hooks don't run twice.
+- **Install from GitHub with Cargo**: `cargo install --git https://github.com/dpep/inkling`. The
+  README now starts from what you need and how to install, and the design history (`DESIGN.md`,
+  `PLAN.md`, the dogfood log) is gone from the tree; git history keeps it.
+
+### Removed
+
+- **The Slack reactions**: `inkling run`, the `slackmcp` binary, and their config. Hidden and
+  undocumented since 0.3.0; watching a Slack message or channel is unaffected.
+
 ## 0.3.0 — 2026-11-18
 
 **Upgrading.** The watch store moves to version 4 on its first write; nothing to do. An older
@@ -21,7 +41,7 @@ watch it, add the Slack tools to the `PostToolUse` matcher (below).
   minutes, on a thread of their own so GitHub and Jira news never waits for them. **To have posting
   a message watch it, add the Slack send and react tools to the `PostToolUse` matcher:**
   `"matcher": "Bash|mcp__claude_ai_Slack__slack_send_message|mcp__claude_ai_Slack__slack_add_reaction"`
-  (the myclaude plugin's `hooks.json` has it). A `curl` to `chat.postMessage` is watched through
+  (the Claude Code plugin's `hooks.json` has it). A `curl` to `chat.postMessage` is watched through
   the existing `Bash` matcher.
 - **Watch a whole Slack channel.** `inkling watch '#incidents' --ttl 7d` (or its id, or its link)
   reports each round of new top-level messages as `3 messages from @john and @jane`. Explicit only:
@@ -52,7 +72,7 @@ watch it, add the Slack tools to the `PostToolUse` matcher (below).
 - **Pushed lines carry facts, not commands.** A line keeps only what reading the news needs and
   the reference doesn't say: `(job 106193645679)` for a red Actions check instead of the `gh api
   …/logs` command, nothing for a red check from another app instead of `gh pr checks`, `1 on a
-  line` for comments, `(thread <root ts>)`, `(C0E48AHSN, after <ts>)`. The commands are in the
+  line` for comments, `(thread <root ts>)`, `(C0E00000A, after <ts>)`. The commands are in the
   inkling skill; `inkling events` rows still end in them, and `--json` carries them as `lookup`,
   plus `partial` and `own`.
 - **One push per round.** Everything due to a session at once arrives as one message, a line per
@@ -167,8 +187,8 @@ Two things to know when upgrading from 0.1.0: run `make install` once more, and 
 
 ## 0.1.0 — 2026-09-20
 
-First tagged release. Private: install with `git clone` + `make install`; there is no Homebrew
-formula and nothing on crates.io. The Claude Code side ships as `inkling@myclaude`.
+First tagged release, installed from source with `make install`; there is no Homebrew formula and
+nothing on crates.io. The hooks ship as a Claude Code plugin.
 
 - **A hook can no longer cost you a prompt.** If `config.toml` didn't parse, every hook exited 2 —
   which on `UserPromptSubmit` erases the prompt you just typed and on `SessionStart` blocks the
