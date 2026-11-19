@@ -1,8 +1,11 @@
 # Wiring inkling into Claude Code
 
-Deliberately outside the skill, so the skill stays a copy of one file:
-`inkling-skill.md` here is the source, and each release copies it into the
-`inkling` plugin in [dpep/claude](https://github.com/dpep/claude).
+Inkling runs on macOS and Linux. Install the binary first; everything below
+needs it on `PATH`:
+
+```sh
+cargo install --git https://github.com/dpep/inkling
+```
 
 ## The plugin (recommended)
 
@@ -11,15 +14,18 @@ Deliberately outside the skill, so the skill stays a copy of one file:
 /plugin install inkling@dpep
 ```
 
-That brings the four hooks and the skill. The plugin needs the binary on PATH:
-
-```sh
-cargo install --git https://github.com/dpep/inkling
-```
+That brings the four hooks and the skill.
 
 ## By hand
 
-Install the binary as above, add the hooks from the README's Quick start to
-`~/.claude/settings.json`, and copy `inkling-skill.md` to
-`~/.claude/skills/inkling/SKILL.md`. Don't do both: with the plugin enabled as
-well, every hook fires twice.
+1. Add the hooks from the README's Quick start to `~/.claude/settings.json`.
+2. Copy `inkling-skill.md` to `~/.claude/skills/inkling/SKILL.md`.
+
+Pick one way, not both. With the plugin enabled as well, every hook fires
+twice.
+
+## Why the skill lives here
+
+`inkling-skill.md` is the source of truth for the skill. Each release copies it
+into the `inkling` plugin in [dpep/claude](https://github.com/dpep/claude), so
+edit it here, never there.
