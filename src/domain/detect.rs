@@ -1,4 +1,4 @@
-//! Finding the external things a Slack message points at.
+//! Finding the things an argument or a command's output points at.
 //!
 //! The hard half — pulling URLs out of prose and parsing them into parts — is
 //! `iriq`'s. What is left is a structural match on the path shape, which is
@@ -8,14 +8,14 @@
 use crate::domain::model::Reference;
 use iriq::Extractor;
 
-/// What a positional argument to `run` turned out to mean.
+/// What a positional argument turned out to mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// A fully-qualified pull request.
     Reference(Reference),
     /// A reference missing some of its parts — `inkling#2`, `dpep/inkling#2`,
-    /// or a bare `2`. Ambiguous until matched against tracked records;
-    /// guessing the rest would react to the wrong pull request.
+    /// or a bare `2`. Ambiguous until matched against what is watched;
+    /// guessing the rest would watch the wrong pull request.
     Partial {
         owner: Option<String>,
         repo: Option<String>,
@@ -24,7 +24,7 @@ pub enum Target {
     Channel(String),
 }
 
-/// Classify one `run` argument.
+/// Classify one positional argument.
 ///
 /// Order matters: a URL is unambiguous and wins, then the short form Inkling
 /// prints in its own output, then a bare number, then anything else is a
@@ -805,9 +805,8 @@ mod tests {
 
     #[test]
     fn jira_keys_are_not_detected_in_slack_prose() {
-        // Watching a ticket is opt-in. Left in `detect`, every "AI-123" in a
-        // message would become a tracked record the reaction loop must map to
-        // an emoji — a product decision nobody made.
+        // Watching a ticket is opt-in. Left in `detect`, every "AI-123" in
+        // prose would become a watch — a product decision nobody made.
         assert!(detected("AI-123 is next").is_empty());
         assert!(detected("https://example.atlassian.net/browse/AI-1").is_empty());
     }

@@ -1,14 +1,14 @@
-//! Logging, sized for a thing that runs unattended from cron.
+//! Logging, sized for a thing that runs unattended in hooks and a resident
+//! server.
 //!
-//! Two audiences. A human reading a terminal wants one readable line per run.
-//! A human debugging a run that went wrong three days ago wants the file, with
-//! enough structure to answer "which message, which PR, what state, why
-//! nothing happened".
+//! Two audiences. A human reading a terminal wants one readable line per
+//! command. A human debugging something that went wrong three days ago wants
+//! the file, with enough structure to answer "which reference, what state,
+//! why nothing happened".
 //!
-//! Log files rotate daily and are capped, so an unattended job can't fill a
-//! disk. Nothing here ever logs a token, and message text only appears at
-//! trace level — an annotation tool shouldn't quietly build a copy of a
-//! private Slack channel on disk.
+//! Log files rotate daily and are capped, so an unattended process can't fill
+//! a disk. Nothing here ever logs a token or what a Slack message says — a
+//! watcher shouldn't quietly build a copy of a private channel on disk.
 
 use std::path::{Path, PathBuf};
 use tracing_appender::non_blocking::WorkerGuard;

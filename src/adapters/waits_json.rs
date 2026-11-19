@@ -12,12 +12,9 @@
 //! `--timeout` implies, and whoever next holds the file drops the expired
 //! ones, so the orphan-record problem is defined away rather than handled.
 //!
-//! Deliberately not `state.json`: the cron run never reads this file and
-//! waiters never write that one, so waiting adds no contention to the
-//! product that exists. The cost is two sources of truth about a pull
-//! request, accepted because they want different freshness — the reaction
-//! loop backs off as a message ages, while a wait is the opposite fact,
-//! someone blocked right now.
+//! Deliberately not `watches.json`: a wait is someone blocked right now and
+//! wants a fresher reading than a watch's backoff gives, so the two keep
+//! their own records rather than contend for one file.
 
 use crate::adapters::lock::FileLock;
 use crate::domain::model::{Reference, State};
@@ -87,7 +84,7 @@ pub enum Seen {
 }
 
 impl Waits {
-    /// `$XDG_STATE_HOME/inkling/waits.json`, beside the run state.
+    /// `$XDG_STATE_HOME/inkling/waits.json`, beside `state.json`.
     pub fn default_path() -> PathBuf {
         let mut path = crate::adapters::store_json::JsonStore::default_path();
         path.set_file_name("waits.json");

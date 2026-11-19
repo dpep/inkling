@@ -1,4 +1,5 @@
-//! `inkling` — annotate Slack messages with the state of what they link to.
+//! `inkling` — tells an agent when a pull request, Jira issue or Slack message
+//! it cares about changes.
 
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -17,9 +18,10 @@ use std::path::PathBuf;
 #[command(
     name = "inkling",
     version,
-    about = "Tell an agent when a pull request or Jira issue it cares about changes.",
-    long_about = "Watches GitHub pull requests and Jira issues and reports each transition \
-once: checks going red or green, an approval, a merge, a status change.\n\n\
+    about = "Tell an agent when a pull request, Jira issue or Slack message it cares about changes.",
+    long_about = "Watches GitHub pull requests, Jira issues, and Slack messages and channels, \
+and reports each transition once: checks going red or green, an approval, a merge, a status \
+change, a reply.\n\n\
 `wait` blocks until a pull request gets somewhere; `watch` and `events` register \
 interest and read what moved later; `subscribe` and `hook` push news into a \
 Claude Code session as it happens.\n\n\
@@ -38,7 +40,8 @@ struct Common {
     /// Config file. Defaults to $XDG_CONFIG_HOME/inkling/config.toml
     #[arg(long, short, global = true)]
     config: Option<PathBuf>,
-    /// State file. Defaults to $XDG_STATE_HOME/inkling/state.json
+    /// Cached Slack lookups: channel ids, and your own user id. Defaults to
+    /// $XDG_STATE_HOME/inkling/state.json
     #[arg(long, global = true)]
     state: Option<PathBuf>,
     /// Where waiters coordinate. Defaults to $XDG_STATE_HOME/inkling/waits.json
@@ -96,12 +99,13 @@ enum Command {
     },
     /// Watch things, and learn later what changed.
     ///
-    /// Registers interest and returns. Nothing blocks and nothing runs in the
-    /// background: `inkling events` reads what has moved since it last
-    /// looked, polling first if its readings have gone stale.
+    /// Registers interest and returns. A resident server keeps reading while
+    /// anything is watched; `inkling events` reads what has moved since it
+    /// last looked, polling first if its readings have gone stale.
     ///
-    /// With no arguments, lists what is being watched. Every watch expires at
-    /// its `--ttl`, and that expiry is the only cleanup there is.
+    /// With no arguments, lists what is being watched. A watch ends when what
+    /// it watches finishes — a pull request merged or closed, an issue done —
+    /// or can no longer be found, or at its `--ttl`, whichever comes first.
     Watch {
         /// Pull requests — a URL, `owner/repo#12`, or a shorter form matching
         /// something watched — and Jira issues, as a key like `AI-123` or a
@@ -317,7 +321,7 @@ fn main() {
         directory,
         keep_days: cli.common.log_keep_days,
         verbosity: cli.common.verbose,
-        // The run summary is printed on stdout; the terminal layer would
+        // A command's output is printed on stdout; the terminal layer would
         // otherwise say everything twice.
         quiet: cli.common.verbose == 0,
     });
@@ -336,8 +340,8 @@ fn main() {
         }
     };
     // process::exit skips destructors, which would strand whatever the
-    // background log writer still holds — including the run summary and any
-    // error that explains the exit code.
+    // background log writer still holds — including any error that explains
+    // the exit code.
     drop(_logging);
     std::process::exit(code);
 }
@@ -1003,8 +1007,8 @@ fn known(
 ///
 /// The one rule, for every command that takes a reference: `owner/repo#N`
 /// names a pull request completely once the host defaults, and only the forms
-/// shorter than that — `repo#N`, `#N`, `N` — need a tracked record, where a
-/// short form genuinely selects among what is tracked.
+/// shorter than that — `repo#N`, `#N`, `N` — need a watch, where a short
+/// form genuinely selects among what is watched.
 ///
 /// A rule per command is what dogfooding caught: `watch` learned the first
 /// half and `wait` did not, and both suites stayed green.
@@ -1028,8 +1032,8 @@ fn complete(
     }
 }
 
-/// Find the one tracked record a short reference selects. Exactly one match or
-/// nothing: reacting to the wrong pull request is worse than being asked for a
+/// Find the one watch a short reference selects. Exactly one match or
+/// nothing: acting on the wrong pull request is worse than being asked for a
 /// fuller reference.
 fn resolve(
     owner: &Option<String>,
@@ -1084,21 +1088,15 @@ fn resolve(
     }
 }
 
-/// Split `run`'s arguments into channels to search and pull requests to
-/// check now.
-///
-/// A bare number is resolved against what's already tracked, and only when
-/// exactly one record matches. Guessing a repository would react to the
-/// wrong pull request, which is worse than asking for a fuller reference.
 /// clap needs an owned error; `Until`'s own is already one.
 fn parse_until(arg: &str) -> Result<inkling::domain::wait::Until, String> {
     arg.parse()
         .map_err(|e: inkling::domain::wait::UnknownUntil| e.to_string())
 }
 
-/// The same targets `run` takes, minus channels — there is no such thing as
-/// waiting for a channel, and reading one as a typo'd pull request is kinder
-/// than polling something that will never resolve.
+/// Pull requests only — there is no such thing as waiting for a channel, and
+/// reading one as a typo'd pull request is kinder than polling something that
+/// will never resolve.
 fn wait_targets(
     targets: &[String],
     hosts: &[String],
@@ -3020,8 +3018,8 @@ mod tests {
 
     #[test]
     fn a_shorter_form_selects_what_is_already_watched() {
-        // Found by dogfooding: short forms matched only what the Slack
-        // reactions tracked, so with those parked `wait 3` never worked.
+        // Found by dogfooding: short forms once matched only what the Slack
+        // reactions tracked, so `wait 3` never worked.
         let now = chrono::Utc::now();
         let mut watches = Watches::default();
         watches.watch(&pr(3), "cli", now + chrono::TimeDelta::hours(1), now);

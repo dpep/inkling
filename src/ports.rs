@@ -62,9 +62,8 @@ pub struct RefStatus {
     pub title: String,
     /// Where CI stands, or `None` when the repository runs none.
     ///
-    /// Read by `wait` and by nothing else. It deliberately never reaches the
-    /// tracked snapshot: a finished suite can go back to pending on a push,
-    /// and the snapshot's terminality means "stop polling forever".
+    /// Never part of `state`: a finished suite can go back to pending on a
+    /// push, and a terminal state means "stop polling forever".
     pub checks: Option<CheckState>,
     /// A check that is red, when one is. "Checks went red" is most of a page
     /// of investigation; "checks went red: tidy" is a command.
@@ -168,8 +167,8 @@ pub trait MessageProvider {
 /// Where a wait gets its readings.
 ///
 /// Identical in shape to `StatusProvider` and deliberately separate: a wait
-/// asks "what is true now", on behalf of someone blocked, while the run loop
-/// asks on a cron cadence. Naming the seam is what lets one waiter poll on
+/// asks "what is true now", on behalf of someone blocked, while a watch asks
+/// on its own schedule. Naming the seam is what lets one waiter poll on
 /// everyone's behalf without the callers knowing (docs/waiting.md, W3), and
 /// is where webhook delivery would land if polling ever stops being the
 /// mechanism.
