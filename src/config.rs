@@ -2,7 +2,6 @@
 //! the resident server paces itself. Every field has a default.
 
 use serde::Deserialize;
-use serde::de::IgnoredAny;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,19 +33,35 @@ pub struct Config {
     pub github: GitHub,
     #[serde(default)]
     pub serve: Serve,
-    // Sections only the removed Slack reactions read. Accepted and ignored,
-    // so a config written for them still loads; any other unknown key is
-    // still a typo worth refusing.
-    #[serde(default, rename = "window")]
-    _window: IgnoredAny,
-    #[serde(default, rename = "tracking")]
-    _tracking: IgnoredAny,
-    #[serde(default, rename = "filters")]
-    _filters: IgnoredAny,
-    #[serde(default, rename = "status")]
-    _status: IgnoredAny,
-    #[serde(default, rename = "run")]
-    _run: IgnoredAny,
+}
+
+/// Keys only the removed Slack reactions read. Dropped before the strict
+/// parse, so a config written for them still loads while any other unknown
+/// key is still a typo worth refusing — and the refusal doesn't list them.
+pub const RETIRED: &[&str] = &[
+    "window",
+    "tracking",
+    "filters",
+    "status",
+    "run",
+    "slack.personal",
+    "slack.channels",
+    "slack.mcp.tools.search",
+];
+
+/// Remove a dotted key from a parsed table, if it is there.
+fn strip(table: &mut toml::de::DeTable<'_>, key: &str) {
+    match key.split_once('.') {
+        None => {
+            table.remove(key);
+        }
+        Some((head, rest)) => {
+            if let Some(toml::de::DeValue::Table(inner)) = table.get_mut(head).map(|v| v.get_mut())
+            {
+                strip(inner, rest);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -64,11 +79,6 @@ pub struct Slack {
     /// reliability depend on things Inkling can't see.
     #[serde(default)]
     pub mcp: Option<SlackMcp>,
-    // Where the removed reactions searched; ignored, as in `Config`.
-    #[serde(default, rename = "personal")]
-    _personal: IgnoredAny,
-    #[serde(default, rename = "channels")]
-    _channels: IgnoredAny,
 }
 
 /// A declarable MCP server, named explicitly so the subprocess can be scoped
@@ -116,9 +126,6 @@ pub struct SlackMcpTools {
     pub read_user_profile: String,
     #[serde(default = "d_send_message")]
     pub send_message: String,
-    // The removed reactions' search tool; ignored, as in `Config`.
-    #[serde(default, rename = "search")]
-    _search: IgnoredAny,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -187,10 +194,21 @@ impl Config {
     }
 
     pub fn parse(raw: &str, path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let config: Config = toml::from_str(raw).map_err(|source| ConfigError::Parse {
-            path: path.as_ref().to_owned(),
-            source,
-        })?;
+        let parse_error = |mut source: toml::de::Error| {
+            // Deserializing from a table rather than the text drops the
+            // input the error quotes; its span survives.
+            source.set_input(Some(raw));
+            ConfigError::Parse {
+                path: path.as_ref().to_owned(),
+                source,
+            }
+        };
+        let mut root = toml::de::DeTable::parse(raw).map_err(parse_error)?;
+        for key in RETIRED {
+            strip(root.get_mut(), key);
+        }
+        let config =
+            Config::deserialize(toml::de::Deserializer::from(root)).map_err(parse_error)?;
         config.validate()?;
         Ok(config)
     }
@@ -253,7 +271,6 @@ impl Default for SlackMcpTools {
             read_thread: d_read_thread(),
             read_user_profile: d_read_user_profile(),
             send_message: d_send_message(),
-            _search: IgnoredAny,
         }
     }
 }
@@ -519,6 +536,15 @@ mod tests {
         assert!(err.contains("parsing"), "{err}");
         let err = error("[watch]\nttl = \"1d\"\n");
         assert!(err.contains("parsing"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_key_names_only_live_sections_and_where_it_is() {
+        // Retired sections load, but aren't keys anyone should be pointed at.
+        let err = error("[serve]\ninterval = \"5s\"\n\n[bogus]\nkey = 1\n");
+        assert!(err.contains("`slack`, `github`, `serve`"), "{err}");
+        assert!(!err.contains("window"), "{err}");
+        assert!(err.contains("line 4"), "{err}");
     }
 
     #[test]

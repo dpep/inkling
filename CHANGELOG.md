@@ -8,6 +8,8 @@
   a file under `/`, and push silently never happened.
 - **`--log-dir off` means off for reading too.** `status` and `logs` say logging is off instead of
   reporting on the default log directory.
+- **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
+  ones.
 
 ## 0.4.0 — 2026-11-18
 

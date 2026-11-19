@@ -7,7 +7,7 @@
 //! These operate on the *file*. Effective values, including everything the
 //! file doesn't mention, come from `inkling config` instead.
 
-use crate::config::Config;
+use crate::config::{Config, RETIRED};
 use std::path::Path;
 use toml_edit::{Array, DocumentMut, Item, Value};
 
@@ -60,19 +60,8 @@ pub fn load(path: &Path) -> Result<DocumentMut, EditError> {
     })
 }
 
-/// Keys only the removed Slack reactions read. `Config` accepts and ignores
-/// them on load, but setting one would write a knob nothing turns.
-const RETIRED: &[&str] = &[
-    "window",
-    "tracking",
-    "filters",
-    "status",
-    "run",
-    "slack.personal",
-    "slack.channels",
-    "slack.mcp.tools.search",
-];
-
+/// Whether `key` is, or is inside, one `Config` ignores on load. Setting one
+/// would write a knob nothing turns.
 fn retired(key: &str) -> bool {
     RETIRED.iter().any(|r| {
         key.strip_prefix(r)
