@@ -62,7 +62,7 @@ pub fn load(path: &Path) -> Result<DocumentMut, EditError> {
 
 /// Whether `key` is, or is inside, one `Config` ignores on load. Setting one
 /// would write a knob nothing turns.
-fn retired(key: &str) -> bool {
+pub fn retired(key: &str) -> bool {
     RETIRED.iter().any(|r| {
         key.strip_prefix(r)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
@@ -96,7 +96,8 @@ pub fn set(document: &mut DocumentMut, key: &str, value: &str) -> Result<(), Edi
 
     // Removing one is still allowed: that's how a dead key leaves the file.
     if value.is_empty() {
-        return remove(document, &segments);
+        remove(document, key);
+        return Ok(());
     }
     if retired(key) {
         return Err(EditError::Retired {
@@ -140,20 +141,51 @@ pub fn set(document: &mut DocumentMut, key: &str, value: &str) -> Result<(), Edi
     Ok(())
 }
 
-fn remove(document: &mut DocumentMut, segments: &[&str]) -> Result<(), EditError> {
-    let (last, parents) = segments.split_last().expect("never empty");
-    let mut item: &mut Item = document.as_item_mut();
-    for segment in parents {
-        item = match item.get_mut(segment) {
-            Some(next) => next,
-            // Removing something already absent is the desired end state.
-            None => return Ok(()),
-        };
+/// Remove a key, and any table that leaves empty. Returns whether it was
+/// there; when it wasn't, the document is untouched.
+pub fn remove(document: &mut DocumentMut, key: &str) -> bool {
+    let leading = leading_comment(&document.to_string());
+    let segments: Vec<&str> = key.split('.').collect();
+    let removed = remove_in(document.as_table_mut(), &segments);
+
+    // A file's opening comment is decor on whatever came first; when that
+    // goes, the comment would go with it.
+    let text = document.to_string();
+    if removed && !text.starts_with(&leading) {
+        *document = format!("{leading}{text}")
+            .parse()
+            .expect("comments before valid TOML are valid TOML");
     }
-    if let Some(table) = item.as_table_like_mut() {
-        table.remove(last);
+    removed
+}
+
+/// Walks with `TableLike::get_mut`: `Item::get_mut` inserts what it doesn't
+/// find.
+fn remove_in(table: &mut dyn toml_edit::TableLike, path: &[&str]) -> bool {
+    let (first, rest) = path.split_first().expect("never empty");
+    if rest.is_empty() {
+        return table.remove(first).is_some();
     }
-    Ok(())
+    let Some(inner) = table.get_mut(first).and_then(Item::as_table_like_mut) else {
+        return false;
+    };
+    let removed = remove_in(inner, rest);
+    if removed && inner.is_empty() {
+        table.remove(first);
+    }
+    removed
+}
+
+/// The comment lines a file opens with, or nothing if it opens otherwise.
+fn leading_comment(text: &str) -> String {
+    let lines: String = text
+        .split_inclusive('\n')
+        .take_while(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+        .collect();
+    match lines.contains('#') {
+        true => lines,
+        false => String::new(),
+    }
 }
 
 /// Guess the TOML type from how the value is written, which is what someone
@@ -316,9 +348,40 @@ idle_after = "5m"
 
     #[test]
     fn removing_something_absent_is_not_an_error() {
+        // Nor a change: walking to it must not create the tables on the way.
         let mut d = doc();
-        assert!(set(&mut d, "github.never_set", "").is_ok());
-        assert!(set(&mut d, "nothing.here.at.all", "").is_ok());
+        assert!(!remove(&mut d, "github.never_set"));
+        assert!(!remove(&mut d, "nothing.here.at.all"));
+        assert!(!remove(&mut d, "serve.idle_after.deeper"));
+        assert_eq!(d.to_string(), SAMPLE);
+
+        // The cleanup the 0.4.0 changelog tells people to run.
+        let raw = "# lead\n[slack]\nuser_id = \"U1\"\n";
+        let mut d: DocumentMut = raw.parse().unwrap();
+        assert!(!remove(&mut d, "slack.mcp.tools.search"));
+        assert_eq!(d.to_string(), raw);
+    }
+
+    #[test]
+    fn removing_the_last_key_drops_its_table_but_not_the_files_leading_comment() {
+        let mut d = doc();
+        assert!(remove(&mut d, "serve.idle_after"));
+        assert!(!d.to_string().contains("[serve]"), "{d}");
+
+        let mut d = doc();
+        assert!(remove(&mut d, "github.token_command"));
+        assert!(remove(&mut d, "github.ignore_checks"));
+        let out = d.to_string();
+        assert!(!out.contains("[github]"), "{out}");
+        assert!(out.starts_with("# Inkling config\n"), "{out}");
+        assert_eq!(get(&d, "serve.idle_after").unwrap(), "5m");
+
+        // Up through every table the removal emptied.
+        let mut d: DocumentMut = "[slack]\nuser_id = \"U1\"\n[slack.mcp.tools]\nsearch = \"x\"\n"
+            .parse()
+            .unwrap();
+        assert!(remove(&mut d, "slack.mcp.tools.search"));
+        assert_eq!(d.to_string(), "[slack]\nuser_id = \"U1\"\n");
     }
 
     #[test]

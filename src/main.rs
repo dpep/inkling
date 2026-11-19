@@ -462,17 +462,21 @@ fn run(cli: &Cli) -> Result<i32, String> {
             action: Some(ConfigAction::Set { key, value }),
         } => {
             let mut document = config_edit::load(&path).map_err(|e| e.to_string())?;
+            if value.is_empty() {
+                // Nothing removed, nothing written: not even an empty file.
+                let removed = config_edit::remove(&mut document, key);
+                if removed {
+                    config_edit::save(&path, &document).map_err(|e| e.to_string())?;
+                }
+                println!("{}", removal_out(key, removed));
+                return Ok(0);
+            }
             config_edit::set(&mut document, key, value).map_err(|e| e.to_string())?;
             config_edit::save(&path, &document).map_err(|e| e.to_string())?;
-
-            if value.is_empty() {
-                println!("removed {key} — now using the default");
-            } else {
-                println!(
-                    "{key} = {}",
-                    config_edit::get(&document, key).unwrap_or_default()
-                );
-            }
+            println!(
+                "{key} = {}",
+                config_edit::get(&document, key).unwrap_or_default()
+            );
             return Ok(0);
         }
         _ => {}
@@ -969,6 +973,15 @@ fn logs(
             }
         }
         offset = text.len();
+    }
+}
+
+/// What `config set <key> ""` did.
+fn removal_out(key: &str, removed: bool) -> String {
+    match (removed, config_edit::retired(key)) {
+        (false, _) => format!("{key} wasn't set; nothing to remove"),
+        (true, true) => format!("removed {key} (retired, no effect)"),
+        (true, false) => format!("removed {key} — now using the default"),
     }
 }
 
@@ -2743,6 +2756,24 @@ mod tests {
         let off = super::Cli::try_parse_from(["inkling", "status", "--log-dir=off"]).unwrap();
         let common = off.common.anchored(std::path::Path::new("/work"));
         assert_eq!(common.log_dir.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn removing_a_key_says_what_it_changed() {
+        use super::removal_out;
+        assert_eq!(
+            removal_out("serve.interval", true),
+            "removed serve.interval — now using the default"
+        );
+        // A retired key has no default to fall back to.
+        assert_eq!(
+            removal_out("slack.personal", true),
+            "removed slack.personal (retired, no effect)"
+        );
+        assert_eq!(
+            removal_out("slack.personal", false),
+            "slack.personal wasn't set; nothing to remove"
+        );
     }
 
     use super::{

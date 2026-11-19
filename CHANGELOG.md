@@ -8,6 +8,10 @@
   a file under `/`, and push silently never happened.
 - **`--log-dir off` means off for reading too.** `status` and `logs` say logging is off instead of
   reporting on the default log directory.
+- **`config set <key> ""` removes without creating.** Removing an absent key no longer writes empty
+  parent tables (which broke the `slack.mcp.tools.search` cleanup below with "missing field
+  server") or an empty config file; removing a table's last key drops the table, keeping the
+  file's opening comment. It says when the key wasn't set, or was retired.
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 
