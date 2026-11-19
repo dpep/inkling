@@ -355,6 +355,15 @@ fn log_directory(common: &Common) -> PathBuf {
     }
 }
 
+/// Where `inkling config` says logs go: the directory being written, or that
+/// writing is off.
+fn logs_shown(common: &Common) -> String {
+    match common.log_dir.as_deref() {
+        Some("off") => "off".to_string(),
+        _ => tildify(&log_directory(common)),
+    }
+}
+
 fn config_path(common: &Common) -> PathBuf {
     common.config.clone().unwrap_or_else(|| {
         let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -465,7 +474,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
             };
             println!("config     {}{absent}", tildify(&path));
             println!("state      {}", tildify(store.path()));
-            println!("logs       {}", tildify(&obs::default_log_directory()));
+            println!("logs       {}", logs_shown(&cli.common));
 
             println!();
             println!("github     {}", credentials(&config));
@@ -2653,6 +2662,24 @@ fn wait_out(report: &inkling::wait::Report, json: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn config_shows_the_log_directory_in_use() {
+        use clap::Parser;
+        let shown = |args: &[&str]| {
+            let cli = super::Cli::try_parse_from(args).unwrap();
+            super::logs_shown(&cli.common)
+        };
+        assert_eq!(
+            shown(&["inkling", "config", "--log-dir", "/private/tmp/scrub/logs"]),
+            "/private/tmp/scrub/logs"
+        );
+        assert_eq!(shown(&["inkling", "config", "--log-dir", "off"]), "off");
+        assert_eq!(
+            shown(&["inkling", "config"]),
+            super::tildify(&inkling::obs::default_log_directory())
+        );
+    }
+
     use super::{
         Config, HookEvent, HookInput, classify, ellipsize, finished_already, inside_bridge, news,
         noticed, payload, swallowing, unread, wait_targets, watch_target, watch_targets, within,
