@@ -2,164 +2,105 @@
 
 ## Unreleased
 
-- **A command only mentioned inside another is no longer watched.** The post-tool hook watched a
-  pull request or Jira issue named anywhere in a command, including a commit message, a quoted JSON
-  payload or a heredoc body. Now `gh pr …` and `acli jira workitem` must be run as a command, at the
-  start of a shell segment.
+**Upgrading.** The watch store moves to version 4 on its first write; nothing to do. An older
+build now refuses a store a newer one wrote instead of wiping it, and a resident server running one
+stands down for the newer build, so `make install` hands over cleanly. Builds from before 0.3.0
+can't tell, so don't run 0.2.x against a store 0.3.0 has written. To have posting a Slack message
+watch it, add the Slack tools to the `PostToolUse` matcher (below).
 
-<!-- fix3-state -->
-- **A prompt no longer leaves `acli` processes behind.** A prompt hook that gave up refreshing
-  after 3s left the `acli` reads it had started running, past their own timeout. While a server is
-  running and ticking the prompt hook no longer looks upstream at all, since the server keeps
-  readings fresh; otherwise it refreshes as before.
-<!-- /fix3-state -->
+### New
 
-<!-- fix4-life -->
-- **`inkling unsubscribe` is a mute.** It stops pushes and nothing else: the session's watches,
-  Slack included, keep being read and shown at its prompt, and a server stays up for them. Run on
-  a session that has already ended, it does nothing and says so.
-<!-- /fix4-life -->
-
-<!-- fix2-github-jira -->
-- **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,
-  so a pull request on an enterprise host was reported as the same number on github.com. List only
-  the host `api_url` serves.
-- **One slow Jira issue no longer costs the others their reading.** An `acli` call that timed out
-  threw away every issue read that poll; now only that issue fails. Issues are read four at a
-  time rather than one after another, so a pull request read in the same poll waits less.
-- **One pull request typed in two letter cases is one watch.** `cli/cli#1` and `CLI/Cli#1` were
-  two watches, each reporting every change. Pull requests are now named in lowercase. A watch
-  made before this keeps its old spelling until it ends, so retyping it in another case can
-  still make a second one.
-- **News picked up at a prompt reads as a push does:** one message, `inkling: N changes` and a
-  line per change, with a message's new emoji on one line rather than one line each.
-<!-- /fix2-github-jira -->
-
-<!-- fix2-latency -->
-- **No GitHub login no longer means nothing is read.** A missing, lapsed or slow `gh auth token`
-  stopped every poll before it started, Jira and Slack included, and `inkling serve` refused to
-  start. The token is now fetched only when a pull request is due, and failing to get one fails
-  GitHub alone; the server starts without one and picks up a login made after it started.
-- **A command's time limit now holds.** A token command, `acli` or `claude -p` that left a
-  background process holding its output kept Inkling waiting as long as that process ran, past
-  the 2s, 5s or 180s limit; one that printed more than a pipe holds stalled until killed. Output
-  is now read as it arrives, and a command that runs out of time is killed with everything it
-  started.
-- **`inkling watch` reads only what it was given**, not every other watch that happened to be
-  due, and `inkling events` leaves Slack to a running server, so neither waits on a Slack read it
-  didn't ask for.
-<!-- /fix2-latency -->
-
-- **A watch on something that isn't there any more ends, once.** A Slack message that was
-  deleted, or a channel the connector can't see, used to be read (and paid for) every five minutes
-  until its deadline; its third such read in a row now says `state watched → gone` and the watch is
-  dropped.
-  `inkling watch` prints why a reference it was just given couldn't be read, and exits 1.
-- **Each Slack bridge call logs what it cost** as `total_cost_usd`, failed calls included.
-- **A pushed line no longer ends in a command.** It keeps only what reading the news needs and the
-  reference doesn't say: `3 comments from @a, 1 on a line` (which `gh pr view --comments` misses),
-  `(job 106193645679)` for a red Actions check instead of the `gh api …/logs` command (and nothing
-  for a red check from another app, instead of `gh pr checks`), `(thread
-  <root ts>)` for a threaded Slack message, `slack:#incidents | 3 messages from @john and @jane
-  (C0E48AHSN, after 1794976101.418449)` for a channel. The commands are in the inkling skill.
-  `inkling events` rows still end in them, and `--json` carries them as `lookup`, plus `partial`
-  and `own`.
-- **`inkling events` and `inkling watch` word things as the push does.** `events` text reads
-  `open → merged by @x`, `at least 40 comments from @bob`, then the read or the title; `watch`
-  says `1 reply, 2 reactions :dart:` and a channel's `12 messages since watched`. Past three
-  names, bots are counted apart from people: `from 5 people and 2 bots`.
-- **`inkling status` leads with watches, the server and who is subscribed**, and counts Slack
-  reads in `upstream`. The parked reactions' `last run` lines appear only if `run` has ever run,
-  last.
-- **`inkling events --since <id>:<n>` takes the id as `status` shows it**, the first eight
-  characters, when only one reader starts that way. An unknown id no longer claims its cursor was
-  collected.
-
-- **An older build no longer wipes the watch store.** A build that met a `watches.json` written by
-  a newer one (a channel watch, say) called it corrupt, set it aside and started empty, losing
-  every watch and cursor; one that could parse it saved back without the fields it didn't know.
-  Now an older build refuses the file and leaves it untouched, and a resident server running one
-  stands down for the newer build. The store is now version 3, so the build you are replacing
-  refuses it too — expected during `make install`. Builds from before this change still can't
-  tell, so don't run one against a store this build has written.
-- **A long watch no longer forgets its reader after a quiet week.** A reader silent for seven days
-  was dropped even while it owned a watch, so a `--ttl 30d` watch lost news still inside
-  retention, and a session waiting quietly lost its push address. A reader is now kept while it
-  owns a watch or is owed news, and a session that answers the server's probe counts as alive.
-- **CI news no longer waits for Slack.** The server reads Slack watches on a thread of their own,
-  so a pull request's or issue's change is read and pushed on schedule however long the Slack
-  reads (up to a minute or more each) take.
-- **A live session wrongly taken for ended comes back by itself.** A session resumed in the moment
-  between the server's probe and its write, or one whose socket refused a connection while busy,
-  was marked ended and its watches paused until its next `SessionStart`. The server now drops only
-  the address it actually probed, and the session's next prompt or tool call attaches it again.
-- **An ended session's watches are paused until it comes back.** Once every session watching
-  something has ended, Inkling stops reading it, so a session you closed stops paying for Slack
-  reads (about 2¢ each). `claude --resume` makes those watches due at once, and the first reading
-  reports the net change since you left. The deadline keeps running either way. Watches you own at
-  a terminal, or that belong to a session without the hooks, are never paused, and neither is a whole-channel watch. `inkling watch`
-  marks paused watches `(paused)`. `inkling status` counts them and lists their session as `ended`.
-- **New: a watched pull request reports new comments.** `github.com/you/repo#42 | 2 comments
-  from @alice and coderabbitai (bot), 1 on a line` — who and
-  how many, never what anybody wrote. Conversation comments, line comments and reviews with a body
-  count; an edited comment doesn't, so a coverage bot rewriting its comment on every push stays
-  quiet, and a deleted one is never news. Comments only you wrote stay in `events` without a push.
-  An approval that moves the state is said once, as the state change. Nothing to do: a watch
-  registered before this counts its comments at the next reading and reports only what comes after.
-
-- **New: watch a whole Slack channel.** `inkling watch '#incidents' --ttl 7d` (or the channel's
-  id, or its link) reports each round of new top-level messages as `3 messages from @john and
-  @jane` — who and how many, never what. Explicit only: the `post-tool` hook never watches a
-  channel. Thread replies don't count; a round only the session posted in isn't pushed; more than a page
-  (100) since the last read says `at least 100`. One `claude -p` per read (about 0.2–2¢), at most
-  every 5 minutes. A channel never finishes, so give it a longer `--ttl` than the 72h default.
-- **New: watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
-  `2 replies from @alice and @bob` and `1 reaction :white_check_mark:` — who and how many,
-  never what anybody wrote. A reply is a message in its thread, or a later one in the same
-  conversation: any in a DM, one that @mentions you in a channel. A reply the session posted itself
-  isn't news to it, and a reaction it added stays in `events` without a push — judged by what the hook saw it post, not by
-  author, since the Slack connector posts as you and your own reply from your phone must still
-  wake it. A removed reaction isn't pushed either. Reads go
-  through Claude Code's Slack connector (`claude -p`, about 2¢ each), so a Slack message is read
-  at most every 5 minutes, and only by the resident server, `watch` and `events`. **To have
-  posting a message watch it, add the Slack send and react tools to the `PostToolUse` matcher:**
+- **Watch a Slack message for replies and reactions.** `inkling watch <permalink>` reports
+  `2 replies from @alice and @bob` and `1 reaction :white_check_mark:` — who and how many, never
+  what anybody wrote. A reply is a message in its thread, or a later one in the same conversation:
+  any in a DM, one that @mentions you in a channel. Each reply is told to each session once, on
+  whichever of its watches reads it first. A reply or reaction the session posted itself isn't
+  pushed — judged by what the hook saw it post, not by author, so your own reply from your phone
+  still wakes it. A deleted message ends its watch (`state watched → gone`) after three reads in a
+  row. Reads go through Claude Code's Slack connector (`claude -p`, about 2¢ each), at most every 5
+  minutes, on a thread of their own so GitHub and Jira news never waits for them. **To have posting
+  a message watch it, add the Slack send and react tools to the `PostToolUse` matcher:**
   `"matcher": "Bash|mcp__claude_ai_Slack__slack_send_message|mcp__claude_ai_Slack__slack_add_reaction"`
-  (the myclaude plugin's `hooks.json` needs the same change). A `curl` to `chat.postMessage` is
-  watched through the existing `Bash` matcher.
-- **Inkling's hooks do nothing inside its own Slack bridge.** The bridge's `claude -p` child ran
-  the user's hooks, inkling's included; it now carries `INKLING_BRIDGE=1` and they return at once.
-  The bridge's call is also bounded by its timeout now, rather than waited on indefinitely.
+  (the myclaude plugin's `hooks.json` has it). A `curl` to `chat.postMessage` is watched through
+  the existing `Bash` matcher.
+- **Watch a whole Slack channel.** `inkling watch '#incidents' --ttl 7d` (or its id, or its link)
+  reports each round of new top-level messages as `3 messages from @john and @jane`. Explicit only:
+  the `post-tool` hook never watches a channel. Thread replies don't count; a round only the
+  session posted in isn't pushed; more than a page (100) says `at least 100`. A channel never
+  finishes, so give it a longer `--ttl` than the 72h default.
+- **A watched pull request reports new comments.** `github.com/you/repo#42 | 2 comments from
+  @alice and coderabbitai (bot), 1 on a line`. Conversation comments, line comments and reviews
+  with a body count; an edited comment doesn't, so a coverage bot rewriting its comment stays
+  quiet. Comments only you wrote stay in `events` without a push. A watch registered before this
+  reports only comments that come after.
+- **An ended session's watches are paused until it comes back.** Once every session watching
+  something has ended, Inkling stops reading it, so a closed session stops paying for Slack reads.
+  `claude --resume` makes them due at once and the first reading reports the net change. The
+  deadline keeps running. Terminal watches and channel watches are never paused. `inkling watch`
+  marks paused watches `(paused)`; `inkling status` counts them.
+- **`github.ignore_checks`.** Checks named here — a merge lock, a label policy — never turn a pull
+  request red or hold it pending: `ignore_checks = ["merge-lock"]`.
+- **A state change says who made it**: `state draft → merged by @you`, `open → approved by @alice
+  and review-bot (bot)`. A pull request reads `approved` only once GitHub's review requirement is
+  met.
+- **Commit statuses are read, not just check runs.** CI that reports as a commit status (Buildkite)
+  is named when red (`checks success → failure: buildkite/main`), and a pending one keeps the
+  checks pending.
 
-- **`42`, `#42` and `repo#42` now find what you are watching.** The short forms only ever matched
-  pull requests the Slack reactions had seen, so `inkling wait 42` and `inkling unwatch 42` failed
-  for a pull request you had watched by its full name. They now match your watches too, and still
-  refuse to guess between two.
+### Changed
+
+- **Pushed lines carry facts, not commands.** A line keeps only what reading the news needs and
+  the reference doesn't say: `(job 106193645679)` for a red Actions check instead of the `gh api
+  …/logs` command, nothing for a red check from another app instead of `gh pr checks`, `1 on a
+  line` for comments, `(thread <root ts>)`, `(C0E48AHSN, after <ts>)`. The commands are in the
+  inkling skill; `inkling events` rows still end in them, and `--json` carries them as `lookup`,
+  plus `partial` and `own`.
+- **One push per round.** Everything due to a session at once arrives as one message, a line per
+  change, so a merge queue landing fifteen pull requests costs one turn. News picked up at a prompt
+  reads the same way.
+- **Red is pushed only once a second reading agrees.** CI that marks a build red while a retry is
+  still running used to push a failure gone a minute later. A red push now waits about a minute
+  and is dropped if the checks moved on. Pull and `wait` are unchanged.
+- **`inkling unsubscribe` is a mute.** It stops pushes and nothing else: the session's watches keep
+  being read and shown at its prompt.
+- **`inkling events` and `inkling watch` word things as the push does**: `open → merged by @x`,
+  `at least 40 comments from @bob`, `1 reply, 2 reactions :dart:`. Past three names, bots are
+  counted apart from people: `from 5 people and 2 bots`.
+- **`inkling status` leads with watches, the server and who is subscribed**, and counts Slack reads
+  and their cost in `upstream`.
 - **`run` is hidden from `--help`, and the Slack reactions are no longer documented.** Inkling is
   the event feed for agents now; the reactions are parked (docs/deferred.md). Nothing changes for
   anyone still running `run` or `slackmcp`.
-- **A state change says who made it**: `github.com/you/repo#26 | state draft → merged by @you`,
-  `open → approved by @alice and review-bot (bot)`. It names whoever caused the state it ended in —
-  a collapsed `draft → merged` names the merger, not who marked it ready on the way. A pull
-  request reads `approved` only once GitHub's review requirement is met, so a bot named alone
-  there is a bot that satisfied it.
-- **Red is pushed only once a second reading agrees.** CI that marks a build red while a retry is
-  still running — Buildkite does — used to push `success → failure` for a failure gone a minute
-  later. A red push now waits for the next reading, about a minute, and is dropped if the checks
-  moved on. Pull and `wait` are unchanged.
-- **One push per round.** Everything due to a session at once arrives as one message, a line per
-  change, so a merge queue landing fifteen pull requests costs one turn instead of fifteen.
-- **Commit statuses are read, not just check runs.** CI that reports as a commit status — Buildkite
-  does — used to leave a red pull request unnamed, and kept GitHub's own verdict even when the
-  only other red was a run a re-run had superseded. A red status is now named
-  (`checks success → failure: buildkite/main`), and a pending one keeps the checks pending.
-- **New: `github.ignore_checks`.** Checks named here — a merge lock, a label policy — never turn a
-  pull request red or hold it pending, for `watch`, `wait --until checks` and reactions alike.
-  Exact names: `ignore_checks = ["merge-lock"]`.
-- **Pull requests linked from prose are no longer watched.** The `post-tool` hook read every pull
-  request URL in a `gh pr` command and its output, so one linked from a description, a comment, or
-  the body `gh pr view` prints was watched as if you were working on it. Now only the command's own
-  arguments count, up to any `--body` or `--title`, plus the URL `gh pr create` prints. `gh pr view`
-  with no argument no longer registers the current branch's pull request; `git push` still does.
+- **A second `github.hosts` entry is a config error.** Every host was read from the one `api_url`,
+  so a pull request on an enterprise host was reported as the same number on github.com.
+
+### Fixed
+
+- **The `post-tool` hook watches only what a command works on.** A pull request linked from a
+  description, a comment or `gh pr view`'s output, or named inside a commit message, quoted JSON or
+  a heredoc, was watched as if you were working on it. Now `gh pr …` and `acli jira workitem` must
+  run as a command, and only their own arguments count (plus the URL `gh pr create` prints).
+  `gh pr view` with no argument no longer registers the current branch's pull request; `git push`
+  still does.
+- **`42`, `#42` and `repo#42` find what you are watching.** They only matched pull requests the
+  Slack reactions had seen, so `inkling wait 42` failed for one watched by its full name.
+- **No GitHub login no longer means nothing is read.** A missing or slow `gh auth token` stopped
+  every poll, Jira included, and `inkling serve` refused to start. The token is now fetched only
+  when a pull request is due, and the server picks up a login made after it started.
+- **A command's time limit holds.** A token command, `acli` or `claude -p` that left a background
+  process holding its output kept Inkling waiting past its limit. A command that runs out of time
+  is now killed with everything it started, and a prompt no longer leaves `acli` processes behind.
+- **One slow Jira issue no longer costs the others their reading.** Only the issue that timed out
+  fails, and issues are read four at a time.
+- **One pull request typed in two letter cases is one watch.** Pull requests are named in
+  lowercase; a watch made before this keeps its old spelling until it ends.
+- **A long watch no longer forgets its reader after a quiet week.** A reader is kept while it owns
+  a watch or is owed news, so a `--ttl 30d` watch keeps its news.
+- **`inkling watch` reads only what it was given**, and says why a reference couldn't be read
+  (exit 1), rather than reading every other due watch.
+- **`inkling events --since <id>:<n>` takes the eight-character id `status` shows.**
+- **Inkling's hooks do nothing inside its own `claude -p` bridge**, and the bridge's call is bounded
+  by its timeout.
 
 ## 0.2.1 — 2026-09-23
 
