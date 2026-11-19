@@ -117,8 +117,10 @@ inkling wait --until done you/repo#42 -t 2h        # merged or closed, either wa
 ```
 
 The default answers the question you usually have, *what happens next*, without guessing the
-answer in advance. A pull request with nothing left to change (merged or closed) says so at once
-rather than waiting out the timeout.
+answer in advance. A pull request with nothing left to change (merged or closed), or one that
+doesn't exist, says so on the first reading rather than waiting out the timeout. That reading
+comes 5s in: just after a push GitHub still reports the commit it replaced, so every wait lets
+that settle first.
 
 | exit | meaning |
 | --- | --- |
