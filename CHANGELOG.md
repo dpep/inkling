@@ -6,6 +6,8 @@
 - **Relative paths work.** `--config`, `--state`, `--watches`, `--waits` and `--log-dir` are
   resolved against the directory you ran from. Before, a relative path sent the resident server to
   a file under `/`, and push silently never happened.
+- **`--log-dir off` means off for reading too.** `status` and `logs` say logging is off instead of
+  reporting on the default log directory.
 
 ## 0.4.0 — 2026-11-18
 

@@ -331,11 +331,7 @@ fn main() {
         cli.common = cli.common.anchored(&cwd);
     }
 
-    let directory = match cli.common.log_dir.as_deref() {
-        Some("off") => None,
-        Some(path) => Some(PathBuf::from(path)),
-        None => Some(obs::default_log_directory()),
-    };
+    let directory = log_directory(&cli.common);
     // Sweep first: max_log_files only prunes on rotation, so a job that
     // stopped running would otherwise keep its files forever.
     if let Some(dir) = &directory {
@@ -375,22 +371,19 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Where the log files are, for reading them back. `off` suppresses writing
-/// them, not reading whatever is already there.
-fn log_directory(common: &Common) -> PathBuf {
+/// Where the log files are, or nothing when logging is off.
+fn log_directory(common: &Common) -> Option<PathBuf> {
     match common.log_dir.as_deref() {
-        Some("off") | None => obs::default_log_directory(),
-        Some(dir) => PathBuf::from(dir),
+        Some("off") => None,
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => Some(obs::default_log_directory()),
     }
 }
 
 /// Where `inkling config` says logs go: the directory being written, or that
 /// writing is off.
 fn logs_shown(common: &Common) -> String {
-    match common.log_dir.as_deref() {
-        Some("off") => "off".to_string(),
-        _ => tildify(&log_directory(common)),
-    }
+    log_directory(common).map_or_else(|| "off".to_string(), |dir| tildify(&dir))
 }
 
 fn config_path(common: &Common) -> PathBuf {
@@ -426,7 +419,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
             follow,
             path: show_path,
         } => {
-            let directory = log_directory(&cli.common);
+            let Some(directory) = log_directory(&cli.common) else {
+                println!("logging is off (--log-dir off)");
+                return Ok(0);
+            };
             if *show_path {
                 println!("{}", directory.display());
                 return Ok(0);
@@ -623,7 +619,10 @@ fn run(cli: &Cli) -> Result<i32, String> {
             println!("github      {}", credentials(&config));
 
             println!();
-            last_day_out(&log_directory(&cli.common), now);
+            match log_directory(&cli.common) {
+                Some(directory) => last_day_out(&directory, now),
+                None => println!("last 24h    unknown: logging is off (--log-dir off)"),
+            }
 
             Ok(0)
         }
@@ -2707,6 +2706,15 @@ mod tests {
             shown(&["inkling", "config"]),
             super::tildify(&inkling::obs::default_log_directory())
         );
+    }
+
+    #[test]
+    fn logging_off_reads_no_log_directory() {
+        // Not the default one: `status` and `logs` would report on files
+        // this invocation has nothing to do with.
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["inkling", "logs", "--log-dir", "off"]).unwrap();
+        assert_eq!(super::log_directory(&cli.common), None);
     }
 
     #[test]
