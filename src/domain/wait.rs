@@ -56,11 +56,11 @@ impl fmt::Display for CheckState {
 
 /// The condition a wait is waiting for.
 ///
-/// Deliberately tiny. Two threshold shapes and a settling shape cover both
-/// motivating cases; anything richer is the expression language that turns
-/// this into a rules engine, which docs/watching.md#observe-never-act rules
-/// out. A new predicate has to argue its way in here, as a named variant,
-/// never as a syntax.
+/// Deliberately tiny. Two threshold shapes and a settling shape cover waiting
+/// on a review and waiting on CI; anything richer is the expression language
+/// that turns this into a rules engine, which
+/// docs/watching.md#observe-never-act rules out. A new predicate has to argue
+/// its way in here, as a named variant, never as a syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
     /// Moved at all, in any direction — whatever the next step turns out to
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn a_red_suite_ends_the_wait_immediately() {
-        // "so i can respond" — one failure is enough to respond to, even
+        // A wait exists so a session can respond: one failure is enough, even
         // with other jobs still running.
         let refs = [
             checked(1, CheckState::Failure),
