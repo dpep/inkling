@@ -676,12 +676,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
                     .update(clock.now(), |file| {
                         for reference in &references {
                             file.watch(reference, &owner, deadline, clock.now());
-                            tracing::info!(
-                                %reference,
-                                owner,
-                                deadline = stamp(deadline),
-                                "watch registered"
-                            );
                         }
                     })
                     .map_err(|e| e.to_string())?;
@@ -713,7 +707,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
                                     .map_err(|e| e.to_string())?;
                             }
                             for reference in &typos {
-                                tracing::info!(%reference, owner, "watch dropped; not there");
+                                tracing::info!(%reference, owner, "watch refused; not there");
                                 println!("not watching {reference}");
                             }
                         }
@@ -722,6 +716,20 @@ fn run(cli: &Cli) -> Result<i32, String> {
                             println!("  the next `inkling events` will pick them up");
                         }
                     }
+                }
+                // Only what the first reading kept, not one it found missing
+                // or finished: `status` counts these lines as watches.
+                let kept = watches.read();
+                for reference in references
+                    .iter()
+                    .filter(|r| kept.watches.contains_key(&r.key()))
+                {
+                    tracing::info!(
+                        %reference,
+                        owner,
+                        deadline = stamp(deadline),
+                        "watch registered"
+                    );
                 }
             }
 

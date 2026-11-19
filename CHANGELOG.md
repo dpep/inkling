@@ -26,6 +26,8 @@
   what somebody wrote.
 - **A duration without a unit says so**: `serve.interval = 5` is refused with "expected a duration
   with a unit, e.g. 5s or 2m".
+- **`status` counts only watches that were kept.** A `watch` of a pull request that doesn't exist
+  or has already finished is no longer logged as registered.
 - **An unknown config key lists only the sections that exist**, not the retired Slack-reaction
   ones.
 
