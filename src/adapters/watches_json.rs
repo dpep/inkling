@@ -17,7 +17,7 @@ use crate::adapters::session_socket::SessionAddress;
 use crate::domain::detect::Pushed;
 use crate::domain::model::Reference;
 use crate::domain::watch::{
-    Axis, Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading, replied,
+    Acted, Axis, Event, Head, Reacted, Receipt, Receipts, Sighting, Standing, reading, replied,
 };
 use crate::ports::StoreError;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// an older build refuses a newer file rather than parse what it can and save
 /// back less (docs/watching.md, "An older build meets a newer store").
 /// `tests::stored_shape` stops compiling when the shape moves.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// The reader a person at a terminal is. Every watch has an owner and every
 /// read names one, so there is one rule rather than an owned path and an
@@ -381,11 +381,24 @@ impl Watches {
         (stirred, unknown)
     }
 
-    /// Note what `owner` itself put into Slack, on each of its watches it
-    /// could turn up in: a post on any watch of that conversation, a reaction
-    /// on the watched message it was added to. A post also counts as told, so
-    /// no watch of the reader's, even a later one, tells it as a reply.
+    /// Note what `owner` itself did, on each of its watches it could turn up
+    /// in: a post on any watch of that conversation, a reaction on the watched
+    /// message it was added to, a merge or transition on the one watch it
+    /// names. A post also counts as told, so no watch of the reader's, even a
+    /// later one, tells it as a reply.
     pub fn receipt(&mut self, owner: &str, receipt: &Receipt, at: DateTime<Utc>) {
+        if let Receipt::Moved { named, axis } = receipt {
+            // Exactly one of the reader's own watches, or none: a receipt on
+            // the wrong pull request would swallow news it was owed.
+            let mut named = self.watches.values_mut().filter(|watch| {
+                watch.owners.contains(owner) && named.names(&watch.reference, watch.head.as_ref())
+            });
+            if let (Some(watch), None) = (named.next(), named.next()) {
+                let mine = watch.receipts.entry(owner.to_string()).or_default();
+                mine.acted.push(Acted { axis: *axis, at });
+            }
+            return;
+        }
         if let Receipt::Posted { channel, ts } = receipt {
             let told = &mut self.meet(owner, at).told;
             told.entry(channel.clone()).or_default().insert(ts.clone());
@@ -422,6 +435,7 @@ impl Watches {
                     emoji: emoji.clone(),
                     at,
                 }),
+                Receipt::Moved { .. } => unreachable!("handled above"),
             }
         }
     }
@@ -691,7 +705,11 @@ impl Watches {
                 );
                 let receipt_for = audience
                     .iter()
-                    .filter(|reader| moved.made.by(watch.receipts.get_mut(*reader)))
+                    .filter(|reader| {
+                        let acted = watch.receipts.get(*reader);
+                        acted.is_some_and(|mine| mine.acted_on(moved.axis, observed_at))
+                            || moved.made.by(watch.receipts.get_mut(*reader))
+                    })
                     .cloned()
                     .collect();
                 fresh.push(Event {
@@ -1302,6 +1320,7 @@ impl WatchStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::detect::Named;
     use crate::domain::model::State;
     use crate::domain::wait::CheckState;
     use crate::domain::watch::{Axis, Category};
@@ -2275,7 +2294,7 @@ mod tests {
     /// pattern. (`SessionAddress` keeps its fields private; it changes rarely.)
     #[allow(dead_code)]
     fn stored_shape(file: Watches, standing: Standing, axis: Axis, reference: Reference) {
-        const _: () = assert!(VERSION == 4, "update the patterns below for this version");
+        const _: () = assert!(VERSION == 5, "update the patterns below for this version");
         let Watches {
             version: _,
             watches,
@@ -2297,8 +2316,13 @@ mod tests {
                 misses: _,
             } = watch;
             for (_, receipt) in receipts {
-                let crate::domain::watch::Receipts { posted: _, reacted } = receipt;
+                let crate::domain::watch::Receipts {
+                    posted: _,
+                    reacted,
+                    acted,
+                } = receipt;
                 for crate::domain::watch::Reacted { emoji: _, at: _ } in reacted {}
+                for crate::domain::watch::Acted { axis: _, at: _ } in acted {}
             }
             let _ = seen.map(
                 |Seen {
@@ -2863,5 +2887,107 @@ mod tests {
             })
             .unwrap();
         assert!(store.read().due_now(now(), TimeDelta::zero()).is_empty());
+    }
+
+    fn moved(named: Named) -> Receipt {
+        let axis = match named {
+            Named::Reference(Reference::JiraIssue { .. }) => Axis::Status,
+            _ => Axis::State,
+        };
+        Receipt::Moved { named, axis }
+    }
+
+    fn merge(number: u64) -> Receipt {
+        moved(Named::Number { number, repo: None })
+    }
+
+    #[test]
+    fn an_act_lands_on_the_one_watch_of_the_reader_s_that_it_names() {
+        let other = Reference::pull_request("github.com", "dpep", "other", 3);
+        let mut watches = Watches::default();
+        for reference in [pr(3), other.clone(), issue("AI-1")] {
+            watches.watch(&reference, "s-1", forever(), now());
+        }
+        watches.watch(&pr(4), "s-2", forever(), now());
+        watches.remember_head(&pr(3), head("dpep/inkling", "fix-it"));
+        watches.remember_head(&pr(4), head("dpep/inkling", "fix-it"));
+
+        let repo = |r: &str| Some(r.to_string());
+        let cases = [
+            (merge(3), None),
+            (
+                moved(Named::Number {
+                    number: 3,
+                    repo: repo("DPEP/Other"),
+                }),
+                Some(&other),
+            ),
+            // Only another reader watches #4.
+            (merge(4), None),
+            (
+                moved(Named::Branch {
+                    branch: "fix-it".into(),
+                    repo: None,
+                }),
+                Some(&pr(3)),
+            ),
+            (
+                moved(Named::Branch {
+                    branch: "Fix-it".into(),
+                    repo: None,
+                }),
+                None,
+            ),
+            (moved(Named::Reference(issue("AI-1"))), Some(&issue("AI-1"))),
+        ];
+        for (receipt, want) in cases {
+            let mut watches = watches.clone();
+            watches.receipt("s-1", &receipt, now());
+            let landed: Vec<_> = watches
+                .watches
+                .values()
+                .filter(|w| w.receipts.values().any(|mine| !mine.acted.is_empty()))
+                .map(|w| &w.reference)
+                .collect();
+            assert_eq!(landed, Vec::from_iter(want), "{receipt:?}");
+        }
+    }
+
+    #[test]
+    fn an_act_is_a_receipt_for_the_transition_it_made_and_only_its_reader_s() {
+        let mut watches = watched_by(&["s-1", "s-2"], State::Open);
+        watches.receipt("s-1", &merge(3), now() + TimeDelta::seconds(1));
+        let events = watches.record(
+            &[(pr(3), seen_pull(State::Merged, None))],
+            now() + TimeDelta::seconds(2),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].receipt_for, ["s-1".to_string()].into());
+    }
+
+    #[test]
+    fn an_act_no_reading_after_it_bore_out_claims_nothing_later() {
+        // A merge that was blocked: the next reading still says open, and the
+        // merge somebody makes ten minutes on is theirs.
+        let minutes = |n| now() + TimeDelta::minutes(n);
+        let mut watches = watching(State::Open);
+        watches.receipt("s-1", &merge(3), minutes(1));
+        watches.record(&[(pr(3), seen_pull(State::Open, None))], minutes(2));
+        let events = watches.record(&[(pr(3), seen_pull(State::Merged, None))], minutes(10));
+        assert!(events[0].receipt_for.is_empty());
+    }
+
+    #[test]
+    fn a_reading_taken_before_the_act_neither_spends_nor_settles_it() {
+        let minutes = |n| now() + TimeDelta::minutes(n);
+        let mut watches = watching(State::Open);
+        watches.receipt("s-1", &merge(3), minutes(2));
+        let approved = watches.record(&[(pr(3), seen_pull(State::Approved, None))], minutes(1));
+        assert!(
+            approved[0].receipt_for.is_empty(),
+            "somebody else's approval"
+        );
+        let merged = watches.record(&[(pr(3), seen_pull(State::Merged, None))], minutes(3));
+        assert_eq!(merged[0].receipt_for, ["s-1".to_string()].into());
     }
 }

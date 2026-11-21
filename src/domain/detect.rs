@@ -6,6 +6,7 @@
 //! they simply don't match.
 
 use crate::domain::model::Reference;
+use crate::domain::watch::{Axis, Head, Receipt};
 use iriq::Extractor;
 
 /// What a positional argument turned out to mean.
@@ -222,6 +223,7 @@ pub fn worth_reading(command: &str) -> bool {
         || command.contains(BROWSE)
         || command.contains(ISSUE_COMMAND)
         || PULL_COMMANDS.iter().any(|verb| command.contains(verb))
+        || MOVES.iter().any(|step| command.contains(step.verb))
 }
 
 /// What a shell command was about, and what makes us think so.
@@ -372,6 +374,252 @@ fn arguments<'a>(command: &'a str, verb: &str) -> &'a str {
         .min()
         .unwrap_or(segment.len());
     &segment[..prose]
+}
+
+/// How a command named the pull request or issue it acted on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Named {
+    /// In full: a URL, or a Jira key.
+    Reference(Reference),
+    /// `gh pr merge 3`, in `repo` (`owner/name`) when `--repo` said.
+    Number { number: u64, repo: Option<String> },
+    /// By head branch; `gh pr merge` alone names the current one.
+    Branch {
+        branch: String,
+        repo: Option<String>,
+    },
+}
+
+impl Named {
+    /// Whether this names `reference`, whose head branch is `head` when known.
+    pub fn names(&self, reference: &Reference, head: Option<&Head>) -> bool {
+        // `--repo` is `owner/name`, or `host/owner/name`.
+        let in_repo = |repo: &Option<String>, owner: &str, name: &str| {
+            repo.as_deref().is_none_or(|want| {
+                let mut parts = want.rsplit('/');
+                parts.next().is_some_and(|r| r.eq_ignore_ascii_case(name))
+                    && parts.next().is_none_or(|o| o.eq_ignore_ascii_case(owner))
+            })
+        };
+        match (self, reference) {
+            (Named::Reference(named), _) => named.key() == reference.key(),
+            (
+                Named::Number { number, repo },
+                Reference::GitHubPullRequest {
+                    owner,
+                    repo: name,
+                    number: n,
+                    ..
+                },
+            ) => n == number && in_repo(repo, owner, name),
+            (
+                Named::Branch { branch, repo },
+                Reference::GitHubPullRequest {
+                    owner, repo: name, ..
+                },
+            ) => head.is_some_and(|h| h.branch == *branch) && in_repo(repo, owner, name),
+            _ => false,
+        }
+    }
+}
+
+/// A `gh pr` verb that moves a pull request's state.
+struct Move {
+    verb: &'static str,
+    /// Flags that take a value, so the value isn't read as the pull request.
+    values: &'static [&'static str],
+    /// One of these must be given; none listed means none is needed.
+    needs: &'static [&'static str],
+    /// Any of these means nothing moves now.
+    refuses: &'static [&'static str],
+}
+
+const REPO: [&str; 2] = ["-R", "--repo"];
+
+const MOVES: [Move; 5] = [
+    Move {
+        verb: "gh pr merge",
+        values: &[
+            "-R",
+            "--repo",
+            "-A",
+            "--author-email",
+            "-b",
+            "--body",
+            "-F",
+            "--body-file",
+            "-t",
+            "--subject",
+            "--match-head-commit",
+        ],
+        needs: &[],
+        // The merge happens later, unseen; that push is the useful one.
+        refuses: &["--auto", "--disable-auto"],
+    },
+    Move {
+        verb: "gh pr close",
+        values: &["-R", "--repo", "-c", "--comment"],
+        needs: &[],
+        refuses: &[],
+    },
+    Move {
+        verb: "gh pr reopen",
+        values: &["-R", "--repo", "-c", "--comment"],
+        needs: &[],
+        refuses: &[],
+    },
+    Move {
+        verb: "gh pr ready",
+        values: &["-R", "--repo"],
+        needs: &[],
+        refuses: &[],
+    },
+    Move {
+        verb: "gh pr review",
+        values: &["-R", "--repo", "-b", "--body", "-F", "--body-file"],
+        needs: &["-a", "--approve", "-r", "--request-changes"],
+        refuses: &[],
+    },
+];
+
+const TRANSITION: &str = "acli jira workitem transition";
+
+/// The commands that move what they name, each a receipt for that axis: a
+/// Jira transition for each `--key`, a `gh pr` verb for the one pull request
+/// it names. A name that isn't plain — two of them, an unclosed quote — is no
+/// receipt, so the news is told.
+pub fn acted(
+    command: &str,
+    hosts: &[String],
+    current_branch: impl FnOnce() -> Option<String>,
+) -> Vec<Receipt> {
+    let mut found = Vec::new();
+    let mut current = Some(current_branch);
+    let mut branch: Option<String> = None;
+    for step in &MOVES {
+        let Some(at) = run_at(command, step.verb) else {
+            continue;
+        };
+        let Some(words) = words(&command[at + step.verb.len()..]) else {
+            continue;
+        };
+        let (mut flags, mut positional, mut repo) = (Vec::new(), Vec::new(), None);
+        let mut words = words.into_iter();
+        while let Some(word) = words.next() {
+            if !word.starts_with('-') || word == "-" {
+                positional.push(word);
+                continue;
+            }
+            let (flag, value) = match word.split_once('=') {
+                Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+                None => (word, None),
+            };
+            let value = match step.values.contains(&flag.as_str()) {
+                true => value.or_else(|| words.next()),
+                false => None,
+            };
+            if REPO.contains(&flag.as_str()) {
+                repo = value;
+            }
+            flags.push(flag);
+        }
+        let given = |list: &[&str]| flags.iter().any(|f| list.contains(&f.as_str()));
+        if given(step.refuses) || !(step.needs.is_empty() || given(step.needs)) {
+            continue;
+        }
+        let named = match positional.as_slice() {
+            [] => {
+                if let Some(read) = current.take() {
+                    branch = read();
+                }
+                let Some(branch) = branch.clone() else {
+                    continue;
+                };
+                Named::Branch { branch, repo }
+            }
+            [arg] => pull_request(arg, repo, hosts),
+            _ => continue,
+        };
+        found.push(Receipt::Moved {
+            named,
+            axis: Axis::State,
+        });
+    }
+    if let Some(at) = run_at(command, TRANSITION)
+        && let Some(words) = words(&command[at + TRANSITION.len()..])
+    {
+        let mut words = words.into_iter();
+        while let Some(word) = words.next() {
+            let keys = match word.split_once('=') {
+                Some(("--key" | "-k", keys)) => keys.to_string(),
+                _ if word == "--key" || word == "-k" => words.next().unwrap_or_default(),
+                _ => continue,
+            };
+            for key in keys.split(',').filter_map(|key| parse_jira(key.trim())) {
+                found.push(Receipt::Moved {
+                    named: Named::Reference(key),
+                    axis: Axis::Status,
+                });
+            }
+        }
+    }
+    found
+}
+
+/// What `gh pr` takes as a pull request: a URL, a number, or a head branch.
+fn pull_request(arg: &str, repo: Option<String>, hosts: &[String]) -> Named {
+    if let Some(reference) = detect(arg, hosts).into_iter().next() {
+        return Named::Reference(reference);
+    }
+    match arg.trim_start_matches('#').parse() {
+        Ok(number) => Named::Number { number, repo },
+        Err(_) => Named::Branch {
+            branch: arg.to_string(),
+            repo,
+        },
+    }
+}
+
+/// The words of one shell segment, quotes removed, up to where it ends: a
+/// `;`, `|`, `&`, newline or redirection outside quotes. `None` for a quote
+/// never closed, whose words can't be told apart.
+fn words(segment: &str) -> Option<Vec<String>> {
+    let (mut words, mut word, mut quote) = (Vec::new(), String::new(), None);
+    let mut started = false;
+    for c in segment.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, ';' | '|' | '&' | '\n' | '<' | '>') => {
+                // `2>&1`: the digits were a file descriptor, not a word.
+                if matches!(c, '<' | '>') && word.chars().all(|c| c.is_ascii_digit()) {
+                    started = false;
+                }
+                break;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                }
+                started = false;
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
 }
 
 /// A branch a `git push` updated, and where it went.
@@ -1188,5 +1436,128 @@ mod touched_tests {
             .map(|n| format!("https://github.com/dpep/inkling/pull/{n}\n"))
             .collect();
         assert_eq!(names("gh pr checks 1", &output).len(), MAX_REFERENCES);
+    }
+}
+
+#[cfg(test)]
+mod acted_tests {
+    use super::*;
+
+    fn acted_on(command: &str) -> Vec<Named> {
+        let hosts = vec!["github.com".to_string()];
+        acted(command, &hosts, || Some("current".into()))
+            .into_iter()
+            .map(|receipt| match receipt {
+                Receipt::Moved { named, axis } => {
+                    let want = match named {
+                        Named::Reference(Reference::JiraIssue { .. }) => Axis::Status,
+                        _ => Axis::State,
+                    };
+                    assert_eq!(axis, want, "{command}");
+                    named
+                }
+                other => panic!("{command}: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn number(number: u64, repo: Option<&str>) -> Named {
+        Named::Number {
+            number,
+            repo: repo.map(Into::into),
+        }
+    }
+
+    fn branch(branch: &str) -> Named {
+        Named::Branch {
+            branch: branch.into(),
+            repo: None,
+        }
+    }
+
+    fn issue(key: &str) -> Named {
+        Named::Reference(Reference::JiraIssue { key: key.into() })
+    }
+
+    #[test]
+    fn a_command_that_moves_a_reference_names_it_as_it_was_spelled() {
+        let url = Named::Reference(Reference::pull_request("github.com", "dpep", "inkling", 3));
+        let cases: &[(&str, Vec<Named>)] = &[
+            ("gh pr merge 3 --squash", vec![number(3, None)]),
+            (
+                "gh pr merge -R dpep/inkling '#3'",
+                vec![number(3, Some("dpep/inkling"))],
+            ),
+            (
+                "gh pr merge --repo=dpep/inkling #3",
+                vec![number(3, Some("dpep/inkling"))],
+            ),
+            (
+                "gh pr merge https://github.com/dpep/inkling/pull/3",
+                vec![url],
+            ),
+            ("gh pr merge fix-it -d", vec![branch("fix-it")]),
+            (
+                "gh pr merge --squash -t 'Ship it' --body \"a; b\"",
+                vec![branch("current")],
+            ),
+            ("gh pr close 3 -c \"won't fix\"", vec![number(3, None)]),
+            ("gh pr reopen 3", vec![number(3, None)]),
+            ("gh pr ready 3 --undo", vec![number(3, None)]),
+            ("gh pr review 3 --approve", vec![number(3, None)]),
+            ("gh pr review -r 3 -b 'needs a test'", vec![number(3, None)]),
+            ("cd x && gh pr merge 3", vec![number(3, None)]),
+            (
+                "gh pr merge 3 --squash 2>&1 | tail -1",
+                vec![number(3, None)],
+            ),
+            (
+                "acli jira workitem transition --key \"AI-1,AI-2\" --status Done",
+                vec![issue("AI-1"), issue("AI-2")],
+            ),
+            (
+                "acli jira workitem transition --key=AI-1 --status Done --yes",
+                vec![issue("AI-1")],
+            ),
+        ];
+        for (command, want) in cases {
+            assert_eq!(&acted_on(command), want, "{command}");
+        }
+    }
+
+    #[test]
+    fn what_only_queues_a_change_or_names_nothing_clearly_is_no_receipt() {
+        for command in [
+            // The merge happens later; its push is the useful one.
+            "gh pr merge 3 --auto --squash",
+            "gh pr merge --disable-auto 3",
+            // A comment, already the account's own on the comments axis.
+            "gh pr review 3 --comment -b 'looks fine'",
+            "gh pr review 3",
+            // Two pull requests named, or a quote never closed.
+            "gh pr merge 3 4",
+            "gh pr close 3 -c \"unterminated",
+            // Not run, only mentioned.
+            "git commit -m \"gh pr merge 3\"",
+            "cat <<END\ngh pr merge 3\nEND",
+            "acli jira workitem view AI-1",
+            "acli jira workitem transition --jql 'project = AI' --status Done",
+            "gh pr view 3",
+        ] {
+            assert_eq!(acted_on(command), [], "{command}");
+        }
+    }
+
+    #[test]
+    fn the_current_branch_is_read_only_when_nothing_else_names_one() {
+        let hosts = vec!["github.com".to_string()];
+        let never = || -> Option<String> { panic!("read the current branch") };
+        assert_eq!(acted("gh pr merge 3", &hosts, never).len(), 1);
+        assert_eq!(acted("gh pr view", &hosts, never), []);
+        assert_eq!(
+            acted("gh pr merge", &hosts, || None),
+            [],
+            "detached, or not a repo"
+        );
     }
 }

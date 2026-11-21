@@ -1273,6 +1273,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_merge_the_session_ran_waits_in_its_feed_and_is_pushed_to_the_rest() {
+        let mut watches = watched_by(&["s", "t"]);
+        watches.attach("s", address("/tmp/a"), now());
+        watches.attach("t", address("/tmp/b"), now());
+        let merged = Receipt::Moved {
+            named: crate::domain::detect::Named::Number {
+                number: 3,
+                repo: None,
+            },
+            axis: Axis::State,
+        };
+        watches.receipt("s", &merged, now());
+        moved(&mut watches, State::Merged);
+
+        let sessions = FakeSessions::default();
+        deliver(&sessions, &mut watches);
+        let sent = sessions.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, PathBuf::from("/tmp/b"));
+        assert_eq!(watches.take("s", now()).len(), 1, "but it is recorded");
+    }
+
     fn commented(by: &[&str]) -> Sighting {
         let remarks = by
             .iter()

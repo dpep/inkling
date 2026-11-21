@@ -1412,6 +1412,8 @@ struct HookInput {
     tool_input: serde_json::Value,
     #[serde(default)]
     tool_response: serde_json::Value,
+    #[serde(default)]
+    cwd: String,
 }
 
 fn field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
@@ -1636,8 +1638,9 @@ type Noticed = (
 /// What a tool call was about: from Bash, a pull request named by URL, an
 /// issue named to `acli`, a branch `git push` updated, or a message
 /// `chat.postMessage` posted; from the Slack MCP send tool, the message it
-/// posted. A post, or a reaction added through the MCP react tool, is also a
-/// receipt: what the session did itself.
+/// posted. A post, a reaction added through the MCP react tool, or a command
+/// that moves a pull request or issue (`gh pr merge`, a Jira transition) is
+/// also a receipt: what the session did itself.
 ///
 /// Cheapest checks first, and in this order: this runs after every tool call,
 /// and the overwhelming majority of them have nothing to do with any of it.
@@ -1668,11 +1671,29 @@ fn noticed(input: &HookInput, config: &Config) -> Noticed {
     let output = format!("{stdout}\n{}", field(&input.tool_response, "stderr"));
     let mut touched = detect::touched(command, &output, &config.github.hosts);
     let posted = slack::posted_via_api(command, stdout);
-    let receipts = posted.iter().filter_map(slack::receipt).collect();
+    let mut receipts: Vec<_> = posted.iter().filter_map(slack::receipt).collect();
+    receipts.extend(detect::acted(command, &config.github.hosts, || {
+        current_branch(&input.cwd)
+    }));
     touched.extend(posted.map(|r| (r, slack::POST_METHOD)));
     let pushed = detect::pushed(command, &output, &config.github.hosts);
     (touched, pushed, receipts)
 }
+
+/// The branch checked out where the session's Bash runs, which is what `gh pr
+/// merge` alone acts on. Nothing when detached, not a repository, or slow.
+fn current_branch(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let mut git = std::process::Command::new("git");
+    git.args(["-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+    let output = inkling::subprocess::output_within(&mut git, CURRENT_BRANCH_BUDGET).ok()?;
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && !branch.is_empty()).then_some(branch)
+}
+
+const CURRENT_BRANCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Watch what a tool call was about — see `noticed`.
 ///
@@ -3525,6 +3546,40 @@ mod tests {
                 emoji: "eyes".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_merge_run_on_the_current_branch_is_a_receipt_for_that_branch() {
+        use inkling::domain::detect::Named;
+        let dir = std::env::temp_dir().join(format!("inkling-acted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "fix-it"])
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(git.success());
+        let input = tool_call(serde_json::json!({
+            "session_id": "s",
+            "cwd": dir,
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge --squash --delete-branch"},
+            "tool_response": {"stdout": "", "stderr": ""}
+        }));
+        let (touched, _, receipts) = noticed(&input, &Config::default());
+        assert!(touched.is_empty());
+        assert_eq!(
+            receipts,
+            [Receipt::Moved {
+                named: Named::Branch {
+                    branch: "fix-it".into(),
+                    repo: None
+                },
+                axis: inkling::domain::watch::Axis::State,
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

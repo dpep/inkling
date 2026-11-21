@@ -347,7 +347,7 @@ impl Actors {
     }
 }
 
-/// Something a session itself put into Slack, as the `post-tool` hook saw it.
+/// Something a session itself did, as the `post-tool` hook saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Receipt {
     Posted {
@@ -358,6 +358,12 @@ pub enum Receipt {
         channel: String,
         ts: String,
         emoji: String,
+    },
+    /// A command that moves what it names along `axis` — a merge, a Jira
+    /// transition — named as the command named it.
+    Moved {
+        named: crate::domain::detect::Named,
+        axis: Axis,
     },
 }
 
@@ -469,6 +475,9 @@ pub struct Receipts {
     /// Reactions it added to the watched message, not yet seen by a reading.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reacted: Vec<Reacted>,
+    /// Commands it ran that move an axis, not yet seen by a reading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acted: Vec<Acted>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,16 +486,29 @@ pub struct Reacted {
     pub at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acted {
+    pub axis: Axis,
+    pub at: DateTime<Utc>,
+}
+
 impl Receipts {
-    /// Forget reactions a reading taken at `at` already reflects. One that
-    /// moved no count was a duplicate Slack ignored, and must not claim the
-    /// next person's.
+    /// Whether a transition on `axis`, read at `at`, is one this reader made.
+    /// The same reading settles the act, so it accounts for one transition.
+    pub fn acted_on(&self, axis: Axis, at: DateTime<Utc>) -> bool {
+        self.acted.iter().any(|a| a.axis == axis && a.at <= at)
+    }
+
+    /// Forget what a reading taken at `at` already reflects. A reaction that
+    /// moved no count was a duplicate Slack ignored, and an act that moved
+    /// nothing failed or only queued; neither may claim somebody else's.
     pub fn settle(&mut self, at: DateTime<Utc>) {
         self.reacted.retain(|r| r.at > at);
+        self.acted.retain(|a| a.at > at);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.posted.is_empty() && self.reacted.is_empty()
+        self.posted.is_empty() && self.reacted.is_empty() && self.acted.is_empty()
     }
 }
 
