@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-11-20
 
 - **A session isn't pushed what it just did.** When a session merges, closes, reopens, readies or
   approves a pull request (`gh pr merge|close|reopen|ready`, `gh pr review --approve|--request-changes`)
