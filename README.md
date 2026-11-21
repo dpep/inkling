@@ -370,6 +370,11 @@ It is deliberately narrow: being wrong means a session told about something nobo
   conversation it watches isn't news to it.
 - The Slack react tool (`mcp__claude_ai_Slack__slack_add_reaction`): watches nothing, but records
   the reaction, so the next reading of that message doesn't push the session its own emoji.
+- `gh pr merge|close|reopen|ready` and `gh pr review --approve|--request-changes`, and `acli jira
+  workitem transition --key …`: recorded as the session's own on the one watch of its they name (a
+  URL, a number, a head branch, or no argument for the branch checked out), so the session isn't
+  pushed the merge or transition it just made. It is still in `inkling events`; everyone else
+  watching is told. `gh pr merge --auto` records nothing: that merge happens later.
 - `git push`: every open pull request whose head is exactly the repository and branch git reports
   it pushed to. A fork's pull request upstream counts; a stranger's branch of the same name never
   does.

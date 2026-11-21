@@ -361,7 +361,7 @@ fn ripe(event: &Event, watches: &Watches) -> Ripe {
 /// beginning, a draft marked ready — leaves nothing to do, so it waits in the
 /// feed for the next prompt, and the verdict that follows passes over it. One
 /// rule rather than a setting — see docs/watching.md for what would change
-/// that, and for why who caused a transition is not part of it.
+/// that, and for why a receipt, not a login, says who caused a transition.
 fn worth_a_turn(event: &Event, reader: &str) -> bool {
     let idle = match event.axis {
         Axis::Checks => event.to == CheckState::Pending.as_str(),
@@ -373,8 +373,8 @@ fn worth_a_turn(event: &Event, reader: &str) -> bool {
             growth(event).is_none()
         }
     };
-    // What the reader did itself — a reply it posted, a comment only its
-    // account wrote — is a receipt.
+    // What the reader did itself — a reply it posted, a merge it ran, a
+    // comment only its account wrote — is a receipt.
     !idle && !event.receipt_for.contains(reader)
 }
 

@@ -67,12 +67,12 @@ Two more have since joined it, each one sentence long:
   pushed a second ago has no check suite yet, and neither does a repository
   that runs no checks; one reading cannot tell them apart. So once a rollup
   has been seen, a reading without one keeps the rollup it had. See below.
-- **A transition is news even to the reader that caused it.** A session that
-  merges a pull request is told `open → merged` seconds later. Inkling names
-  who, as a login, but a login can't tell a session from its person, and it
-  costs one line, once: the finished
-  watch then removes itself. Revisited against real use and kept — see
-  [Your own actions](#your-own-actions-arrive-as-news-and-that-stays).
+- **What a session did itself is recorded, not pushed to it.** A session
+  that merges a pull request or transitions a Jira issue finds `open →
+  merged` in its feed, not as a new turn; everyone else watching is told.
+  Judged by the command the hook saw, never by login, since a login can't
+  tell a session from its person — see
+  [What a session did itself](#what-a-session-did-itself-is-a-receipt-not-a-push).
 - **Expiry is the cleanup**, exactly as for waits: every watch carries a
   deadline (`--ttl`, 72h), and a finished reference — merged, closed, Done —
   drops its watch after its last event. There is no reaper.
@@ -440,6 +440,8 @@ baseline, `departed`, `tried_at`, `own`).
   file reads with every set empty, so a reply told on one watch just before
   the upgrade can be told once more by another of that reader's watches
   that had yet to read it.
+- **Version 5 adds each reader's `acted` receipts** (a merge or transition
+  the session ran). A version 4 file reads with none, which is what it held.
 - **Builds from before this rule still quarantine.** They parse everything
   before looking at the version. Nothing this build does can reach them;
   version 2 or later only parses for them if it holds nothing they lack.
@@ -578,7 +580,7 @@ draft for anything else (`draft → merged`, `draft → closed`) is a verdict an
 is pushed, and so is going *back* to draft, which is somebody saying the work
 isn't ready.
 
-### Your own actions arrive as news, and that stays
+### What a session did itself is a receipt, not a push
 
 Dogfooded 2026-09-20 on #14: `gh pr ready` pushed `draft → open` into the
 session that ran it, and `gh pr merge` pushed `open → merged` fifteen seconds
@@ -586,42 +588,71 @@ later. Two turns spent telling a session what it had just done. Earlier PRs
 cost one, only because ready and merge had landed in the same tick and read
 `draft → merged`.
 
-That last point is the real defect, and the start rule above is the fix:
+That last point was the first defect, and the start rule above fixed it:
 what arrives no longer depends on where a poll happened to land — the same
-property the no-rollup gap was fixed for. Ready-then-merge now costs one push
-in one tick or in two (`push::tests::ready_then_merged_costs_one_push_…`).
+property the no-rollup gap was fixed for. Ready-then-merge costs at most one
+push in one tick or in two (`push::tests::ready_then_merged_costs_one_push_…`).
 
-Withholding a push from the session that *caused* the transition was
-considered and rejected:
+The one line left was kept for a while; withholding it was rejected, for
+the reasons below. Decided otherwise 2026-11-20, at the user's request: a
+session that resolves a Jira ticket or merges its PR, then is told it did,
+spends a turn on nothing — the same redundancy Slack receipts already
+removed for replies and reactions.
+
+> A command the session ran that moves a watched reference is a receipt for
+> that axis, for that reader. The event is recorded — `inkling events`
+> shows it, `--json` marks it `own` — but it starts no turn. Every other
+> reader of the watch is pushed as before.
+
+What counts, read by the `post-tool` hook from the command as run (at the
+start of a shell segment, as for `touched`; never a mention in a heredoc or
+a commit message):
+
+- `acli jira workitem transition --key A-1[,A-2…]`: each key's status.
+- `gh pr merge|close|reopen|ready [--undo]`, and `gh pr review` with
+  `--approve` or `--request-changes`: the pull request's state. A comment
+  review records nothing; a comment only the account wrote was already
+  `Made::Viewer` on the comments axis, which covers `gh pr comment` too.
+- Not `gh pr merge --auto` or `--disable-auto`: the merge happens later,
+  unseen, and that push is the most useful one there is.
+
+Each objection, and how it is answered:
 
 - **The hook can't name the pull request for the usual spelling.** Measured on
-  the scratch probe repo with gh 2.94, not on a TTY — which is how Claude Code's Bash
-  runs it: `gh pr merge 3 --repo …` prints **nothing** and exits 0, and `gh pr
-  ready 3` prints `✓ Pull request owner/repo#3 is marked as "ready for
-  review"`, which is not a URL. `post-tool` reads references only from
-  URLs, so it would recognise a self-merge only when the session happened to
-  paste one. A suppression that fires depending on how a command was spelled
-  is one nobody can predict; making it reliable is the look-it-up lookup under
-  [Not built](#not-built-and-what-would-change-that), a network call on every
-  matching tool call.
-- **It is new durable state with its own failure semantics.** "Session S did
-  A on R" has to be recorded per reader, matched to one axis and one target,
-  expire, and not swallow a later real transition when A failed (a merge that
-  was blocked, then a person merging ten minutes on). Every one of those is a
-  guess about the caller.
-- **What's left is bounded at one line per pull request.** After the start
-  rule, a session that merges its own PR is told once, and the watch is gone.
-  For `gh pr merge --auto` and merge queues that line is the most useful push
-  there is — the merge happens later, when nobody is looking — and the hook
-  couldn't tell those apart from a direct merge without parsing flags.
-- **Subagents would have made "self" wrong anyway.** A subagent shares its
-  parent's session id, so a merge a subagent ran would be withheld from a
-  parent that may not know it happened.
+  the scratch probe repo with gh 2.94, not on a TTY — which is how Claude
+  Code's Bash runs it: `gh pr merge 3 --repo …` prints **nothing**. Answered
+  without the network: a receipt only matters on a watch the reader already
+  owns, so the command's own argument is resolved against those. A URL is
+  matched directly; a number (`3`, `#3`) against the reader's watched pull
+  requests with that number, narrowed by `--repo`; a branch against each
+  watch's `head`; no argument against the branch checked out in the hook's
+  `cwd` (`git symbolic-ref`, read only when such a verb matched). Exactly one
+  match or no receipt (`Watches::receipt`). Still accepted: `cd elsewhere &&
+  gh pr merge` reads the hook's cwd, not the `cd`'s; it misfires only if the
+  reader watches a pull request whose head has the same branch name.
+- **It is new durable state with its own failure semantics.** It is, and it
+  is the reactions' semantics, not a new set: per reader on the watch,
+  `acted` holds an axis and a time. A transition on that axis read at or
+  after the act is a receipt; the reading after the act settles it whatever
+  it showed. So a merge that was blocked, or a transition that failed, is
+  gone by the next reading and can't swallow a person merging ten minutes
+  on. A reading taken *before* the act but recorded after neither spends nor
+  settles it. The failure mode left is a merge queue that lands between the
+  act and the next reading — which is the session's merge anyway.
+- **What's left is bounded at one line per pull request.** True, and the user
+  called that line noise. The `--auto` case it protected is excluded by its
+  flag; a merge queue that merely enqueues reads as still open at the next
+  reading, which settles the receipt, so the real merge is pushed.
+- **Subagents make "self" wrong.** Accepted. A subagent's Bash carries its
+  parent's socket, so its hooks resolve to the parent's reader, and a merge a
+  subagent ran is withheld from a parent that may not know it happened. It is
+  still in the parent's feed, and a subagent's report is where the parent
+  learns what it did.
 
 (`gh pr merge` does not return early: the second `merge` in the measurement
 above answered `already merged`.)
 
-**Who did it is said, and still decides nothing.** A state transition names
+**Who did it is said, and decides nothing.** A state transition names
 whoever caused the state it ended in: `draft → merged by @dpep`, `open →
 approved by @alice and review-bot (bot)`. Only the end state: naming who
 readied a PR on its way to merged answers a question nobody asked. The actors
@@ -630,12 +661,11 @@ toggle — free in the same query, measured at one rate-limit point either way.
 It was added because a reader asked, of a collapsed `draft → approved`,
 whether their own tooling had moved it. The actor is GitHub's login, so a
 session and its person both read as `@dpep`; that is why it informs the
-reader rather than gating a push, and the reasons above stand.
+reader rather than gating a push. What gates a push is the command the hook
+saw, never the login.
 
-What would change this: real use still showing sessions told about
-their own actions once the start rule is in — `gh pr close`, say, or a
-self-merge line that someone calls noise rather than a receipt — *and* the
-hook able to name the pull request those commands were about.
+What would change this: a session missing news it needed because a receipt
+claimed it — most likely a subagent's merge the parent never heard about.
 
 **What advancing on a successful push costs, stated plainly.** The socket
 sends no ack, so `Written` means the bytes reached a live socket and nothing
@@ -1094,15 +1124,15 @@ on record as having done does:
   it turned up again. A deleted reply is missed; a reaction that flaps (a
   dropped emoji, then back) still pushes its return, unfixed.
 
-This departs from "withholding a push from the session that caused the
-transition was considered and rejected" (above) for Slack only. Two of its
-reasons don't hold here: the hook names the Slack target exactly (channel and
-ts from the call and its result, not from how a command was spelled), and a
-post never fails silently into a later real transition, because a ts that was
-never posted never appears. The subagent objection does: a subagent shares
-its parent's session id, so a reply a subagent posted is a receipt for the
-parent too. GitHub comments keep the author rule (`@<viewer>`), with the
-same shared-identity flaw, unfixed here.
+Slack receipts came first, and the merge and transition receipts were later
+built on them (see [What a session did itself](#what-a-session-did-itself-is-a-receipt-not-a-push)).
+Here the hook names the target exactly (channel and ts from the call and its
+result, not from how a command was spelled), and a post never fails silently
+into a later real transition, because a ts that was never posted never
+appears. The subagent caveat holds: a subagent shares its parent's session
+id, so a reply a subagent posted is a receipt for the parent too. GitHub
+comments keep the author rule (`@<viewer>`), with the same shared-identity
+flaw, unfixed here.
 
 `slack.user_id` (or `whoami`, cached in `state.json`) is still read, lazily:
 it is how a channel message that @mentions the reader is recognized as a

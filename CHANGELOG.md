@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **A session isn't pushed what it just did.** When a session merges, closes, reopens, readies or
+  approves a pull request (`gh pr merge|close|reopen|ready`, `gh pr review --approve|--request-changes`)
+  or transitions a Jira issue (`acli jira workitem transition --key …`) that it watches, that
+  transition no longer starts a turn in it. It is still in `inkling events` (`own` in `--json`),
+  and everyone else watching is told. `gh pr merge --auto` is unchanged: that merge is pushed when
+  it lands. A merge a subagent runs counts as its parent's. Needs the `post-tool` hook.
+- **Upgrading:** the watch store moves to version 5 on its first write; nothing to do. A downgrade
+  refuses `watches.json` until this build is back.
+
 ## 0.4.1 — 2026-11-19
 
 - **Install with Homebrew**: `brew install dpep/tools/inkling`.
